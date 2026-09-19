@@ -488,9 +488,12 @@ impl BodyHasher<'_> {
                 self.expr(*value);
                 self.scope.binders.push(*name);
             }
-            Stmt::Assign { name, value } => {
+            Stmt::Assign { place, value } => {
                 self.encoder.tag(tag::ASSIGN);
-                self.name(*name);
+                // The place is an ordinary expression, so it encodes like
+                // one: `x = e` and `r.f = e` differ where they differ and
+                // nowhere else.
+                self.expr(*place);
                 self.expr(*value);
             }
             Stmt::Expr(value) => {
@@ -999,6 +1002,22 @@ mod tests {
         assert_ne!(
             body("fn f(x: int) -> int { borrow x as &r in { return 0; } return 1; }", "f"),
             body("fn f(x: int) -> int { borrow mut x as &!r in { return 0; } return 1; }", "f")
+        );
+    }
+
+    #[test]
+    fn an_assignments_place_reaches_the_body_hash() {
+        assert_ne!(
+            body("struct P { x: int, y: int } fn f(r: P) -> int { r.x = 1; return 0; }", "f"),
+            body("struct P { x: int, y: int } fn f(r: P) -> int { r.y = 1; return 0; }", "f")
+        );
+    }
+
+    #[test]
+    fn writing_through_a_reference_is_not_writing_a_local() {
+        assert_ne!(
+            body("struct P { x: int } fn f(r: P) -> int { r.x = 1; return 0; }", "f"),
+            body("struct P { x: int } fn f(r: P) -> int { r = P { x: 1 }; return 0; }", "f")
         );
     }
 

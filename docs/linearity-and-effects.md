@@ -6,15 +6,15 @@
 > now the specification the implementation is measured against; §12 lists what
 > is still open, and nothing there blocks the rest.
 >
-> **Implemented: §3 (modes), §4 (linearity), and §5's shared borrows** —
-> including the joins in §4.2, the back-edge rule in §4.3, the escape
-> occurs-check of §5 rule 4, and the outlives stack of §5.2 with its `where`
-> clauses. §11 marks each fixture row.
+> **Implemented: §3 (modes), §4 (linearity) and §5 (borrowing) in full** —
+> the joins in §4.2, the back-edge rule in §4.3, both borrow modes, the
+> escape occurs-check of §5 rule 4, and the outlives stack of §5.2 with its
+> `where` clauses. Every §11 row for those sections is a fixture that runs.
 >
-> **Not implemented: unique borrows** (`borrow mut`, `&!r`) — the syntax
-> parses and the checker refuses it rather than accepting a `&!` whose
-> uniqueness nothing enforces. **Nor §6 onward**: arenas, effects,
-> capabilities and the escape hatches are still design.
+> **Not implemented: §6 onward** — arenas, effects, capabilities and the
+> escape hatches are still design, and that is the other half of the thesis:
+> ownership works, and nothing yet shows it is the *same* system as
+> effects.
 >
 > Where the concrete syntax below differs from what was implemented, §5.3
 > says so and why. The syntax here was always illustrative (§1); the rules
@@ -471,9 +471,27 @@ chose differently, and why:
   `tests/reject/reference_escapes_via_inference.ls` is the second one, and it
   is not hypothetical.
 
+**A place is narrower than it looks.** Writing through a `&!r` needs
+somewhere to write *to*, and the left side of an assignment is a whole
+binding or a field reached through a unique reference — not a field of an
+owned local. `c.n = 2` on a local is refused: that is a partial write, and
+what a partial write means for a binding holding a `res` field is a question
+§4 does not answer. Assigning the whole value says the same thing and asks
+nothing new. The restriction is not load-bearing and can be lifted once §4
+has an answer.
+
 There is no `*r` yet: a reference to a struct is read with `.field`, which
 covers what §5's own examples do. A reference to a scalar can be made and
 passed and not otherwise read, which is a wart rather than a rule.
+
+**Locking is what makes the implementation cheap.** A reference is a pointer
+at a buffer the referent is spilled into for the block. A shared borrow needs
+no write-back, because the referent is frozen and the two cannot drift. A
+unique borrow reads the buffer back when the block closes — sound precisely
+because *nothing else may touch the value while it is locked*, so the buffer
+is the only version that moved. Two copies of one `&!r` are two copies of one
+pointer, so writes through them alias correctly rather than racing to be last
+writer.
 
 ---
 
@@ -810,8 +828,8 @@ rest are the sections not yet implemented.
 | `consume_in_loop.ls` | A loop body may not consume an outer binding | 4.3 | ✓ |
 | `reference_escapes_borrow.ls` | A block's result may not mention its region | 5 | ✓ |
 | `move_while_frozen.ls` | A frozen value may not be moved or consumed | 5 | ✓ |
-| `read_while_locked.ls` | A uniquely borrowed value may not be read | 5 | |
-| `two_unique_borrows.ls` | One unique borrow at a time | 5 | |
+| `read_while_locked.ls` | A uniquely borrowed value may not be read | 5 | ✓ |
+| `two_unique_borrows.ls` | One unique borrow at a time | 5 | ✓ |
 | `unrelated_regions.ls` | Sibling regions do not outlive each other | 5.2 | ✓ |
 | `region_param_unsatisfied.ls` | A declared `<=` must hold at the call site | 5.2 | ✓ |
 | `reference_escapes_arena.ls` | Nothing mentioning the arena's region escapes it | 6 | |
@@ -825,11 +843,14 @@ rest are the sections not yet implemented.
 | `capability_leaked.ls` | A capability must be released | 8.3 | |
 | `ffi_without_capability.ls` | A foreign call requires its `Ffi` capability | 8.4 | |
 
-§5 adds six must-reject fixtures beyond the table, for the rules §5.3
+§5 adds eight must-reject fixtures beyond the table, for the rules §5.3
 describes and for the syntax: `region_not_in_scope.ls`,
 `reference_escapes_via_inference.ls`, `assign_while_frozen.ls`,
-`borrow_after_move.ls`, `unique_borrow_not_yet.ls` and
-`borrow_mode_mismatch.ls`.
+`borrow_after_move.ls`, `borrow_mode_mismatch.ls`,
+`unique_borrow_of_frozen.ls`, `write_through_shared.ls` and
+`assign_field_of_local.ls`. Its accepting counterparts are
+`borrow_and_return.ls`, `two_shared_borrows.ls`, `nested_regions.ls` and
+`unique_borrow.ls`.
 
 §4.1's four accidental consumers and §3.1's instantiation rule add six more
 must-reject fixtures beyond the table — `res_discarded.ls`,
