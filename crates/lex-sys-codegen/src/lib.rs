@@ -436,8 +436,8 @@ mod tests {
     /// is exactly why the assertion covers both formats from any host.
     #[test]
     fn symbols_are_spelled_for_their_platform_and_prefixed_once() {
-        for (triple, prefix) in [("x86_64-unknown-linux-gnu", ""), ("x86_64-apple-darwin", "_")] {
-            let names = names(triple);
+        for (triple, prefix) in targets() {
+            let names = names(&triple);
             for base in ["main", "lexs_main", "lexs_shout", "putchar"] {
                 let expected = format!("{prefix}{base}");
                 assert!(
