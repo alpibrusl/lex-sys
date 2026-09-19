@@ -90,7 +90,7 @@ impl<'a> Parser<'a> {
         while self.peek().kind != TokenKind::RParen {
             let name = self.ident()?;
             self.expect(TokenKind::Colon)?;
-            let ty = self.type_ref()?;
+            let ty = self.type_expr()?;
             params.push(Param { name, ty });
             if !self.eat(TokenKind::Comma) {
                 break;
@@ -100,7 +100,7 @@ impl<'a> Parser<'a> {
 
         // M0 has no unit type, so every function states a return type.
         self.expect(TokenKind::Arrow)?;
-        let ret = self.type_ref()?;
+        let ret = self.type_expr()?;
 
         let (body, end) = self.block()?;
         Ok(self.ast.push_item(Item::Fn(FnDecl { name, params, ret, body }), start.to(end)))
@@ -111,15 +111,26 @@ impl<'a> Parser<'a> {
         Ok(self.ast.symbols.intern(self.text(tok)))
     }
 
-    fn type_ref(&mut self) -> Result<TypeRef, Diagnostic> {
-        let tok = self.expect(TokenKind::Ident)?;
-        match self.text(tok) {
-            "int" => Ok(TypeRef::Int),
-            other => Err(Diagnostic::new(
-                format!("unknown type `{other}` (M0 has one type: `int`)"),
-                tok.span,
-            )),
+    /// A written type: a name, optionally applied to arguments.
+    ///
+    /// The parser does not know which names are types. `int`, `Pair[int, bool]`
+    /// and `i32` all parse; only the last is an error, and saying so is the
+    /// checker's job.
+    fn type_expr(&mut self) -> Result<TypeId, Diagnostic> {
+        let tok = self.peek();
+        let name = self.ident()?;
+        let mut args = Vec::new();
+        let mut end = tok.span;
+        if self.eat(TokenKind::LBracket) {
+            while self.peek().kind != TokenKind::RBracket {
+                args.push(self.type_expr()?);
+                if !self.eat(TokenKind::Comma) {
+                    break;
+                }
+            }
+            end = self.expect(TokenKind::RBracket)?.span;
         }
+        Ok(self.ast.push_type(TypeExpr { name, args }, tok.span.to(end)))
     }
 
     // ---- statements ----------------------------------------------------
@@ -161,7 +172,7 @@ impl<'a> Parser<'a> {
         let mutable = kw.kind == TokenKind::Var;
         let name = self.ident()?;
         // The annotation is optional and can only be `int`; M1 gives it work to do.
-        let ty = if self.eat(TokenKind::Colon) { self.type_ref()? } else { TypeRef::Int };
+        let ty = if self.eat(TokenKind::Colon) { Some(self.type_expr()?) } else { None };
         self.expect(TokenKind::Eq)?;
         let value = self.expr()?;
         let end = self.expect(TokenKind::Semi)?.span;
@@ -224,6 +235,8 @@ impl<'a> Parser<'a> {
     /// Left-associative binary levels, lowest precedence first.
     fn binary_level(&mut self, level: usize) -> Result<ExprId, Diagnostic> {
         const LEVELS: &[&[(TokenKind, BinOp)]] = &[
+            &[(TokenKind::PipePipe, BinOp::Or)],
+            &[(TokenKind::AmpAmp, BinOp::And)],
             &[(TokenKind::EqEq, BinOp::Eq), (TokenKind::BangEq, BinOp::Ne)],
             &[
                 (TokenKind::Lt, BinOp::Lt),
@@ -256,6 +269,12 @@ impl<'a> Parser<'a> {
     }
 
     fn unary(&mut self) -> Result<ExprId, Diagnostic> {
+        if self.peek().kind == TokenKind::Bang {
+            let bang = self.bump();
+            let operand = self.unary()?;
+            let span = bang.span.to(self.ast.expr_span(operand));
+            return Ok(self.ast.push_expr(Expr::Unary { op: UnOp::Not, operand }, span));
+        }
         if self.peek().kind == TokenKind::Minus {
             let minus = self.bump();
             // `-9223372036854775808` is one literal, not a negated one: the
@@ -279,6 +298,10 @@ impl<'a> Parser<'a> {
                 self.bump();
                 let value = self.int_value(tok, false)?;
                 Ok(self.ast.push_expr(Expr::Int(value), tok.span))
+            }
+            TokenKind::True | TokenKind::False => {
+                self.bump();
+                Ok(self.ast.push_expr(Expr::Bool(tok.kind == TokenKind::True), tok.span))
             }
             TokenKind::Ident => {
                 let name = self.ident()?;
@@ -338,7 +361,7 @@ mod tests {
         let (ast, decl) = one_fn("fn add(a: int, b: int) -> int { return a + b; }");
         assert_eq!(ast.name_of(decl.name), "add");
         assert_eq!(decl.params.len(), 2);
-        assert_eq!(decl.ret, TypeRef::Int);
+        assert_eq!(ast.name_of(ast.ty(decl.ret).name), "int");
         assert_eq!(decl.body.stmts.len(), 1);
     }
 
@@ -349,6 +372,16 @@ mod tests {
         let Expr::Binary { op, rhs, .. } = ast.expr(*e) else { panic!() };
         assert_eq!(*op, BinOp::Add);
         assert!(matches!(ast.expr(*rhs), Expr::Binary { op: BinOp::Mul, .. }));
+    }
+
+    #[test]
+    fn logical_operators_bind_loosest_of_all() {
+        // `a < b && c < d` is `(a < b) && (c < d)`, and `||` is looser still.
+        let (ast, decl) = one_fn("fn f() -> bool { return 1 < 2 && 3 < 4 || false; }");
+        let Stmt::Return(e) = ast.stmt(decl.body.stmts[0]) else { panic!() };
+        let Expr::Binary { op: BinOp::Or, lhs, .. } = ast.expr(*e) else { panic!() };
+        let Expr::Binary { op: BinOp::And, lhs: inner, .. } = ast.expr(*lhs) else { panic!() };
+        assert!(matches!(ast.expr(*inner), Expr::Binary { op: BinOp::Lt, .. }));
     }
 
     #[test]
@@ -426,10 +459,37 @@ mod tests {
     }
 
     #[test]
-    fn unknown_types_are_refused_with_a_span() {
-        let err = parse("fn f() -> i32 { return 0; }").unwrap_err();
-        assert!(err.message.contains("unknown type `i32`"), "{}", err.message);
-        assert_eq!(err.span, crate::span::Span::new(10, 13));
+    fn an_unknown_type_name_parses_fine() {
+        // The parser does not know which types exist. `i32` is a perfectly good
+        // type *expression*; that it names nothing is for the checker to say,
+        // which is also the only place that knows what the names mean.
+        let (ast, decl) = one_fn("fn f() -> i32 { return 0; }");
+        assert_eq!(ast.name_of(ast.ty(decl.ret).name), "i32");
+        assert_eq!(ast.type_span(decl.ret), crate::span::Span::new(10, 13));
+    }
+
+    #[test]
+    fn a_type_may_take_arguments() {
+        let (ast, decl) = one_fn("fn f() -> Pair[int, bool] { return 0; }");
+        let ret = ast.ty(decl.ret);
+        assert_eq!(ast.name_of(ret.name), "Pair");
+        let args: Vec<&str> = ret.args.iter().map(|&a| ast.name_of(ast.ty(a).name)).collect();
+        assert_eq!(args, ["int", "bool"]);
+    }
+
+    #[test]
+    fn booleans_are_literals() {
+        let (ast, decl) = one_fn("fn f() -> bool { return !true; }");
+        let Stmt::Return(e) = ast.stmt(decl.body.stmts[0]) else { panic!() };
+        let Expr::Unary { op: UnOp::Not, operand } = ast.expr(*e) else { panic!() };
+        assert_eq!(ast.expr(*operand), &Expr::Bool(true));
+    }
+
+    #[test]
+    fn an_omitted_annotation_is_left_for_the_checker() {
+        let (ast, decl) = one_fn("fn f() -> int { let x: int = 1; let y = 2; return x + y; }");
+        let Stmt::Let { ty: Some(_), .. } = ast.stmt(decl.body.stmts[0]) else { panic!() };
+        let Stmt::Let { ty: None, .. } = ast.stmt(decl.body.stmts[1]) else { panic!() };
     }
 
     #[test]

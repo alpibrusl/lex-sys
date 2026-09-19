@@ -173,9 +173,18 @@ fn compile_to_ir(input: &Path) -> Result<lex_sys_ir::Program, Failure> {
     let ast = parse(&file.text).map_err(|d| refused(d.render(&file)))?;
     let program = lex_sys_ir::lower(&ast).map_err(|d| refused(d.render(&file)))?;
 
+    // `main` becomes the process entry point, so its shape is part of the
+    // contract with the C runtime rather than a matter of taste.
     if let Some(entry) = program.find("main") {
-        if program.func(entry).n_params != 0 {
+        let entry = program.func(entry);
+        if entry.n_params != 0 {
             return Err(refused(format!("{}: error: `main` takes no arguments", file.path)));
+        }
+        if entry.ret != lex_sys_types::Type::Int {
+            return Err(refused(format!(
+                "{}: error: `main` returns `int`, the process exit status",
+                file.path
+            )));
         }
     } else {
         return Err(refused(format!("{}: error: no `main` function", file.path)));

@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "crates/lex-sys-syntax",
+    "crates/lex-sys-types",
     "crates/lex-sys-ir",
     "crates/lex-sys-codegen",
     "crates/lex-sys",
@@ -16,5 +17,6 @@ publish = false
 
 [workspace.dependencies]
 lex-sys-syntax = { path = "crates/lex-sys-syntax" }
+lex-sys-types = { path = "crates/lex-sys-types" }
 lex-sys-ir = { path = "crates/lex-sys-ir" }
 lex-sys-codegen = { path = "crates/lex-sys-codegen" }

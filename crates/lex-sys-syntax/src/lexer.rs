@@ -18,11 +18,15 @@ pub enum TokenKind {
     Else,
     While,
     Return,
+    True,
+    False,
     // punctuation
     LParen,
     RParen,
     LBrace,
     RBrace,
+    LBracket,
+    RBracket,
     Comma,
     Semi,
     Colon,
@@ -39,6 +43,9 @@ pub enum TokenKind {
     Star,
     Slash,
     Percent,
+    Bang,
+    AmpAmp,
+    PipePipe,
     Eof,
 }
 
@@ -55,10 +62,14 @@ impl TokenKind {
             TokenKind::Else => "`else`",
             TokenKind::While => "`while`",
             TokenKind::Return => "`return`",
+            TokenKind::True => "`true`",
+            TokenKind::False => "`false`",
             TokenKind::LParen => "`(`",
             TokenKind::RParen => "`)`",
             TokenKind::LBrace => "`{`",
             TokenKind::RBrace => "`}`",
+            TokenKind::LBracket => "`[`",
+            TokenKind::RBracket => "`]`",
             TokenKind::Comma => "`,`",
             TokenKind::Semi => "`;`",
             TokenKind::Colon => "`:`",
@@ -75,6 +86,9 @@ impl TokenKind {
             TokenKind::Star => "`*`",
             TokenKind::Slash => "`/`",
             TokenKind::Percent => "`%`",
+            TokenKind::Bang => "`!`",
+            TokenKind::AmpAmp => "`&&`",
+            TokenKind::PipePipe => "`||`",
             TokenKind::Eof => "end of file",
         }
     }
@@ -139,6 +153,8 @@ pub fn tokenize(text: &str) -> Result<Vec<Token>, Diagnostic> {
         let next = bytes.get(i + 1).copied();
         let (kind, len) = match (b, next) {
             (b'-', Some(b'>')) => two(TokenKind::Arrow),
+            (b'&', Some(b'&')) => two(TokenKind::AmpAmp),
+            (b'|', Some(b'|')) => two(TokenKind::PipePipe),
             (b'=', Some(b'=')) => two(TokenKind::EqEq),
             (b'!', Some(b'=')) => two(TokenKind::BangEq),
             (b'<', Some(b'=')) => two(TokenKind::LtEq),
@@ -147,6 +163,8 @@ pub fn tokenize(text: &str) -> Result<Vec<Token>, Diagnostic> {
             (b')', _) => one(TokenKind::RParen),
             (b'{', _) => one(TokenKind::LBrace),
             (b'}', _) => one(TokenKind::RBrace),
+            (b'[', _) => one(TokenKind::LBracket),
+            (b']', _) => one(TokenKind::RBracket),
             (b',', _) => one(TokenKind::Comma),
             (b';', _) => one(TokenKind::Semi),
             (b':', _) => one(TokenKind::Colon),
@@ -158,6 +176,7 @@ pub fn tokenize(text: &str) -> Result<Vec<Token>, Diagnostic> {
             (b'*', _) => one(TokenKind::Star),
             (b'/', _) => one(TokenKind::Slash),
             (b'%', _) => one(TokenKind::Percent),
+            (b'!', _) => one(TokenKind::Bang),
             _ => {
                 let end = next_char_boundary(text, i);
                 return Err(Diagnostic::new(
@@ -191,6 +210,8 @@ fn keyword(s: &str) -> Option<TokenKind> {
         "else" => TokenKind::Else,
         "while" => TokenKind::While,
         "return" => TokenKind::Return,
+        "true" => TokenKind::True,
+        "false" => TokenKind::False,
         _ => return None,
     })
 }

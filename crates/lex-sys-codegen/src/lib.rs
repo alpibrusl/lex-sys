@@ -20,7 +20,24 @@ use cranelift_object::{ObjectBuilder, ObjectModule};
 use lex_sys_ir::{
     BinOp, Builtin, Callee, Expr, Func, FuncId as IrFuncId, Program, Stmt, terminates,
 };
+use lex_sys_types::Type;
 use target_lexicon::Triple;
+
+/// The machine type a lex-sys type is held in.
+///
+/// `bool` is an `i8` because that is what Cranelift's `icmp` produces, so a
+/// comparison *is* a `bool` with nothing to convert. M0 widened every
+/// comparison to `i64` and called it an `int`; the type system now says what
+/// was always true about the value.
+fn clif_type(ty: &Type) -> types::Type {
+    match ty {
+        Type::Int => types::I64,
+        Type::Bool => types::I8,
+        other => {
+            unreachable!("`{other:?}` reached the backend; the checker should have refused it")
+        }
+    }
+}
 
 /// Every lex-sys function is emitted under this prefix, so a program may define
 /// a function called `write` or `exit` without colliding with libc.
@@ -116,10 +133,10 @@ impl<'a> Emitter<'a> {
         for func in &self.program.funcs {
             let mut sig = self.module.make_signature();
             sig.call_conv = call_conv;
-            for _ in 0..func.n_params {
-                sig.params.push(AbiParam::new(types::I64));
+            for slot in &func.slots[..func.n_params as usize] {
+                sig.params.push(AbiParam::new(clif_type(slot)));
             }
-            sig.returns.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(clif_type(&func.ret)));
             let id = self
                 .module
                 .declare_function(&format!("{PREFIX}{}", func.name), Linkage::Local, &sig)
@@ -148,8 +165,14 @@ impl<'a> Emitter<'a> {
 
             {
                 let builder = FunctionBuilder::new(&mut ctx.func, &mut fb_ctx);
-                let mut body =
-                    BodyEmitter { builder, module: &mut self.module, declared: &declared, putchar };
+                let mut body = BodyEmitter {
+                    builder,
+                    module: &mut self.module,
+                    declared: &declared,
+                    putchar,
+                    func,
+                    next_var: func.n_slots(),
+                };
                 body.emit_func(func);
                 body.builder.finalize();
             }
@@ -208,6 +231,10 @@ struct BodyEmitter<'a, 'f> {
     module: &'a mut ObjectModule,
     declared: &'a [FuncId],
     putchar: FuncId,
+    func: &'a Func,
+    /// Slots occupy `0..n_slots`; temporaries the backend needs for its own
+    /// purposes are numbered above them.
+    next_var: u32,
 }
 
 impl<'a, 'f> BodyEmitter<'a, 'f> {
@@ -220,15 +247,16 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
         // Every slot is a Cranelift variable; the SSA builder turns them back
         // into values. Parameters take their incoming values, everything else
         // starts at zero so no path can observe an undefined slot.
-        for slot in 0..func.n_slots {
-            self.builder.declare_var(Variable::from_u32(slot), types::I64);
+        for (index, ty) in func.slots.iter().enumerate() {
+            self.builder.declare_var(Variable::from_u32(index as u32), clif_type(ty));
         }
         for slot in 0..func.n_params {
             let value = self.builder.block_params(entry)[slot as usize];
             self.builder.def_var(Variable::from_u32(slot), value);
         }
-        for slot in func.n_params..func.n_slots {
-            let zero = self.builder.ins().iconst(types::I64, 0);
+        for slot in func.n_params..func.n_slots() {
+            let ty = clif_type(&func.slots[slot as usize]);
+            let zero = self.builder.ins().iconst(ty, 0);
             self.builder.def_var(Variable::from_u32(slot), zero);
         }
 
@@ -236,7 +264,7 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
         if !terminated {
             // Unreachable in a well-formed program: lowering proved every path
             // returns. Emitted so the block is filled whatever happens.
-            let zero = self.builder.ins().iconst(types::I64, 0);
+            let zero = self.builder.ins().iconst(clif_type(&func.ret), 0);
             self.builder.ins().return_(&[zero]);
         }
     }
@@ -274,8 +302,9 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
         let else_block = self.builder.create_block();
         let merge = self.builder.create_block();
 
-        // `brif` tests the condition for non-zero. M0 has no `bool`; M1's type
-        // checker is what turns this convention into a type.
+        // The condition is an `i8` holding 0 or 1, which is what `brif` tests.
+        // M0 tested any integer for non-zero; the checker now guarantees a
+        // `bool` got here.
         self.builder.ins().brif(cond, then_block, &[], else_block, &[]);
 
         self.builder.switch_to_block(then_block);
@@ -296,7 +325,7 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
         if both_returned {
             // Nothing branches here. Fill it anyway: an empty block is not a
             // legal function, and this costs one instruction the linker drops.
-            let zero = self.builder.ins().iconst(types::I64, 0);
+            let zero = self.builder.ins().iconst(clif_type(&self.func.ret), 0);
             self.builder.ins().return_(&[zero]);
         }
         both_returned
@@ -326,11 +355,20 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
 
     fn expr(&mut self, expr: &Expr) -> Value {
         match expr {
-            Expr::Const(v) => self.builder.ins().iconst(types::I64, *v),
+            Expr::Int(v) => self.builder.ins().iconst(types::I64, *v),
+            Expr::Bool(v) => self.builder.ins().iconst(types::I8, i64::from(*v)),
             Expr::Load(slot) => self.builder.use_var(Variable::from_u32(slot.0)),
             Expr::Neg(inner) => {
                 let v = self.expr(inner);
                 self.builder.ins().ineg(v)
+            }
+            Expr::Not(inner) => {
+                // A `bool` is 0 or 1, so flipping the low bit is the negation.
+                let v = self.expr(inner);
+                self.builder.ins().bxor_imm(v, 1)
+            }
+            Expr::Bin { op, lhs, rhs } if op.is_short_circuit() => {
+                self.short_circuit(*op, lhs, rhs)
             }
             Expr::Bin { op, lhs, rhs } => {
                 let a = self.expr(lhs);
@@ -359,6 +397,40 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
         }
     }
 
+    /// `&&` and `||`, which are control flow rather than instructions: the
+    /// right operand must not be evaluated when the left already decides the
+    /// answer.
+    ///
+    /// The result travels in a variable rather than a block parameter, so this
+    /// reuses the same SSA construction the slots already use.
+    fn short_circuit(&mut self, op: BinOp, lhs: &Expr, rhs: &Expr) -> Value {
+        let result = Variable::from_u32(self.next_var);
+        self.next_var += 1;
+        self.builder.declare_var(result, types::I8);
+
+        let rhs_block = self.builder.create_block();
+        let merge = self.builder.create_block();
+
+        let a = self.expr(lhs);
+        // Short-circuiting means the answer is the left operand itself.
+        self.builder.def_var(result, a);
+        match op {
+            BinOp::And => self.builder.ins().brif(a, rhs_block, &[], merge, &[]),
+            BinOp::Or => self.builder.ins().brif(a, merge, &[], rhs_block, &[]),
+            other => unreachable!("`{other:?}` does not short-circuit"),
+        };
+
+        self.builder.switch_to_block(rhs_block);
+        self.builder.seal_block(rhs_block);
+        let b = self.expr(rhs);
+        self.builder.def_var(result, b);
+        self.builder.ins().jump(merge, &[]);
+
+        self.builder.switch_to_block(merge);
+        self.builder.seal_block(merge);
+        self.builder.use_var(result)
+    }
+
     fn binary(&mut self, op: BinOp, a: Value, b: Value) -> Value {
         let cc = match op {
             BinOp::Add => return self.builder.ins().iadd(a, b),
@@ -375,10 +447,11 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
             BinOp::Le => IntCC::SignedLessThanOrEqual,
             BinOp::Gt => IntCC::SignedGreaterThan,
             BinOp::Ge => IntCC::SignedGreaterThanOrEqual,
+            other => unreachable!("`{other:?}` is not an instruction"),
         };
-        let flag = self.builder.ins().icmp(cc, a, b);
-        // A comparison is an `int` that is 0 or 1 until M1 gives it a `bool`.
-        self.builder.ins().uextend(types::I64, flag)
+        // `icmp` yields an `i8` holding 0 or 1, which is exactly a `bool`.
+        // M0 widened this to `i64`; nothing needs widening now.
+        self.builder.ins().icmp(cc, a, b)
     }
 }
 

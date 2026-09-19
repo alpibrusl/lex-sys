@@ -43,6 +43,9 @@ error path for a *program* — only for the environment.
 
 ## The M0 surface
 
+> Historical: this is what M0 shipped. M1 adds `bool`, `&&`, `||` and `!`, and
+> the rules below are unchanged by it.
+
 One type (`int`, 64-bit signed), functions and calls, arithmetic, comparison,
 `if`/`else`, `while`, and `let`/`var` bindings. That is the whole language.
 
@@ -63,10 +66,14 @@ Rules M0 already enforces, because they were cheaper to write than to retrofit:
 | Scaffold | Why it exists | Replaced by |
 |---|---|---|
 | `putchar` as a compiler builtin | A program must be able to produce output before there is FFI | M2: a capability-gated foreign call. Output is an effect, and an effect must be granted |
-| Comparisons yield `int` (`0`/`1`) | M0 has no `bool` | M1: a real type, and conditions that require it |
-| `if`/`while` test "non-zero" | Same | M1 |
 | Wrapping arithmetic on `+`, `-`, `*` | Overflow semantics are still an open decision (#1) | M3: *Defined-behaviour arithmetic* |
 | `cc` as the linker | The C runtime supplies `_start` and libc | Much later; "no Rust" is reachable long before "no C" |
+
+Two entries have already left this table. M0 had comparisons yield `int` (`0`
+or `1`) and had `if`/`while` test any integer for non-zero, both because it had
+no `bool`. M1 introduced one, so a comparison has the type it always meant and
+a condition is required to be that type. The convention became a rule, which is
+the shape every scaffold above is meant to end in.
 
 Division is *not* on that list. `a / b` and `a % b` trap on a zero divisor and
 on `int::MIN / -1`. A trap is defined behaviour; C's answer here is not, and

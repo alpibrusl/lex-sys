@@ -38,6 +38,8 @@ id_type!(/// Index of a statement in [`Ast::stmts`].
     StmtId);
 id_type!(/// Index of an item in [`Ast::items`].
     ItemId);
+id_type!(/// Index of a written type in [`Ast::types`].
+    TypeId);
 id_type!(/// Index of an interned name in [`Interner`].
     Symbol);
 
@@ -77,20 +79,30 @@ impl Interner {
     }
 }
 
-/// The only type M0 has. Named so the parser can reject anything else with a
-/// located error rather than silently accepting a name it will never lower.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum TypeRef {
-    Int,
+/// A type as it was *written*, not as it resolves.
+///
+/// The parser does not know which types exist — `int` and `Option[int]` parse
+/// the same way, and deciding that `i32` names nothing is the checker's job,
+/// which is where the program's meaning lives. Arguments are a `Vec` so
+/// generics need no second syntax when they arrive.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct TypeExpr {
+    pub name: Symbol,
+    pub args: Vec<TypeId>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum UnOp {
     Neg,
+    Not,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum BinOp {
+    /// `&&` and `||` short-circuit: the right operand is not evaluated when
+    /// the left already decides the answer.
+    And,
+    Or,
     Add,
     Sub,
     Mul,
@@ -109,6 +121,7 @@ pub enum Expr {
     /// An integer literal, already parsed: the AST stores the value, not the
     /// spelling, so `007` and `7` are the same node.
     Int(i64),
+    Bool(bool),
     Name(Symbol),
     Unary {
         op: UnOp,
@@ -133,11 +146,12 @@ pub struct Block {
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Stmt {
-    /// `let x: int = e;` / `var x: int = e;`
+    /// `let x: int = e;` / `var x = e;` — the annotation is optional, and its
+    /// absence means the checker infers.
     Let {
         name: Symbol,
         mutable: bool,
-        ty: TypeRef,
+        ty: Option<TypeId>,
         value: ExprId,
     },
     /// `x = e;`
@@ -162,14 +176,14 @@ pub enum Stmt {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Param {
     pub name: Symbol,
-    pub ty: TypeRef,
+    pub ty: TypeId,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct FnDecl {
     pub name: Symbol,
     pub params: Vec<Param>,
-    pub ret: TypeRef,
+    pub ret: TypeId,
     pub body: Block,
 }
 
@@ -185,11 +199,13 @@ pub struct Ast {
     pub items: Vec<Item>,
     pub exprs: Vec<Expr>,
     pub stmts: Vec<Stmt>,
+    pub types: Vec<TypeExpr>,
     pub symbols: Interner,
 
     item_spans: Vec<Span>,
     expr_spans: Vec<Span>,
     stmt_spans: Vec<Span>,
+    type_spans: Vec<Span>,
 }
 
 impl Ast {
@@ -203,6 +219,12 @@ impl Ast {
         self.stmts.push(stmt);
         self.stmt_spans.push(span);
         StmtId(self.stmts.len() as u32 - 1)
+    }
+
+    pub fn push_type(&mut self, ty: TypeExpr, span: Span) -> TypeId {
+        self.types.push(ty);
+        self.type_spans.push(span);
+        TypeId(self.types.len() as u32 - 1)
     }
 
     pub fn push_item(&mut self, item: Item, span: Span) -> ItemId {
@@ -223,6 +245,10 @@ impl Ast {
         &self.items[id.index()]
     }
 
+    pub fn ty(&self, id: TypeId) -> &TypeExpr {
+        &self.types[id.index()]
+    }
+
     pub fn expr_span(&self, id: ExprId) -> Span {
         self.expr_spans[id.index()]
     }
@@ -233,6 +259,10 @@ impl Ast {
 
     pub fn item_span(&self, id: ItemId) -> Span {
         self.item_spans[id.index()]
+    }
+
+    pub fn type_span(&self, id: TypeId) -> Span {
+        self.type_spans[id.index()]
     }
 
     pub fn name_of(&self, sym: Symbol) -> &str {

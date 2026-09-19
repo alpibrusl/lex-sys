@@ -4,7 +4,7 @@
 
 fn main() -> int {
     let x = 97;
-    if 1 {
+    if true {
         let x = 98;
         putchar(x);
     }

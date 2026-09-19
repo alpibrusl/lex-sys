@@ -4,6 +4,7 @@ description = "The lex-sys bootstrap compiler CLI"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
 publish.workspace = true
 
 [[bin]]
@@ -13,4 +14,5 @@ path = "src/main.rs"
 [dependencies]
 lex-sys-syntax.workspace = true
 lex-sys-ir.workspace = true
+lex-sys-types.workspace = true
 lex-sys-codegen.workspace = true

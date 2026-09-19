@@ -1,6 +1,6 @@
 [package]
-name = "lex-sys-syntax"
-description = "Lexer, canonical-shaped AST and parser for lex-sys"
+name = "lex-sys-types"
+description = "Type representation and unification for lex-sys"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
