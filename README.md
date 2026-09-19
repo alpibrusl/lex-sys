@@ -72,7 +72,19 @@ Any larger gap early on is implementation maturity, not language design.
 
 ## Roadmap
 
-See the tracking epic for milestones, acceptance criteria and sequencing.
+Tracked in the epic: **[#1](https://github.com/alpibrusl/lex-sys/issues/1)** — milestones
+M0–M3 with acceptance criteria, sequencing, risks and open decisions.
+
+First actions:
+
+- [#2](https://github.com/alpibrusl/lex-sys/issues/2) — write `docs/linearity-and-effects.md`
+  (**blocking gate for M2**; the decision set that determines three months vs three years)
+- [#3](https://github.com/alpibrusl/lex-sys/issues/3) — M0: native hello world via Cranelift
+
+Beyond M3 the first real target is **`lex-os`** — production systems work, no rewrite
+risk. Self-hosting the lex-lang toolchain stays a *spike before a plan*: port
+`lex-ast`/`lex-vcs` canonical forms and verify byte-identical `OpId`/`SigId`/`StageId`
+over the existing ~136k-op corpus, then decide.
 
 ## Licence
 
