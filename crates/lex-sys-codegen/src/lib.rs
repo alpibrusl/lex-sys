@@ -20,7 +20,7 @@ use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_module::{FuncId, Linkage, Module, default_libcall_names};
 use cranelift_object::{ObjectBuilder, ObjectModule};
 use lex_sys_ir::{
-    Arm, BinOp, Builtin, Callee, Expr, Func, FuncId as IrFuncId, Program, Stmt, TypeInfo,
+    Arm, BinOp, Builtin, Callee, Expr, Func, FuncId as IrFuncId, Program, Slot, Stmt, TypeInfo,
     terminates,
 };
 use lex_sys_types::{DefId, Type};
@@ -42,7 +42,7 @@ use target_lexicon::Triple;
 /// comparison *is* a `bool` with nothing to convert. M0 widened every
 /// comparison to `i64` and called it an `int`; the type system now says what
 /// was always true about the value.
-fn leaves_into(ty: &Type, program: &Program, out: &mut Vec<types::Type>) {
+fn leaves_into(ty: &Type, program: &Program, pointer: types::Type, out: &mut Vec<types::Type>) {
     match ty {
         Type::Int => out.push(types::I64),
         Type::Bool => out.push(types::I8),
@@ -53,7 +53,7 @@ fn leaves_into(ty: &Type, program: &Program, out: &mut Vec<types::Type>) {
         Type::Named(def, args) => match program.type_info(*def) {
             TypeInfo::Struct { fields, .. } => {
                 for (_, field) in fields {
-                    leaves_into(&field.substitute(args), program, out);
+                    leaves_into(&field.substitute(args, &[]), program, pointer, out);
                 }
             }
             // An enum is a tag followed by *every* variant's payload, each in
@@ -66,25 +66,29 @@ fn leaves_into(ty: &Type, program: &Program, out: &mut Vec<types::Type>) {
                 out.push(types::I64);
                 for (_, payload) in variants {
                     for ty in payload {
-                        leaves_into(&ty.substitute(args), program, out);
+                        leaves_into(&ty.substitute(args, &[]), program, pointer, out);
                     }
                 }
             }
         },
+        // A reference is one pointer, whatever it points at. Regions are
+        // erased: which `borrow` block a reference came from is a fact the
+        // checker used and the machine has no use for.
+        Type::Ref { .. } => out.push(pointer),
         other => {
             unreachable!("`{other:?}` reached the backend; the checker should have refused it")
         }
     }
 }
 
-fn leaves(ty: &Type, program: &Program) -> Vec<types::Type> {
+fn leaves(ty: &Type, program: &Program, pointer: types::Type) -> Vec<types::Type> {
     let mut out = Vec::new();
-    leaves_into(ty, program, &mut out);
+    leaves_into(ty, program, pointer, &mut out);
     out
 }
 
-fn leaf_count(ty: &Type, program: &Program) -> u32 {
-    leaves(ty, program).len() as u32
+fn leaf_count(ty: &Type, program: &Program, pointer: types::Type) -> u32 {
+    leaves(ty, program, pointer).len() as u32
 }
 
 /// How many leaves a return value may have before it travels through memory.
@@ -97,8 +101,8 @@ const MAX_RETURN_LEAVES: usize = 2;
 
 /// Does a value of this type come back through memory rather than in
 /// registers?
-fn returns_indirectly(ty: &Type, program: &Program) -> bool {
-    leaf_count(ty, program) as usize > MAX_RETURN_LEAVES
+fn returns_indirectly(ty: &Type, program: &Program, pointer: types::Type) -> bool {
+    leaf_count(ty, program, pointer) as usize > MAX_RETURN_LEAVES
 }
 
 /// Byte offset of a leaf in an indirect return buffer.
@@ -208,16 +212,16 @@ impl<'a> Emitter<'a> {
             let mut sig = self.module.make_signature();
             sig.call_conv = call_conv;
             for slot in &func.slots[..func.n_params as usize] {
-                for leaf in leaves(slot, self.program) {
+                for leaf in leaves(slot, self.program, pointer) {
                     sig.params.push(AbiParam::new(leaf));
                 }
             }
-            if returns_indirectly(&func.ret, self.program) {
+            if returns_indirectly(&func.ret, self.program, pointer) {
                 // The caller allocates the buffer and passes its address
                 // first; nothing comes back in registers.
                 sig.params.insert(0, AbiParam::new(pointer));
             } else {
-                for leaf in leaves(&func.ret, self.program) {
+                for leaf in leaves(&func.ret, self.program, pointer) {
                     sig.returns.push(AbiParam::new(leaf));
                 }
             }
@@ -331,13 +335,13 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
         func: &'a Func,
         program: &'a Program,
     ) -> Self {
+        let pointer = module.isa().pointer_type();
         let mut slot_base = Vec::with_capacity(func.slots.len());
         let mut next_var = 0;
         for slot in &func.slots {
             slot_base.push(next_var);
-            next_var += leaf_count(slot, program);
+            next_var += leaf_count(slot, program, pointer);
         }
-        let pointer = module.isa().pointer_type();
         Self {
             builder,
             module,
@@ -374,7 +378,7 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
 
     /// Reserve a buffer big enough for a value of this type.
     fn return_buffer(&mut self, ty: &Type) -> Value {
-        let size = leaf_count(ty, self.program) * RETURN_SLOT_STRIDE as u32;
+        let size = leaf_count(ty, self.program, self.pointer) * RETURN_SLOT_STRIDE as u32;
         let slot = self.builder.create_sized_stack_slot(StackSlotData::new(
             StackSlotKind::ExplicitSlot,
             size,
@@ -404,14 +408,14 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
         // slot.
         for (index, ty) in func.slots.iter().enumerate() {
             let base = self.slot_base[index];
-            for (offset, leaf) in leaves(ty, self.program).into_iter().enumerate() {
+            for (offset, leaf) in leaves(ty, self.program, self.pointer).into_iter().enumerate() {
                 self.builder.declare_var(Variable::from_u32(base + offset as u32), leaf);
             }
         }
 
         // When the result travels through memory the address arrives first,
         // so every parameter leaf sits one position later.
-        let indirect = returns_indirectly(&func.ret, self.program);
+        let indirect = returns_indirectly(&func.ret, self.program, self.pointer);
         if indirect {
             self.return_pointer = Some(self.builder.block_params(entry)[0]);
         }
@@ -419,7 +423,7 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
 
         let param_leaves: u32 = func.slots[..func.n_params as usize]
             .iter()
-            .map(|ty| leaf_count(ty, self.program))
+            .map(|ty| leaf_count(ty, self.program, self.pointer))
             .sum();
         for index in 0..param_leaves {
             let value = self.builder.block_params(entry)[index as usize + shift];
@@ -427,7 +431,7 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
         }
         for (index, ty) in func.slots.iter().enumerate().skip(func.n_params as usize) {
             let base = self.slot_base[index];
-            for (offset, leaf) in leaves(ty, self.program).into_iter().enumerate() {
+            for (offset, leaf) in leaves(ty, self.program, self.pointer).into_iter().enumerate() {
                 let zero = self.builder.ins().iconst(leaf, 0);
                 self.builder.def_var(Variable::from_u32(base + offset as u32), zero);
             }
@@ -443,7 +447,7 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
 
     /// Return a zero of the function's return type, however many leaves it has.
     fn return_zero(&mut self) {
-        let zeros: Vec<Value> = leaves(&self.func.ret, self.program)
+        let zeros: Vec<Value> = leaves(&self.func.ret, self.program, self.pointer)
             .into_iter()
             .map(|leaf| self.builder.ins().iconst(leaf, 0))
             .collect();
@@ -488,6 +492,11 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
                     }
                 }
                 Stmt::While { cond, body } => self.while_stmt(cond, body),
+                Stmt::Borrow { referent, reference, body } => {
+                    if self.borrow_stmt(*referent, *reference, body) {
+                        return true;
+                    }
+                }
                 Stmt::Match { scrutinee, def, args, arms } => {
                     if self.match_stmt(scrutinee, *def, args, arms) {
                         return true;
@@ -496,6 +505,30 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
             }
         }
         false
+    }
+
+    /// `borrow x as &r in { .. }` — give `x` a home in memory and point at it.
+    ///
+    /// A reference has to be an address, and until now nothing did: a slot
+    /// lives in SSA variables, which have none. So the referent's leaves are
+    /// spilled into a buffer for the duration of the block and the reference
+    /// holds that buffer's address.
+    ///
+    /// Nothing is written back when the block closes, and nothing needs to
+    /// be: the checker froze the referent for the whole region, so the
+    /// variables and the buffer cannot have drifted apart. A unique borrow
+    /// will need the copy back, and the buffer is where it will come from.
+    fn borrow_stmt(&mut self, referent: Slot, reference: Slot, body: &[Stmt]) -> bool {
+        let ty = self.func.slots[referent.0 as usize].clone();
+        let buffer = self.return_buffer(&ty);
+        let base = self.slot_base[referent.0 as usize];
+        let count = leaf_count(&ty, self.program, self.pointer);
+        let values: Vec<Value> = (0..count)
+            .map(|offset| self.builder.use_var(Variable::from_u32(base + offset)))
+            .collect();
+        self.store_leaves(buffer, &values);
+        self.builder.def_var(Variable::from_u32(self.slot_base[reference.0 as usize]), buffer);
+        self.stmts(body)
     }
 
     fn if_stmt(&mut self, cond: &Expr, then_body: &[Stmt], else_body: &[Stmt]) -> bool {
@@ -560,7 +593,7 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
         let TypeInfo::Enum { variants, .. } = self.program.type_info(def) else {
             unreachable!("a variant of a struct should have been refused");
         };
-        let width = |ty: &Type| leaf_count(&ty.substitute(args), self.program);
+        let width = |ty: &Type| leaf_count(&ty.substitute(args, &[]), self.program, self.pointer);
         // One for the tag, then every earlier variant's payload.
         let mut offset = 1;
         for (_, payload) in &variants[..variant as usize] {
@@ -680,7 +713,8 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
             Expr::Bool(v) => vec![self.builder.ins().iconst(types::I8, i64::from(*v))],
             Expr::Load(slot) => {
                 let base = self.slot_base[slot.0 as usize];
-                let count = leaf_count(&self.func.slots[slot.0 as usize], self.program);
+                let count =
+                    leaf_count(&self.func.slots[slot.0 as usize], self.program, self.pointer);
                 (0..count)
                     .map(|offset| self.builder.use_var(Variable::from_u32(base + offset)))
                     .collect()
@@ -695,17 +729,52 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
                 };
                 let start: u32 = fields[..*index as usize]
                     .iter()
-                    .map(|(_, ty)| leaf_count(&ty.substitute(args), self.program))
+                    .map(|(_, ty)| {
+                        leaf_count(&ty.substitute(args, &[]), self.program, self.pointer)
+                    })
                     .sum();
-                let len = leaf_count(&fields[*index as usize].1.substitute(args), self.program);
+                let len = leaf_count(
+                    &fields[*index as usize].1.substitute(args, &[]),
+                    self.program,
+                    self.pointer,
+                );
                 values[start as usize..(start + len) as usize].to_vec()
+            }
+            // The same field arithmetic as `Expr::Field`, except the leaves
+            // are loaded out of the buffer the reference points at rather
+            // than picked out of leaves already in registers.
+            Expr::FieldRef { base, def, args, index } => {
+                let address = self.scalar(base);
+                let TypeInfo::Struct { fields, .. } = self.program.type_info(*def) else {
+                    unreachable!("a field access on an enum should have been refused");
+                };
+                let start: u32 = fields[..*index as usize]
+                    .iter()
+                    .map(|(_, ty)| {
+                        leaf_count(&ty.substitute(args, &[]), self.program, self.pointer)
+                    })
+                    .sum();
+                let kinds = leaves(
+                    &fields[*index as usize].1.substitute(args, &[]),
+                    self.program,
+                    self.pointer,
+                );
+                let offset = start as i32 * RETURN_SLOT_STRIDE;
+                kinds
+                    .iter()
+                    .enumerate()
+                    .map(|(i, kind)| {
+                        let at = offset + i as i32 * RETURN_SLOT_STRIDE;
+                        self.builder.ins().load(*kind, MemFlags::trusted(), address, at)
+                    })
+                    .collect()
             }
             Expr::Enum { def, args, variant, payload } => {
                 let whole = Type::Named(*def, args.clone());
                 let (offset, widths) = self.variant_layout(*def, args, *variant);
-                let total = leaf_count(&whole, self.program);
+                let total = leaf_count(&whole, self.program, self.pointer);
                 let payload: Vec<Vec<Value>> = payload.iter().map(|e| self.expr(e)).collect();
-                let all = leaves(&whole, self.program);
+                let all = leaves(&whole, self.program, self.pointer);
 
                 // The tag, then every variant's leaves. This variant's are the
                 // values just computed; the rest are zeroed, because a value
@@ -753,7 +822,7 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
                             .module
                             .declare_func_in_func(self.declared[id.0 as usize], self.builder.func);
 
-                        if !returns_indirectly(&ret, self.program) {
+                        if !returns_indirectly(&ret, self.program, self.pointer) {
                             let call = self.builder.ins().call(f, &args);
                             return self.builder.inst_results(call).to_vec();
                         }
@@ -765,7 +834,7 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
                         with_buffer.push(buffer);
                         with_buffer.extend(args);
                         self.builder.ins().call(f, &with_buffer);
-                        let kinds = leaves(&ret, self.program);
+                        let kinds = leaves(&ret, self.program, self.pointer);
                         self.load_leaves(buffer, &kinds)
                     }
                     Callee::Builtin(Builtin::PutChar) => {
@@ -909,6 +978,34 @@ mod tests {
     /// `main` is the only symbol the linker may bind from outside. Everything
     /// the program defines is local and carries the `lexs_` prefix, so a
     /// lex-sys function called `write` or `exit` cannot collide with libc's.
+    /// A borrowing program reaches real instruction selection on every target
+    /// we ship, not just the host's.
+    ///
+    /// `borrow` is the first thing in the language that needs an address:
+    /// `stack_addr` plus loads through a pointer, where a pointer's width is
+    /// the target's rather than a constant. Emitting for both formats is the
+    /// cheapest way to find out that the layout code disagrees with one.
+    ///
+    /// Only the host's architecture is reachable here, because Cranelift
+    /// builds one backend by default; aarch64 emission for this program was
+    /// checked by hand with `cranelift-codegen`'s `arm64` feature turned on,
+    /// and CI runs the whole suite natively on darwin-aarch64 anyway.
+    #[test]
+    fn a_borrow_lowers_on_every_target() {
+        const BORROWING: &str = "\
+            struct Wide { a: int, b: bool, c: int } \
+            fn look[&r](w: &r Wide) -> int { return w.a + w.c; } \
+            fn main() -> int { let w = Wide { a: 1, b: true, c: 2 }; \
+            borrow w as &r in { return look(r) - 3; } }";
+        for (triple, _) in targets() {
+            let ast = parse(BORROWING).expect("should parse");
+            let program = lower(&ast).expect("should lower");
+            let triple: Triple = triple.parse().expect("a valid triple");
+            compile_object_for(&program, "main", triple.clone())
+                .unwrap_or_else(|e| panic!("`{triple}` should emit: {e}"));
+        }
+    }
+
     #[test]
     fn only_the_entry_point_is_global() {
         for (triple, _) in targets() {

@@ -22,10 +22,11 @@
 //!    control flow today; M2 adds a live set to the same shape.
 
 use lex_sys_syntax::ast::{
-    self, Ast, Block, Expr as AstExpr, ExprId, Item, Stmt as AstStmt, StmtId, Symbol, TypeId,
+    self, Ast, Block, Expr as AstExpr, ExprId, Item, Stmt as AstStmt, StmtId, Symbol, TypeExpr,
+    TypeId,
 };
 use lex_sys_syntax::span::{Diagnostic, Span};
-use lex_sys_types::{DefId, Type, Unifier, UnifyError};
+use lex_sys_types::{DefId, Region, Type, Unifier, UnifyError};
 
 mod linear;
 
@@ -129,6 +130,18 @@ pub enum Expr {
     Int(i64),
     Bool(bool),
     Load(Slot),
+    /// `base.index`, where `base` is a *reference* rather than a value.
+    ///
+    /// The same shape as [`Expr::Field`] and for the same reason — the
+    /// backend owns where a field sits — except that it loads the field's
+    /// leaves out of the buffer the reference points at instead of picking
+    /// them out of leaves it already has.
+    FieldRef {
+        base: Box<Expr>,
+        def: DefId,
+        args: Vec<Type>,
+        index: u32,
+    },
     /// A struct value. Fields are in *declaration* order whatever order they
     /// were written in, so the backend never has to consult a name.
     Struct {
@@ -189,6 +202,17 @@ pub enum Stmt {
         def: DefId,
         args: Vec<Type>,
         arms: Vec<Arm>,
+    },
+    /// `borrow x as &r in { .. }` (§5).
+    ///
+    /// `referent` is spilled to a buffer for the duration and `reference`
+    /// holds a pointer at it. The referent is frozen for the whole block, so
+    /// nothing can change underneath the pointer and nothing has to be
+    /// written back when the block closes.
+    Borrow {
+        referent: Slot,
+        reference: Slot,
+        body: Vec<Stmt>,
     },
     Return(Expr),
 }
@@ -274,6 +298,10 @@ pub fn terminates(body: &[Stmt]) -> bool {
         // A `match` reaching here is exhaustive -- the checker refuses any
         // other kind -- so if every arm returns, so does the match.
         Some(Stmt::Match { arms, .. }) => arms.iter().all(|arm| terminates(&arm.body)),
+        // A `borrow` block runs unconditionally, exactly once, so it
+        // terminates when its body does. Unlike a `while`, there is no
+        // question of whether it is entered.
+        Some(Stmt::Borrow { body, .. }) => terminates(body),
         _ => false,
     }
 }
@@ -281,6 +309,11 @@ pub fn terminates(body: &[Stmt]) -> bool {
 /// A function's signature: what a caller is checked against, and all a caller
 /// is ever checked against.
 struct Signature {
+    /// Region parameters, in declaration order; `Region::Param(i)` is the
+    /// `i`th. Not part of monomorphisation: see `lower_function`.
+    regions: Vec<Symbol>,
+    /// `where a <= b` as indices into `regions`, meaning `b` outlives `a`.
+    outlives: Vec<(u32, u32)>,
     name: Symbol,
     /// Type parameters in declaration order; `Type::Param(i)` is the `i`th.
     generics: Vec<Symbol>,
@@ -466,7 +499,7 @@ fn collect_types(ast: &Ast, unifier: &mut Unifier) -> Result<Vec<TypeDef>, Diagn
                         ));
                     }
                     let generics = defs[position].generics.clone();
-                    fields.push((field.name, resolve_type(ast, &defs, &generics, field.ty)?));
+                    fields.push((field.name, resolve_type(ast, &defs, &generics, &[], field.ty)?));
                 }
                 defs[position].kind = DefKind::Struct(fields);
             }
@@ -498,7 +531,7 @@ fn collect_types(ast: &Ast, unifier: &mut Unifier) -> Result<Vec<TypeDef>, Diagn
                     let payload = variant
                         .payload
                         .iter()
-                        .map(|ty| resolve_type(ast, &defs, &generics, *ty))
+                        .map(|ty| resolve_type(ast, &defs, &generics, &[], *ty))
                         .collect::<Result<Vec<_>, _>>()?;
                     variants.push((variant.name, payload));
                 }
@@ -571,6 +604,28 @@ pub fn lower(ast: &Ast) -> Result<Program, Diagnostic> {
             return Err(Diagnostic::new(format!("function `{name}` is defined twice"), span));
         }
         check_generic_names(ast, &decl.generics, span)?;
+        let region_scope = check_region_names(ast, &decl.regions, &decl.generics, span)?;
+
+        // `where a <= b` names two region parameters, resolved to their
+        // positions so the relation is integers from here on (§5.2).
+        let mut outlives = Vec::new();
+        for (inner, outer) in &decl.outlives {
+            let position = |sym: &Symbol| decl.regions.iter().position(|r| r == sym);
+            let (Some(a), Some(b)) = (position(inner), position(outer)) else {
+                let missing = if position(inner).is_none() {
+                    ast.name_of(*inner)
+                } else {
+                    ast.name_of(*outer)
+                };
+                return Err(Diagnostic::new(
+                    format!(
+                        "`{missing}` is not a region parameter of `{name}`; a `where` clause relates the regions the declaration takes"
+                    ),
+                    span,
+                ));
+            };
+            outlives.push((a as u32, b as u32));
+        }
 
         let mut seen: Vec<Symbol> = Vec::new();
         let mut params = Vec::new();
@@ -582,13 +637,15 @@ pub fn lower(ast: &Ast) -> Result<Program, Diagnostic> {
                 ));
             }
             seen.push(param.name);
-            params.push(resolve_type(ast, &defs, &decl.generics, param.ty)?);
+            params.push(resolve_type(ast, &defs, &decl.generics, &region_scope, param.ty)?);
         }
 
-        let ret = resolve_type(ast, &defs, &decl.generics, decl.ret)?;
+        let ret = resolve_type(ast, &defs, &decl.generics, &region_scope, decl.ret)?;
         signatures.push(Signature {
             name: decl.name,
             generics: decl.generics.clone(),
+            regions: decl.regions.clone(),
+            outlives,
             params,
             ret,
             item: index,
@@ -677,6 +734,7 @@ fn settle_types(stmts: &mut [Stmt], unifier: &Unifier) {
                 settle_expr(cond, unifier);
                 settle_types(body, unifier);
             }
+            Stmt::Borrow { body, .. } => settle_types(body, unifier),
             Stmt::Match { scrutinee, args, arms, .. } => {
                 settle_expr(scrutinee, unifier);
                 for arg in args.iter_mut() {
@@ -706,6 +764,12 @@ fn settle_expr(expr: &mut Expr, unifier: &Unifier) {
         Expr::Struct { fields, .. } => {
             for field in fields {
                 settle_expr(field, unifier);
+            }
+        }
+        Expr::FieldRef { base, args, .. } => {
+            settle_expr(base, unifier);
+            for arg in args.iter_mut() {
+                *arg = unifier.resolve(arg);
             }
         }
         Expr::Field { base, args, .. } => {
@@ -740,12 +804,24 @@ fn lower_function(
         unreachable!("a signature always names a function");
     };
 
-    let params: Vec<Type> = signature.params.iter().map(|t| t.substitute(args)).collect();
-    let ret = signature.ret.substitute(args);
+    // Regions are *not* substituted here and a function is not copied per
+    // region: a reference is a pointer and has no idea which block it came
+    // from, so there is nothing to specialise. Region parameters stay rigid
+    // inside the body and are instantiated at each call site instead (§5.1).
+    let params: Vec<Type> = signature.params.iter().map(|t| t.substitute(args, &[])).collect();
+    let ret = signature.ret.substitute(args, &[]);
 
     // So a diagnostic inside this body says `T` rather than `T0`.
     unifier
         .set_param_names(signature.generics.iter().map(|g| ast.name_of(*g).to_owned()).collect());
+    unifier.set_region_param_names(
+        signature.regions.iter().map(|g| ast.name_of(*g).to_owned()).collect(),
+    );
+    // Every `borrow` block in this body gets its name here as it is entered;
+    // the list is indexed by block id and never shrinks, so a diagnostic can
+    // still name a region whose block has closed -- which is exactly the
+    // case an escape diagnostic has to talk about.
+    unifier.set_region_block_names(Vec::new());
 
     let mut f = FnLowering {
         ast,
@@ -757,6 +833,17 @@ fn lower_function(
         generics: args.to_vec(),
         scopes: vec![Vec::new()],
         slots: Vec::new(),
+        region_params: signature
+            .regions
+            .iter()
+            .enumerate()
+            .map(|(i, name)| (*name, Region::Param(i as u32)))
+            .collect(),
+        region_outlives: signature.outlives.clone(),
+        blocks: Vec::new(),
+        open_blocks: Vec::new(),
+        slot_scope: Vec::new(),
+        slot_origin: Vec::new(),
         ret: ret.clone(),
         trace: Trace::new(),
     };
@@ -769,7 +856,21 @@ fn lower_function(
     }
     let mut body = f.block(&decl.body)?;
     let mut slots = f.slots.clone();
+    let escapes = f.escaped_slot();
     let trace = f.trace.finish();
+
+    // §5 rule 4, over every binding rather than only the ones that return: a
+    // slot's type may name a `borrow` block only if that block was open when
+    // the slot was declared. One traversal of one type per slot, which is
+    // what "escape is an occurs-check" buys.
+    if let Some((name, region, span)) = escapes {
+        return Err(Diagnostic::new(
+            format!(
+                "`{name}` would hold a reference into `{region}`, which is a `borrow` block it outlives"
+            ),
+            span,
+        ));
+    }
 
     settle_types(&mut body, unifier);
     for slot in slots.iter_mut() {
@@ -832,6 +933,40 @@ fn lower_function(
     })
 }
 
+/// A declaration's region parameters must be distinct and must not collide
+/// with its type parameters, returning the scope a type in the signature is
+/// resolved against.
+///
+/// Regions and types live in separate namespaces as far as the checker is
+/// concerned -- one can never be written where the other is expected -- but
+/// letting `fn f[T, &T]` through would make every diagnostic about it a
+/// riddle, so it is refused.
+fn check_region_names(
+    ast: &Ast,
+    regions: &[Symbol],
+    generics: &[Symbol],
+    span: Span,
+) -> Result<Vec<(Symbol, Region)>, Diagnostic> {
+    let mut scope = Vec::with_capacity(regions.len());
+    for (index, name) in regions.iter().enumerate() {
+        let text = ast.name_of(*name);
+        if scope.iter().any(|(seen, _)| seen == name) {
+            return Err(Diagnostic::new(
+                format!("region parameter `{text}` is declared twice"),
+                span,
+            ));
+        }
+        if generics.contains(name) {
+            return Err(Diagnostic::new(
+                format!("`{text}` is both a type parameter and a region parameter here"),
+                span,
+            ));
+        }
+        scope.push((*name, Region::Param(index as u32)));
+    }
+    Ok(scope)
+}
+
 /// A declaration's type parameters must be distinct and must not shadow a
 /// built-in type name.
 fn check_generic_names(ast: &Ast, generics: &[Symbol], span: Span) -> Result<(), Diagnostic> {
@@ -865,19 +1000,45 @@ fn resolve_type(
     ast: &Ast,
     defs: &[TypeDef],
     generics: &[Symbol],
+    regions: &[(Symbol, Region)],
     id: TypeId,
 ) -> Result<Type, Diagnostic> {
-    let written = ast.ty(id);
-    let name = ast.name_of(written.name);
     let span = ast.type_span(id);
 
-    let args = written
-        .args
+    // `&r T`: the region must already be in scope. A name that is not a
+    // region parameter of this declaration and not a `borrow` block open
+    // around this type is simply not a region, which is the first half of
+    // §5's escape example -- `fn escape(f: File) -> &r File` names an `r`
+    // that exists nowhere.
+    if let TypeExpr::Ref { unique, region, inner } = ast.ty(id) {
+        let text = ast.name_of(*region);
+        let Some((_, found)) = regions.iter().rev().find(|(name, _)| name == region) else {
+            return Err(Diagnostic::new(
+                format!(
+                    "`{text}` is not a region in scope; a region comes from a `[&{text}]` parameter or a `borrow` block"
+                ),
+                span,
+            ));
+        };
+        return Ok(Type::Ref {
+            unique: *unique,
+            region: *found,
+            inner: Box::new(resolve_type(ast, defs, generics, regions, *inner)?),
+        });
+    }
+
+    let TypeExpr::Name { name: written_name, args: written_args } = ast.ty(id) else {
+        unreachable!("a reference was handled above");
+    };
+    let (written_name, written_args) = (*written_name, written_args.clone());
+    let name = ast.name_of(written_name);
+
+    let args = written_args
         .iter()
-        .map(|arg| resolve_type(ast, defs, generics, *arg))
+        .map(|arg| resolve_type(ast, defs, generics, regions, *arg))
         .collect::<Result<Vec<_>, _>>()?;
 
-    if let Some(index) = generics.iter().position(|g| *g == written.name) {
+    if let Some(index) = generics.iter().position(|g| *g == written_name) {
         if !args.is_empty() {
             return Err(Diagnostic::new(
                 format!("type parameter `{name}` takes no type arguments"),
@@ -890,7 +1051,7 @@ fn resolve_type(
     let (ty, arity) = match name {
         "int" => (Type::Int, 0),
         "bool" => (Type::Bool, 0),
-        other => match defs.iter().find(|d| d.name == written.name) {
+        other => match defs.iter().find(|d| d.name == written_name) {
             Some(def) => (Type::Named(def.def, args.clone()), def.generics.len()),
             None => return Err(Diagnostic::new(format!("unknown type `{other}`"), span)),
         },
@@ -914,6 +1075,16 @@ fn resolve_type(
     Ok(ty)
 }
 
+/// One `borrow` block, and the block it sits inside.
+///
+/// The parent link is all §5.2 needs: "`r_inner <= r_outer` holds exactly
+/// when `r_outer`'s block lexically encloses `r_inner`'s", which is a walk up
+/// this chain. O(depth), no fixpoint, and total because a chain has an end.
+struct BorrowBlock {
+    name: Symbol,
+    parent: Option<u32>,
+}
+
 struct Binding {
     name: Symbol,
     slot: Slot,
@@ -934,6 +1105,26 @@ struct FnLowering<'a> {
     generics: Vec<Type>,
     scopes: Vec<Vec<Binding>>,
     slots: Vec<Type>,
+    /// The region parameters of this function, so a written `&r` in the body
+    /// resolves to the same `Region::Param` the signature used...
+    region_params: Vec<(Symbol, Region)>,
+    /// ...and the declared `a <= b` pairs, which the body may assume.
+    region_outlives: Vec<(u32, u32)>,
+    /// Every `borrow` block in this body, in the order they were entered.
+    /// `Region::Block(i)` is an index here, so two *sibling* blocks are two
+    /// different regions even though they nest to the same depth -- which
+    /// depth alone could not tell apart, and §5.2's sibling case is exactly
+    /// that.
+    blocks: Vec<BorrowBlock>,
+    /// The ids of the blocks open right now, outermost first.
+    open_blocks: Vec<u32>,
+    /// For each slot, the innermost `borrow` block open when it was declared.
+    /// A slot's type may mention that block and its ancestors, and nothing
+    /// else: that is §5 rule 4, the escape occurs-check.
+    slot_scope: Vec<Option<u32>>,
+    /// The name and span each slot was declared with, for that check's
+    /// diagnostic. A slot the backend made for itself has no name.
+    slot_origin: Vec<(Option<Symbol>, Span)>,
     ret: Type,
     /// What the linearity checker replays once the types are settled
     /// (`linear.rs`). Recorded here because this is where the spans are.
@@ -943,6 +1134,7 @@ struct FnLowering<'a> {
 impl<'a> FnLowering<'a> {
     fn declare(&mut self, name: Symbol, ty: Type, mutable: bool, span: Span) -> Slot {
         let slot = self.temp(ty.clone());
+        self.slot_origin[slot.0 as usize] = (Some(name), span);
         self.scopes.last_mut().expect("a scope is always open").push(Binding {
             name,
             slot,
@@ -959,6 +1151,8 @@ impl<'a> FnLowering<'a> {
     fn temp(&mut self, ty: Type) -> Slot {
         let slot = Slot(self.slots.len() as u32);
         self.slots.push(ty);
+        self.slot_scope.push(self.open_blocks.last().copied());
+        self.slot_origin.push((None, Span::new(0, 0)));
         slot
     }
 
@@ -972,9 +1166,110 @@ impl<'a> FnLowering<'a> {
 
     /// A type as written inside this body: resolved against the function's own
     /// type parameters, then substituted with what they were instantiated at.
+    ///
+    /// Regions in scope are the function's own parameters plus every
+    /// `borrow` block open here, innermost last so an inner block shadows an
+    /// outer one of the same name.
     fn written_type(&self, id: TypeId) -> Result<Type, Diagnostic> {
-        let resolved = resolve_type(self.ast, self.defs, &self.generic_names, id)?;
-        Ok(resolved.substitute(&self.generics))
+        let mut regions = self.region_params.clone();
+        for id in &self.open_blocks {
+            regions.push((self.blocks[*id as usize].name, Region::Block(*id)));
+        }
+        let resolved = resolve_type(self.ast, self.defs, &self.generic_names, &regions, id)?;
+        Ok(resolved.substitute(&self.generics, &[]))
+    }
+
+    /// Does `outer` outlive `inner` (§5.2)?
+    ///
+    /// Three cases, and each is a lookup rather than a solve:
+    ///
+    /// * two blocks — the outer one has the smaller depth, because nesting is
+    ///   a stack and a stack is a total order;
+    /// * a block against a region parameter — the parameter was open before
+    ///   the body started, so it outlives every block in it and no block
+    ///   outlives it;
+    /// * two parameters — whatever the declaration's `where` clauses say,
+    ///   reflexively and transitively.
+    ///
+    /// O(depth), no fixpoint, and total.
+    fn outlives(&self, outer: Region, inner: Region) -> bool {
+        match (outer, inner) {
+            (a, b) if a == b => true,
+            (Region::Block(a), Region::Block(b)) => self.encloses(a, b),
+            (Region::Param(_), Region::Block(_)) => true,
+            (Region::Block(_), Region::Param(_)) => false,
+            (Region::Param(a), Region::Param(b)) => {
+                // Walk the declared pairs from `b` outwards. The set of
+                // parameters is tiny and the visited set makes a cyclic
+                // `where` terminate rather than being an error of its own.
+                let mut stack = vec![b];
+                let mut seen = vec![b];
+                while let Some(current) = stack.pop() {
+                    if current == a {
+                        return true;
+                    }
+                    for (i, o) in &self.region_outlives {
+                        if *i == current && !seen.contains(o) {
+                            seen.push(*o);
+                            stack.push(*o);
+                        }
+                    }
+                }
+                false
+            }
+            // A region variable reaching here means a call site left one
+            // unsolved, which `expect_type` reports where it can say more.
+            _ => false,
+        }
+    }
+
+    /// Does block `outer` lexically enclose block `inner`?
+    fn encloses(&self, outer: u32, inner: u32) -> bool {
+        let mut current = Some(inner);
+        while let Some(id) = current {
+            if id == outer {
+                return true;
+            }
+            current = self.blocks[id as usize].parent;
+        }
+        false
+    }
+
+    /// The first binding whose type mentions a region it outlives, if any.
+    ///
+    /// Run once the body is walked and the types are settled: a slot's type
+    /// is fixed at its declaration, so the only way it can name a block is if
+    /// inference put it there.
+    fn escaped_slot(&self) -> Option<(String, String, Span)> {
+        for (index, ty) in self.slots.iter().enumerate() {
+            let mut mentioned = Vec::new();
+            self.unifier.resolve(ty).regions_into(&mut mentioned);
+            for region in mentioned {
+                let Region::Block(id) = region else { continue };
+                if self.in_scope(region, self.slot_scope[index]) {
+                    continue;
+                }
+                let (name, span) = self.slot_origin[index];
+                let name =
+                    name.map_or_else(|| "a value".to_owned(), |n| self.ast.name_of(n).to_owned());
+                return Some((
+                    name,
+                    self.ast.name_of(self.blocks[id as usize].name).to_owned(),
+                    span,
+                ));
+            }
+        }
+        None
+    }
+
+    /// Is `region` nameable from inside `scope`, the innermost block open
+    /// where a slot was declared?
+    fn in_scope(&self, region: Region, scope: Option<u32>) -> bool {
+        match region {
+            Region::Block(id) => scope.is_some_and(|inner| self.encloses(id, inner)),
+            // A region parameter is open for the whole body.
+            _ => true,
+        }
     }
 
     /// Fresh inference variables, one per type parameter of a declaration.
@@ -982,8 +1277,70 @@ impl<'a> FnLowering<'a> {
         (0..count).map(|_| self.unifier.fresh()).collect()
     }
 
-    /// Require two types to be equal, reporting the failure at `span`.
+    /// Require `found` to be usable where `expected` is wanted, reporting the
+    /// failure at `span`.
+    ///
+    /// Equality, with §5.2's single coercion on top: a reference whose region
+    /// *outlives* the expected one is accepted, because it is valid for at
+    /// least as long as it needs to be. Nothing else coerces, and the
+    /// referent is invariant -- "`T` never changes".
     fn expect_type(&mut self, expected: &Type, found: &Type, span: Span) -> Result<(), Diagnostic> {
+        let want = self.unifier.shallow(expected);
+        let got = self.unifier.shallow(found);
+        if let (
+            Type::Ref { unique: want_unique, region: want_region, inner: want_inner },
+            Type::Ref { unique: got_unique, region: got_region, inner: got_inner },
+        ) = (&want, &got)
+            && want_unique == got_unique
+        {
+            let wanted = self.unifier.resolve_region(*want_region);
+            let given = self.unifier.resolve_region(*got_region);
+            if wanted.is_var() || given.is_var() {
+                // One side is a call site's fresh region: there is nothing to
+                // compare yet, so solve it. That is §5.1's instantiation.
+                self.unify_regions_at(wanted, given, span)?;
+            } else if !self.outlives(given, wanted) {
+                return Err(Diagnostic::new(
+                    format!(
+                        "`{}` does not outlive `{}`, so a reference valid for the first cannot be used where the second is expected",
+                        self.unifier.display_region(given),
+                        self.unifier.display_region(wanted)
+                    ),
+                    span,
+                ));
+            }
+            let (want_inner, got_inner) = (want_inner.clone(), got_inner.clone());
+            return self.expect_exact(&want_inner, &got_inner, span);
+        }
+        self.expect_exact(&want, &got, span)
+    }
+
+    fn unify_regions_at(
+        &mut self,
+        expected: Region,
+        found: Region,
+        span: Span,
+    ) -> Result<(), Diagnostic> {
+        match self.unifier.unify_regions(expected, found) {
+            Ok(()) => Ok(()),
+            Err(_) => Err(Diagnostic::new(
+                format!(
+                    "`{}` and `{}` are different regions",
+                    self.unifier.display_region(expected),
+                    self.unifier.display_region(found)
+                ),
+                span,
+            )),
+        }
+    }
+
+    /// Plain equality, with no coercion anywhere inside.
+    fn expect_exact(
+        &mut self,
+        expected: &Type,
+        found: &Type,
+        span: Span,
+    ) -> Result<(), Diagnostic> {
         match self.unifier.unify(expected, found) {
             Ok(()) => Ok(()),
             Err(UnifyError::Mismatch { expected, found }) => Err(Diagnostic::new(
@@ -996,6 +1353,24 @@ impl<'a> FnLowering<'a> {
             )),
             Err(UnifyError::Infinite { ty, .. }) => Err(Diagnostic::new(
                 format!("this would build an infinite type, `{}`", self.unifier.display(&ty)),
+                span,
+            )),
+            // Two references from different `borrow` blocks, neither of which
+            // encloses the other: §5.2's sibling case.
+            Err(UnifyError::Regions { expected, found }) => Err(Diagnostic::new(
+                format!(
+                    "`{}` and `{}` are different regions, and neither outlives the other",
+                    self.unifier.display_region(expected),
+                    self.unifier.display_region(found)
+                ),
+                span,
+            )),
+            Err(UnifyError::Uniqueness { expected }) => Err(Diagnostic::new(
+                if expected {
+                    "expected a unique reference `&!`, found a shared one `&`"
+                } else {
+                    "expected a shared reference `&`, found a unique one `&!`"
+                },
                 span,
             )),
         }
@@ -1126,8 +1501,29 @@ impl<'a> FnLowering<'a> {
                 Stmt::While { cond, body }
             }
             AstStmt::Match { scrutinee, arms } => self.match_stmt(*scrutinee, arms, span)?,
+            AstStmt::Borrow { value, unique, region, body } => {
+                self.borrow_stmt(*value, *unique, *region, body, span)?
+            }
             AstStmt::Return(e) => {
                 let (value, found) = self.expr(*e)?;
+                // §5 rule 4, at the one place a value can leave a region: a
+                // return type names only the function's own region
+                // parameters, so a reference into a `borrow` block here is an
+                // escape. Checked before the types are compared, because
+                // "`r` does not outlive `q`" is a worse way to say it.
+                let mut mentioned = Vec::new();
+                self.unifier.resolve(&found).regions_into(&mut mentioned);
+                if let Some(Region::Block(id)) =
+                    mentioned.into_iter().find(|r| matches!(r, Region::Block(_)))
+                {
+                    return Err(Diagnostic::new(
+                        format!(
+                            "this returns a reference into `{}`, which is a `borrow` block in this function; a reference may not outlive its region",
+                            self.ast.name_of(self.blocks[id as usize].name)
+                        ),
+                        self.ast.expr_span(*e),
+                    ));
+                }
                 let ret = self.ret.clone();
                 self.expect_type(&ret, &found, self.ast.expr_span(*e))?;
                 self.trace.emit(Event::Return { span });
@@ -1212,7 +1608,7 @@ impl<'a> FnLowering<'a> {
         let whole = self.temp(Type::Named(def_id, type_args.clone()));
         let mut out = vec![Stmt::Store { slot: whole, value }];
         for (field, index) in fields.iter().zip(order) {
-            let ty = declared[index].1.substitute(&type_args);
+            let ty = declared[index].1.substitute(&type_args, &[]);
             let slot = self.declare(*field, ty, false, span);
             out.push(Stmt::Store {
                 slot,
@@ -1225,6 +1621,58 @@ impl<'a> FnLowering<'a> {
             });
         }
         Ok(out)
+    }
+
+    /// `borrow x as &r in { .. }` (§5).
+    ///
+    /// Freezes `x` for the block and binds a reference to it. The region and
+    /// the reference share the name `r`, which is how §5 writes it: `r` is
+    /// the region in a type and the reference in an expression, and the two
+    /// namespaces never meet.
+    fn borrow_stmt(
+        &mut self,
+        value: Symbol,
+        unique: bool,
+        region: Symbol,
+        body: &Block,
+        span: Span,
+    ) -> Result<Stmt, Diagnostic> {
+        if unique {
+            return Err(Diagnostic::new(
+                "`borrow mut` is not implemented yet; this slice has shared borrows, and unique ones are the rest of §5",
+                span,
+            ));
+        }
+
+        let text = self.ast.name_of(value);
+        let Some(binding) = self.lookup(value) else {
+            return Err(Diagnostic::new(format!("`{text}` is not bound here"), span));
+        };
+        let (referent, referent_ty) = (binding.slot, binding.ty.clone());
+
+        let id = self.blocks.len() as u32;
+        self.blocks.push(BorrowBlock { name: region, parent: self.open_blocks.last().copied() });
+        self.open_blocks.push(id);
+        let names: Vec<String> =
+            self.blocks.iter().map(|b| self.ast.name_of(b.name).to_owned()).collect();
+        self.unifier.set_region_block_names(names);
+
+        self.scopes.push(Vec::new());
+        self.trace.open();
+        // Frozen for the whole block: not movable, not consumable. A `val`
+        // referent notices nothing, because reading one was never a move.
+        self.trace.emit(Event::Freeze { slot: referent, span });
+        let reference =
+            Type::Ref { unique, region: Region::Block(id), inner: Box::new(referent_ty) };
+        let reference = self.declare(region, reference, false, span);
+        let lowered = self.stmts(&body.stmts);
+        self.trace.emit(Event::Thaw { slot: referent });
+        let events = self.trace.close();
+        self.trace.emit(Event::Scope(events));
+        self.scopes.pop();
+
+        self.open_blocks.pop();
+        Ok(Stmt::Borrow { referent, reference, body: lowered? })
     }
 
     /// Check a `match`: the scrutinee is an enum, every arm names a variant of
@@ -1348,8 +1796,11 @@ impl<'a> FnLowering<'a> {
             if let Some(index) = variant_index {
                 // A binding's type comes from the scrutinee's own type
                 // arguments: matching `Option[int]` binds an `int`.
-                let payload: Vec<Type> =
-                    variants[index as usize].1.iter().map(|t| t.substitute(&type_args)).collect();
+                let payload: Vec<Type> = variants[index as usize]
+                    .1
+                    .iter()
+                    .map(|t| t.substitute(&type_args, &[]))
+                    .collect();
                 for (binding, ty) in bindings.iter().zip(payload) {
                     match binding {
                         Some(name) => {
@@ -1459,7 +1910,7 @@ impl<'a> FnLowering<'a> {
                 // given for its fields, or left for the context to settle.
                 let type_args = self.fresh_args(generic_count);
                 let declared: Vec<(Symbol, Type)> =
-                    fields_decl.iter().map(|(n, t)| (*n, t.substitute(&type_args))).collect();
+                    fields_decl.iter().map(|(n, t)| (*n, t.substitute(&type_args, &[]))).collect();
 
                 let mut values: Vec<Option<Expr>> = vec![None; declared.len()];
                 for (field, value) in fields {
@@ -1505,7 +1956,15 @@ impl<'a> FnLowering<'a> {
             AstExpr::Field { base, name } => {
                 let base_span = self.ast.expr_span(*base);
                 let (lowered, base_ty) = self.expr(*base)?;
-                let resolved = self.unifier.resolve(&base_ty);
+                let mut resolved = self.unifier.resolve(&base_ty);
+                // `r.x` where `r : &r Point` reads through the reference.
+                // One level: a reference to a reference has to be written
+                // through twice, because auto-dereferencing a chain is the
+                // kind of convenience that makes a cost invisible.
+                let through_reference = matches!(resolved, Type::Ref { .. });
+                if let Type::Ref { inner, .. } = resolved {
+                    resolved = *inner;
+                }
                 let Type::Named(def_id, type_args) = resolved else {
                     return Err(Diagnostic::new(
                         format!("`{}` has no fields", self.unifier.display(&resolved)),
@@ -1533,7 +1992,21 @@ impl<'a> FnLowering<'a> {
                         span,
                     ));
                 };
-                let ty = fields[index].1.substitute(&type_args);
+                let ty = fields[index].1.substitute(&type_args, &[]);
+                if through_reference {
+                    // Reading through a reference is what a reference is
+                    // *for*, so no `Read` event: the referent is frozen for
+                    // the whole region and nothing is being moved.
+                    return Ok((
+                        Expr::FieldRef {
+                            base: Box::new(lowered),
+                            def: def_id,
+                            args: type_args,
+                            index: index as u32,
+                        },
+                        ty,
+                    ));
+                }
                 self.trace.emit(Event::Read {
                     ty: Type::Named(def_id, type_args.clone()),
                     span: base_span,
@@ -1572,7 +2045,7 @@ impl<'a> FnLowering<'a> {
                 // `Option::None` learns its `T` from where it is used.
                 let type_args = self.fresh_args(generic_count);
                 let payload_types: Vec<Type> =
-                    declared_payload.iter().map(|t| t.substitute(&type_args)).collect();
+                    declared_payload.iter().map(|t| t.substitute(&type_args, &[])).collect();
 
                 if args.len() != payload_types.len() {
                     return Err(Diagnostic::new(
@@ -1684,6 +2157,7 @@ impl<'a> FnLowering<'a> {
                 // the argument types then solve. The signature is all a caller
                 // is ever checked against, generic or not.
                 let mut instantiate: Option<(usize, Vec<Type>)> = None;
+                let mut region_args: Vec<Region> = Vec::new();
                 let (params, ret) = if let Some(builtin) = Builtin::from_name(text) {
                     builtin.signature()
                 } else {
@@ -1696,11 +2170,20 @@ impl<'a> FnLowering<'a> {
                         },
                     )?;
                     let fresh = self.fresh_args(self.signatures[index].generics.len());
+                    // §5.1: each region parameter gets a variable the
+                    // argument types then solve. One name, one assignment.
+                    let fresh_regions: Vec<Region> = (0..self.signatures[index].regions.len())
+                        .map(|_| self.unifier.fresh_region())
+                        .collect();
                     let signature = &self.signatures[index];
-                    let params: Vec<Type> =
-                        signature.params.iter().map(|t| t.substitute(&fresh)).collect();
-                    let ret = signature.ret.substitute(&fresh);
+                    let params: Vec<Type> = signature
+                        .params
+                        .iter()
+                        .map(|t| t.substitute(&fresh, &fresh_regions))
+                        .collect();
+                    let ret = signature.ret.substitute(&fresh, &fresh_regions);
                     instantiate = Some((index, fresh));
+                    region_args = fresh_regions;
                     (params, ret)
                 };
 
@@ -1724,6 +2207,31 @@ impl<'a> FnLowering<'a> {
                     self.expect_type(expected, &found, arg_span)?;
                     lowered.push(value);
                 }
+                // Every `where a <= b` the callee declared must hold between
+                // the regions it was instantiated at. Same lexical lookup the
+                // body used, so a caller discharges the obligation with the
+                // same walk up the same stack (§5.2).
+                if let Some((index, _)) = instantiate {
+                    let obligations = self.signatures[index].outlives.clone();
+                    let names = self.signatures[index].regions.clone();
+                    for (inner, outer) in obligations {
+                        let got_inner = self.unifier.resolve_region(region_args[inner as usize]);
+                        let got_outer = self.unifier.resolve_region(region_args[outer as usize]);
+                        if !self.outlives(got_outer, got_inner) {
+                            return Err(Diagnostic::new(
+                                format!(
+                                    "`{text}` requires `{} <= {}`, but here `{}` does not outlive `{}`",
+                                    self.ast.name_of(names[inner as usize]),
+                                    self.ast.name_of(names[outer as usize]),
+                                    self.unifier.display_region(got_outer),
+                                    self.unifier.display_region(got_inner)
+                                ),
+                                span,
+                            ));
+                        }
+                    }
+                }
+
                 let callee_ref = match instantiate {
                     None => Callee::Builtin(
                         Builtin::from_name(text).expect("only a builtin skips instantiation"),
@@ -2700,6 +3208,210 @@ mod linearity_tests {
              fn main() -> int { let h = Handle::Closed; return 0; }",
         );
         assert!(message.contains("consumed on every path"), "{message}");
+    }
+
+    // ---- borrowing (`docs/linearity-and-effects.md` §5) -----------------
+
+    #[test]
+    fn a_borrow_block_that_returns_is_a_terminator() {
+        // It runs once and unconditionally, so a function whose only `return`
+        // is inside one has still returned. The backend agrees by asking the
+        // same `terminates`.
+        // A `val` referent, so nothing is owed when the block returns; a
+        // `res` one would still have to be consumed on the way out, which is
+        // a different rule doing its job.
+        accepted(
+            "struct C { n: int } \
+             fn main() -> int { let c = C { n: 1 }; borrow c as &r in { return r.n - 1; } }",
+        );
+    }
+
+    #[test]
+    fn a_shared_borrow_reads_without_consuming() {
+        accepted(
+            "fn size[&p](h: &p File) -> int { return h.fd; } \
+             fn main() -> int { let f = open(1); \
+             borrow f as &r in { let n = size(r); } return close(f); }",
+        );
+    }
+
+    #[test]
+    fn a_reference_reads_a_field_its_referent_could_not() {
+        // The owned value refuses `f.fd` (a part read without taking the
+        // whole apart); the reference is exactly how that read is spelled.
+        accepted(
+            "fn main() -> int { let f = open(1); \
+             borrow f as &r in { let n = r.fd; } return close(f); }",
+        );
+        let message =
+            refused("fn main() -> int { let f = open(1); let n = f.fd; return close(f); }");
+        assert!(message.contains("a field cannot be read out of it"), "{message}");
+    }
+
+    #[test]
+    fn a_frozen_binding_cannot_be_moved() {
+        let message = refused(
+            "fn main() -> int { let f = open(1); \
+             borrow f as &r in { let a = close(f); } return 0; }",
+        );
+        assert!(message.contains("frozen by an enclosing `borrow`"), "{message}");
+    }
+
+    #[test]
+    fn a_frozen_binding_cannot_be_assigned_to() {
+        let message = refused(
+            "struct C { n: int } fn main() -> int { var c = C { n: 1 }; \
+             borrow c as &r in { c = C { n: 2 }; } return 0; }",
+        );
+        assert!(message.contains("cannot be assigned to"), "{message}");
+    }
+
+    #[test]
+    fn a_consumed_value_has_nothing_left_to_borrow() {
+        let message = refused(
+            "fn main() -> int { let f = open(1); let a = close(f); \
+             borrow f as &r in { return a; } }",
+        );
+        assert!(message.contains("nothing left to borrow"), "{message}");
+    }
+
+    #[test]
+    fn the_freeze_lifts_when_the_block_closes() {
+        accepted(
+            "fn main() -> int { let f = open(1); \
+             borrow f as &r in { let n = r.fd; } return close(f); }",
+        );
+    }
+
+    #[test]
+    fn shared_borrows_nest() {
+        // Freezing is not exclusive, and the inner block closing must not
+        // thaw the outer one -- which is why the checker counts rather than
+        // flags.
+        accepted(
+            "fn size[&p](h: &p File) -> int { return h.fd; } \
+             fn main() -> int { let f = open(1); \
+             borrow f as &a in { borrow f as &b in { let n = size(a) + size(b); } \
+             let m = size(a); } return close(f); }",
+        );
+    }
+
+    #[test]
+    fn a_reference_may_not_outlive_its_region() {
+        let message = refused(
+            "fn escape[&q](f: File, fallback: &q File) -> &q File { \
+             borrow f as &r in { return r; } return fallback; } \
+             fn main() -> int { return 0; }",
+        );
+        assert!(message.contains("may not outlive its region"), "{message}");
+    }
+
+    #[test]
+    fn a_reference_may_not_escape_through_inference_either() {
+        // A binding declared outside the block whose type was still a hole
+        // when the block opened. No `return` is involved, which is why rule 4
+        // is checked over every binding and not only over what leaves.
+        let message = refused(
+            "enum Holder[T] { Empty, Full(T) } \
+             fn main() -> int { let f = open(1); let hole = Holder::Empty; \
+             borrow f as &r in { let used: Holder[&r File] = hole; } return close(f); }",
+        );
+        assert!(message.contains("would hold a reference into `r`"), "{message}");
+    }
+
+    #[test]
+    fn a_region_must_be_in_scope_where_it_is_written() {
+        let message =
+            refused("fn escape(f: File) -> &r File { return f; } fn main() -> int { return 0; }");
+        assert!(message.contains("is not a region in scope"), "{message}");
+    }
+
+    #[test]
+    fn sibling_regions_do_not_outlive_each_other() {
+        let message = refused(
+            "fn same[&p](a: &p File, b: &p File) -> int { return 0; } \
+             fn u(x: File, y: File) -> int { \
+             borrow x as &a in { borrow y as &b in { let n = same(a, b); } } \
+             return close(x) + close(y); } fn main() -> int { return 0; }",
+        );
+        assert!(message.contains("does not outlive"), "{message}");
+    }
+
+    #[test]
+    fn an_outer_reference_is_usable_in_an_inner_block() {
+        accepted(
+            "fn size[&p](h: &p File) -> int { return h.fd; } \
+             fn u(x: File, y: File) -> int { \
+             borrow x as &a in { borrow y as &b in { let n = size(a) + size(b); } } \
+             return close(x) + close(y); } fn main() -> int { return 0; }",
+        );
+    }
+
+    #[test]
+    fn a_declared_outlives_is_checked_at_the_call_site() {
+        const OUTER_FIRST: &str = "fn copy_into[&dst, &src where src <= dst](d: &dst File, s: &src File) -> int { return 0; } \
+             fn u(x: File, y: File) -> int { \
+             borrow x as &outer in { borrow y as &inner in { let n = copy_into(PAIR); } } \
+             return close(x) + close(y); } fn main() -> int { return 0; }";
+        // `dst` is the outer block, which does outlive the inner `src`.
+        accepted(&OUTER_FIRST.replace("PAIR", "outer, inner"));
+        // And the other way round, which does not.
+        let message = refused(&OUTER_FIRST.replace("PAIR", "inner, outer"));
+        assert!(message.contains("requires `src <= dst`"), "{message}");
+    }
+
+    #[test]
+    fn a_where_clause_names_the_declarations_own_regions() {
+        let message = refused(
+            "fn f[&a where b <= a](x: &a File) -> int { return 0; } fn main() -> int { return 0; }",
+        );
+        assert!(message.contains("is not a region parameter"), "{message}");
+    }
+
+    #[test]
+    fn region_and_type_parameters_do_not_collide() {
+        let message =
+            refused("fn f[T, &T](x: T) -> int { return 0; } fn main() -> int { return 0; }");
+        assert!(message.contains("both a type parameter and a region parameter"), "{message}");
+        let message =
+            refused("fn f[&r, &r](x: &r File) -> int { return 0; } fn main() -> int { return 0; }");
+        assert!(message.contains("region parameter `r` is declared twice"), "{message}");
+    }
+
+    #[test]
+    fn a_reference_is_val_and_may_be_copied_and_dropped() {
+        // §5 rule 3. A reference to a `res` value is still `val`, which is
+        // sound because the referent is frozen for the whole region.
+        accepted(
+            "fn main() -> int { let f = open(1); \
+             borrow f as &r in { let a = r; let b = r; let n = a.fd + b.fd; } \
+             return close(f); }",
+        );
+    }
+
+    #[test]
+    fn a_unique_borrow_is_refused_rather_than_half_checked() {
+        let message = refused(
+            "fn main() -> int { let f = open(1); \
+             borrow mut f as &!r in { let n = r.fd; } return close(f); }",
+        );
+        assert!(message.contains("not implemented yet"), "{message}");
+    }
+
+    #[test]
+    fn a_region_is_erased_and_does_not_copy_a_function() {
+        // Regions have no runtime meaning, so a region-polymorphic function
+        // is emitted once however many regions call it. A *type* parameter
+        // still copies.
+        let program = check(
+            "fn size[&p](h: &p File) -> int { return h.fd; } \
+             fn main() -> int { let f = open(1); \
+             borrow f as &a in { let x = size(a); } \
+             borrow f as &b in { let y = size(b); } return close(f); }",
+        )
+        .expect("accepted");
+        let copies = program.funcs.iter().filter(|f| f.name.starts_with("size")).count();
+        assert_eq!(copies, 1, "{:?}", program.funcs.iter().map(|f| &f.name).collect::<Vec<_>>());
     }
 
     #[test]

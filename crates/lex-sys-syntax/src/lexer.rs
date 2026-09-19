@@ -25,6 +25,11 @@ pub enum TokenKind {
     Match,
     Res,
     Val,
+    Borrow,
+    As,
+    In,
+    Mut,
+    Where,
     // punctuation
     LParen,
     RParen,
@@ -54,6 +59,7 @@ pub enum TokenKind {
     Percent,
     Bang,
     AmpAmp,
+    Amp,
     PipePipe,
     Eof,
 }
@@ -77,6 +83,11 @@ impl TokenKind {
             TokenKind::Enum => "`enum`",
             TokenKind::Match => "`match`",
             TokenKind::Res => "`res`",
+            TokenKind::Borrow => "`borrow`",
+            TokenKind::As => "`as`",
+            TokenKind::In => "`in`",
+            TokenKind::Mut => "`mut`",
+            TokenKind::Where => "`where`",
             TokenKind::Val => "`val`",
             TokenKind::LParen => "`(`",
             TokenKind::RParen => "`)`",
@@ -106,6 +117,7 @@ impl TokenKind {
             TokenKind::Percent => "`%`",
             TokenKind::Bang => "`!`",
             TokenKind::AmpAmp => "`&&`",
+            TokenKind::Amp => "`&`",
             TokenKind::PipePipe => "`||`",
             TokenKind::Eof => "end of file",
         }
@@ -198,6 +210,9 @@ pub fn tokenize(text: &str) -> Result<Vec<Token>, Diagnostic> {
             (b'/', _) => one(TokenKind::Slash),
             (b'%', _) => one(TokenKind::Percent),
             (b'!', _) => one(TokenKind::Bang),
+            // A lone `&` is a reference (§5); `&&` was already taken above,
+            // so `&!r` lexes as three tokens and needs no special case.
+            (b'&', _) => one(TokenKind::Amp),
             _ => {
                 let end = next_char_boundary(text, i);
                 return Err(Diagnostic::new(
@@ -238,6 +253,11 @@ fn keyword(s: &str) -> Option<TokenKind> {
         "match" => TokenKind::Match,
         "res" => TokenKind::Res,
         "val" => TokenKind::Val,
+        "borrow" => TokenKind::Borrow,
+        "as" => TokenKind::As,
+        "in" => TokenKind::In,
+        "mut" => TokenKind::Mut,
+        "where" => TokenKind::Where,
         "_" => TokenKind::Underscore,
         _ => return None,
     })
