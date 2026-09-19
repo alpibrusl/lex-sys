@@ -1,0 +1,47 @@
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # M0's acceptance criterion is a native binary on both default targets, so
+  # the matrix is the acceptance criterion (#3).
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: linux-x86_64
+          - os: macos-latest
+            target: darwin-aarch64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain versions
+        run: |
+          cargo --version
+          rustc --version --verbose
+
+      - name: Formatting
+        run: cargo fmt --all --check
+
+      - name: Lints
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Tests
+        run: cargo test --workspace
+
+      # The milestone in one line: build the smoke program and run it.
+      - name: Smoke — lex-sys build hello.ls && ./hello
+        run: |
+          cargo run --quiet -p lex-sys -- build examples/hello.ls -o hello
+          ./hello
+          test "$(./hello)" = "Hello, world!"

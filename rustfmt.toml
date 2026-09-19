@@ -1,0 +1,4 @@
+# The bootstrap compiler is Rust; lex-sys's own canonical formatter is M3 work.
+edition = "2024"
+max_width = 100
+use_small_heuristics = "Max"
