@@ -9,6 +9,7 @@
 //~ STDOUT M1 struct: (3, 4) -> 25
 //~ STDOUT M1 enum: 0 12 20
 //~ STDOUT M1 generic: 5 3 z
+//~ STDOUT M2 linear: 4 7 9 5 6
 //~ EXIT 0
 
 // ---------------------------------------------------------------- output ---
@@ -158,11 +159,86 @@ fn m1_generic() -> int {
     return newline();
 }
 
+// ------------------------------------------------- M2: linear resources ----
+// Every type has a mode. `val` is unrestricted -- copyable, discardable, no
+// obligations -- and everything above this line is `val`. `res` is linear:
+// exactly one use, no implicit copy, and **no implicit discard**.
+//
+// Linear, not affine. A `res` value that reaches the end of its scope
+// unconsumed is a compile error, because the case affine drops silently is
+// the one this system exists to prevent. And there is no destructor: a
+// destructor is code that runs at a point nobody wrote, which would make the
+// effect row on the enclosing function a lie.
+//
+// So a resource is destroyed by naming the function that knows how, and that
+// function ends in taking the value apart.
+
+res struct Ticket {
+    serial: int,
+}
+
+fn issue(serial: int) -> Ticket {
+    return Ticket { serial: serial };
+}
+
+// Takes ownership and hands it back, so the caller still owes one
+// consumption -- ownership moved twice, not shared once.
+fn stamp(t: Ticket) -> Ticket {
+    let Ticket { serial } = t;
+    return Ticket { serial: serial + 1 };
+}
+
+// The terminal consumer. Destructuring spends the whole and produces the
+// parts; these parts are `int`, which is `val`, so nothing is owed after.
+fn redeem(t: Ticket) -> int {
+    let Ticket { serial } = t;
+    return serial;
+}
+
+// `res` by inference: mode is structural, so an aggregate holding a `res`
+// member is `res` without anyone writing the word.
+struct Booking {
+    outbound: Ticket,
+    inbound: Ticket,
+}
+
+fn redeem_both(b: Booking) -> int {
+    let Booking { outbound, inbound } = b;
+    return redeem(outbound) + redeem(inbound);
+}
+
+// Both paths consume, so they agree about what is live at the merge point.
+// An `if` whose `else` did not consume is refused rather than fixed up with a
+// runtime drop flag -- see `tests/reject/branches_disagree.ls`.
+fn redeem_either(t: Ticket, as_is: bool) -> int {
+    if as_is {
+        return redeem(t);
+    }
+    return redeem(stamp(t));
+}
+
+fn m2_linear() -> int {
+    putchar(77); putchar(50); space();          // "M2 "
+    putchar(108); putchar(105); putchar(110); putchar(101); putchar(97);
+    putchar(114); putchar(58); space();         // "linear: "
+
+    print_nat(redeem(issue(4)));                                    // 4
+    space(); print_nat(redeem(stamp(issue(6))));                    // 7
+    space(); print_nat(redeem_both(Booking {
+        outbound: issue(2),
+        inbound: issue(7),
+    }));                                                            // 9
+    space(); print_nat(redeem_either(issue(5), true));              // 5
+    space(); print_nat(redeem_either(issue(5), false));             // 6
+    return newline();
+}
+
 fn main() -> int {
     m0();
     m1_bool();
     m1_struct();
     m1_enum();
     m1_generic();
+    m2_linear();
     return 0;
 }

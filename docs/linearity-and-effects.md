@@ -1,14 +1,20 @@
 # Linearity and effects
 
-> **Status: proposed.** This is the gating artifact for M2
-> ([#2](https://github.com/alpibrusl/lex-sys/issues/2)). It is written; it is
-> not settled until it has been reviewed. No M2 implementation should start
-> before it is.
+> **Status: settled, implementation in progress.** This is the gating artifact
+> for M2 ([#2](https://github.com/alpibrusl/lex-sys/issues/2)), and it was
+> reviewed and accepted before any M2 code was written. The rules below are
+> now the specification the implementation is measured against; §12 lists what
+> is still open, and nothing there blocks the rest.
 >
-> Everything here is design. Nothing in it is implemented — M0 is a lexer, a
-> parser, a resolved IR and a Cranelift backend
-> ([#3](https://github.com/alpibrusl/lex-sys/issues/3)), and M1's type checker
-> comes first. Read `docs/bootstrap.md` for what exists today.
+> **Implemented: §3 (modes) and §4 (linearity),** including the joins in §4.2
+> and the back-edge rule in §4.3. The first seven fixtures in §11 are in
+> `tests/reject/`, with accepting counterparts in `tests/accept/`, and §11
+> marks each row.
+>
+> **Not implemented: §5 onward** — borrowing, regions, arenas, effects,
+> capabilities and the escape hatches. Every rule those sections state is
+> still design, and a program that needs one is refused today with a message
+> pointing here.
 
 This document is the spec the M2 conformance suite encodes. Section 11 is that
 suite, written out as a fixture list, and it is the part to argue with hardest:
@@ -108,6 +114,36 @@ fn twice(f: File) -> [] (File, File) {
 val struct Wrapper { f: File }   // ✗ a val type may not contain a res field
 ```
 
+An explicit `val` on a type whose members are all `val` asserts exactly what
+absence already checks, so the two are the same declaration and hash the same
+(`docs/canonical-ast.md` §3). `res` is different: it is a fact about the type
+that every caller can observe, so it changes the hash.
+
+### 3.1 Generics carry mode; type parameters do not
+
+Mode is computed *after* substitution, so a generic type takes its mode from
+its arguments: `Held[File]` is `res` and `Held[int]` is `val`, and neither
+needed a word written on it. Nothing new is required for that — it falls out
+of mode being structural.
+
+A type *parameter*, though, is `val`, because mode is never inferred from use
+(§3) and a rigid `T` has no members to read. That has a consequence worth
+stating plainly, because §12 lists mode polymorphism as open and
+monomorphisation has quietly answered half of it:
+
+> A generic function body is checked once with its parameters rigid, where
+> `T` is `val`, and then again for each copy, where `T` is whatever that copy
+> instantiated it at. So `fn id[T](x: T) -> T` does work for both modes —
+> and `fn sink[T](x: T) -> int { return 0; }` is accepted where it is
+> written and refused at the instantiation that leaks.
+
+That is the price, and it is the price §12 predicted: the error lands on the
+definition's line, from a call site elsewhere. The message names the
+instantiation so it can be found, and `tests/reject/res_leaked_from_generic.ls`
+pins the behaviour. What is *not* available is a signature that says "this
+works for every mode" and is checked once — that remains open, and is the part
+that interacts with every other rule here.
+
 ---
 
 ## 4. Linearity: linear, not affine
@@ -145,6 +181,25 @@ There is no `drop(x)` built into the language. A resource is destroyed by the
 function that knows how: `close(f)` for a `File`, `free(b)` for a `Box`,
 `release(c)` for a capability. Each such function is either a primitive or ends
 in destructuring to `val` parts.
+
+Four places would otherwise be a fifth consumer by accident, and each is
+refused instead. They are consequences of the list above rather than new rules,
+but each has a fixture, because a rule with no must-reject fixture is a hope:
+
+| Written | Why it is refused | Fixture |
+|---|---|---|
+| `open(1);` as a statement | the value is produced and dropped | `res_discarded.ls` |
+| `f.fd` on a `res` `f` | a part read without taking the whole apart is a *borrow*, which is §5 | `res_field_read.ls` |
+| `_ =>` on a `res` scrutinee | consumes the value and produces no parts | `res_matched_by_wildcard.ls` |
+| `Slot::Full(_)` on a `res` payload | the same, one level down | `res_payload_ignored.ls` |
+
+Assignment is the fifth: `f = open(2)` overwrites whatever `f` held, so a live
+`res` binding must be spent before it can be reassigned
+(`assign_over_live_res.ls`). A spent one may be, and is live again after.
+
+Destructuring takes the *whole* value apart — every field named, exactly once.
+A pattern that names some of the fields would be a partial move, which is not
+on the list (`destructure_partial.ls`).
 
 **Accept:**
 
@@ -700,15 +755,18 @@ fixture declaring its own expected message in a `//~ ERROR` header, run by
 `crates/lex-sys/tests/conformance.rs`. M2 adds to it; it does not invent
 anything.
 
-| Fixture | Rule | § |
-|---|---|---|
-| `res_copied.ls` | A `res` value may not be used twice | 3 |
-| `val_contains_res.ls` | A `val` type may not contain a `res` field | 3 |
-| `unconsumed_at_scope_end.ls` | A live `res` value at scope end is an error | 4 |
-| `unconsumed_on_one_path.ls` | Every path must consume | 4 |
-| `use_after_move.ls` | A consumed value may not be used | 4.1 |
-| `branches_disagree.ls` | Branches must agree about what is live | 4.2 |
-| `consume_in_loop.ls` | A loop body may not consume an outer binding | 4.3 |
+A ✓ in the last column means the fixture exists and the rule is enforced; the
+rest are the sections not yet implemented.
+
+| Fixture | Rule | § | |
+|---|---|---|---|
+| `res_copied.ls` | A `res` value may not be used twice | 3 | ✓ |
+| `val_contains_res.ls` | A `val` type may not contain a `res` field | 3 | ✓ |
+| `unconsumed_at_scope_end.ls` | A live `res` value at scope end is an error | 4 | ✓ |
+| `unconsumed_on_one_path.ls` | Every path must consume | 4 | ✓ |
+| `use_after_move.ls` | A consumed value may not be used | 4.1 | ✓ |
+| `branches_disagree.ls` | Branches must agree about what is live | 4.2 | ✓ |
+| `consume_in_loop.ls` | A loop body may not consume an outer binding | 4.3 | ✓ |
 | `reference_escapes_borrow.ls` | A block's result may not mention its region | 5 |
 | `move_while_frozen.ls` | A frozen value may not be moved or consumed | 5 |
 | `read_while_locked.ls` | A uniquely borrowed value may not be read | 5 |
@@ -726,14 +784,21 @@ anything.
 | `capability_leaked.ls` | A capability must be released | 8.3 |
 | `ffi_without_capability.ls` | A foreign call requires its `Ffi` capability | 8.4 |
 
+§4.1's four accidental consumers and §3.1's instantiation rule add six more
+must-reject fixtures beyond the table — `res_discarded.ls`,
+`res_field_read.ls`, `res_matched_by_wildcard.ls`, `res_payload_ignored.ls`,
+`assign_over_live_res.ls`, `destructure_partial.ls` and
+`res_leaked_from_generic.ls` — plus `var_destructure.ls` for the syntax. Their
+accepting counterpart is `destructuring.ls`.
+
 Each fixture is the smallest program that triggers its rule and nothing else.
 An accepting counterpart goes in `tests/accept/` for every one of them — a rule
 that rejects everything is not a rule either:
 
-| Fixture | Shows |
-|---|---|
-| `consume_once.ls` | The straight-line happy path |
-| `consume_on_both_paths.ls` | Branch agreement |
+| Fixture | Shows | |
+|---|---|---|
+| `consume_once.ls` | The straight-line happy path | ✓ |
+| `consume_on_both_paths.ls` | Branch agreement | ✓ |
 | `borrow_and_return.ls` | A borrow used and discarded inside its region |
 | `two_shared_borrows.ls` | Shared borrows nest |
 | `nested_regions.ls` | An inner region reading an outer one |
@@ -760,9 +825,11 @@ push if something here feels wrong.
 - **Capability release at `main`.** Four `release` calls in §8.3 is ceremony.
   Letting the runtime reclaim `World`'s parts is convenient and is *exactly*
   the affine hole §4 refuses elsewhere.
-- **Mode polymorphism.** `fn id[T](x: T) -> T` cannot be written once for both
-  modes. Monomorphisation makes it implementable; it is left out because it
-  interacts with every rule here at once.
+- **Mode polymorphism.** *Half-answered by §3.1:* monomorphisation does make
+  `fn id[T](x: T) -> T` work at both modes, because each copy is checked at
+  the type it was instantiated at. What is still open is a signature that says
+  so and is checked *once* — the part that interacts with every rule here at
+  once, and the part that would keep the error off the definition's line.
 - **`Rc` cycles.** Documented as a leak. A systems language may be entitled to
   say exactly that, or a `Weak` may be table stakes.
 - **Budget.** `[budget]` is carried over from Lex (#1) but not specified here.

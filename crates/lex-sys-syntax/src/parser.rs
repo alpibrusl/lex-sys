@@ -77,8 +77,23 @@ impl<'a> Parser<'a> {
         while self.peek().kind != TokenKind::Eof {
             match self.peek().kind {
                 TokenKind::Fn => self.fn_decl()?,
-                TokenKind::Struct => self.struct_decl()?,
-                TokenKind::Enum => self.enum_decl()?,
+                TokenKind::Struct => self.struct_decl(None, None)?,
+                TokenKind::Enum => self.enum_decl(None, None)?,
+                TokenKind::Res | TokenKind::Val => {
+                    let keyword = self.bump();
+                    let mode = if keyword.kind == TokenKind::Res { Mode::Res } else { Mode::Val };
+                    match self.peek().kind {
+                        TokenKind::Struct => self.struct_decl(Some(mode), Some(keyword.span))?,
+                        TokenKind::Enum => self.enum_decl(Some(mode), Some(keyword.span))?,
+                        other => {
+                            return Err(self.err(format!(
+                                "expected `struct` or `enum` after {}, found {}",
+                                keyword.kind.describe(),
+                                other.describe()
+                            )));
+                        }
+                    }
+                }
                 other => {
                     return Err(self.err(format!(
                         "expected `fn`, `struct` or `enum`, found {}",
@@ -118,8 +133,13 @@ impl<'a> Parser<'a> {
             .push_item(Item::Fn(FnDecl { name, generics, params, ret, body }), start.to(end)))
     }
 
-    fn struct_decl(&mut self) -> Result<ItemId, Diagnostic> {
-        let start = self.expect(TokenKind::Struct)?.span;
+    fn struct_decl(
+        &mut self,
+        mode: Option<Mode>,
+        mode_span: Option<Span>,
+    ) -> Result<ItemId, Diagnostic> {
+        let start = mode_span.unwrap_or(self.peek().span);
+        self.expect(TokenKind::Struct)?;
         let name = self.ident()?;
         let generics = self.generic_params()?;
         self.expect(TokenKind::LBrace)?;
@@ -135,11 +155,18 @@ impl<'a> Parser<'a> {
             }
         }
         let end = self.expect(TokenKind::RBrace)?.span;
-        Ok(self.ast.push_item(Item::Struct(StructDecl { name, generics, fields }), start.to(end)))
+        Ok(self
+            .ast
+            .push_item(Item::Struct(StructDecl { name, mode, generics, fields }), start.to(end)))
     }
 
-    fn enum_decl(&mut self) -> Result<ItemId, Diagnostic> {
-        let start = self.expect(TokenKind::Enum)?.span;
+    fn enum_decl(
+        &mut self,
+        mode: Option<Mode>,
+        mode_span: Option<Span>,
+    ) -> Result<ItemId, Diagnostic> {
+        let start = mode_span.unwrap_or(self.peek().span);
+        self.expect(TokenKind::Enum)?;
         let name = self.ident()?;
         let generics = self.generic_params()?;
         self.expect(TokenKind::LBrace)?;
@@ -163,7 +190,9 @@ impl<'a> Parser<'a> {
             }
         }
         let end = self.expect(TokenKind::RBrace)?.span;
-        Ok(self.ast.push_item(Item::Enum(EnumDecl { name, generics, variants }), start.to(end)))
+        Ok(self
+            .ast
+            .push_item(Item::Enum(EnumDecl { name, mode, generics, variants }), start.to(end)))
     }
 
     /// `[A, B]` after a declaration's name, or nothing.
@@ -247,6 +276,33 @@ impl<'a> Parser<'a> {
         let kw = self.bump();
         let mutable = kw.kind == TokenKind::Var;
         let name = self.ident()?;
+
+        // `let Point { x, y } = p;` — taking a value apart rather than naming
+        // it. Decided by the brace, which cannot otherwise follow a binding.
+        if self.peek().kind == TokenKind::LBrace {
+            if mutable {
+                return Err(self.err(
+                    "a destructuring binding takes a value apart once; write `let`, not `var`",
+                ));
+            }
+            self.bump();
+            let mut fields = Vec::new();
+            while self.peek().kind != TokenKind::RBrace {
+                fields.push(self.ident()?);
+                if !self.eat(TokenKind::Comma) {
+                    break;
+                }
+            }
+            self.expect(TokenKind::RBrace)?;
+            self.expect(TokenKind::Eq)?;
+            let value = self.expr()?;
+            let end = self.expect(TokenKind::Semi)?.span;
+            return Ok(self.ast.push_stmt(
+                Stmt::Destructure { struct_name: name, fields, value },
+                kw.span.to(end),
+            ));
+        }
+
         // The annotation is optional and can only be `int`; M1 gives it work to do.
         let ty = if self.eat(TokenKind::Colon) { Some(self.type_expr()?) } else { None };
         self.expect(TokenKind::Eq)?;
@@ -788,5 +844,58 @@ mod tests {
     fn items_other_than_functions_are_refused() {
         let err = parse("let x = 1;").unwrap_err();
         assert!(err.message.contains("expected `fn`"), "{}", err.message);
+    }
+
+    // ---- modes and destructuring (`docs/linearity-and-effects.md` §3, §4.1)
+
+    #[test]
+    fn a_declaration_may_carry_a_mode() {
+        let ast = parse("res struct File { fd: int } val struct P { x: int } enum E { A }")
+            .expect("should parse");
+        let Item::Struct(file) = &ast.items[0] else { panic!() };
+        let Item::Struct(point) = &ast.items[1] else { panic!() };
+        let Item::Enum(e) = &ast.items[2] else { panic!() };
+        assert_eq!(file.mode, Some(Mode::Res));
+        assert_eq!(point.mode, Some(Mode::Val));
+        assert_eq!(e.mode, None);
+    }
+
+    #[test]
+    fn a_mode_belongs_to_a_type_declaration() {
+        let err = parse("res fn f() -> int { return 0; }").unwrap_err();
+        assert!(err.message.contains("expected `struct` or `enum`"), "{}", err.message);
+    }
+
+    #[test]
+    fn the_mode_keyword_is_part_of_the_declaration_span() {
+        // The span decides where a diagnostic about the declaration points,
+        // and `val struct P { f: File }` is refused *because of* the `val`.
+        let ast = parse("res struct File { fd: int }").expect("should parse");
+        let span = ast.item_span(ItemId(0));
+        assert_eq!(span.start, 0);
+    }
+
+    #[test]
+    fn a_let_may_destructure() {
+        let (ast, decl) = one_fn("fn f(p: P) -> int { let P { x, y } = p; return x + y; }");
+        let Stmt::Destructure { struct_name, fields, value } = ast.stmt(decl.body.stmts[0]) else {
+            panic!("expected a destructuring `let`")
+        };
+        assert_eq!(ast.name_of(*struct_name), "P");
+        let names: Vec<&str> = fields.iter().map(|f| ast.name_of(*f)).collect();
+        assert_eq!(names, ["x", "y"]);
+        assert!(matches!(ast.expr(*value), Expr::Name(_)));
+    }
+
+    #[test]
+    fn a_destructuring_let_is_not_a_var() {
+        let err = parse("fn f(p: P) -> int { var P { x } = p; return x; }").unwrap_err();
+        assert!(err.message.contains("write `let`, not `var`"), "{}", err.message);
+    }
+
+    #[test]
+    fn an_ordinary_let_is_still_an_ordinary_let() {
+        let (ast, decl) = one_fn("fn f() -> int { let x = P { a: 1 }; return 0; }");
+        assert!(matches!(ast.stmt(decl.body.stmts[0]), Stmt::Let { .. }));
     }
 }

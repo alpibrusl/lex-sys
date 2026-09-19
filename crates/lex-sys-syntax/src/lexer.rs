@@ -23,6 +23,8 @@ pub enum TokenKind {
     Struct,
     Enum,
     Match,
+    Res,
+    Val,
     // punctuation
     LParen,
     RParen,
@@ -74,6 +76,8 @@ impl TokenKind {
             TokenKind::Struct => "`struct`",
             TokenKind::Enum => "`enum`",
             TokenKind::Match => "`match`",
+            TokenKind::Res => "`res`",
+            TokenKind::Val => "`val`",
             TokenKind::LParen => "`(`",
             TokenKind::RParen => "`)`",
             TokenKind::LBrace => "`{`",
@@ -232,6 +236,8 @@ fn keyword(s: &str) -> Option<TokenKind> {
         "struct" => TokenKind::Struct,
         "enum" => TokenKind::Enum,
         "match" => TokenKind::Match,
+        "res" => TokenKind::Res,
+        "val" => TokenKind::Val,
         "_" => TokenKind::Underscore,
         _ => return None,
     })

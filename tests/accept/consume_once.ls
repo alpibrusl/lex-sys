@@ -1,0 +1,38 @@
+// Linearity's happy path (§4): a `res` value is created, threaded through a
+// function that hands it back, and finally taken apart. Destructuring to
+// `val` parts is where the obligation ends -- there is no `drop`, so a
+// resource is destroyed by the function that knows how.
+//~ STDOUT 79
+//~ EXIT 0
+
+res struct File {
+    fd: int,
+}
+
+fn open(fd: int) -> File {
+    return File { fd: fd };
+}
+
+// Takes ownership and gives it back: the caller still owes one consumption.
+fn touch(f: File) -> File {
+    let File { fd } = f;
+    return File { fd: fd + 2 };
+}
+
+// The terminal consumer. The parts are `int`, which is `val`, so nothing is
+// owed once they are out.
+fn close(f: File) -> int {
+    let File { fd } = f;
+    return fd;
+}
+
+fn main() -> int {
+    let straight = open(7);
+    putchar(48 + close(straight));
+
+    let threaded = open(7);
+    putchar(48 + close(touch(threaded)));
+
+    putchar(10);
+    return 0;
+}

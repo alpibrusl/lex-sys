@@ -84,6 +84,7 @@ mod tag {
     pub const WHILE: u8 = 0x24;
     pub const MATCH: u8 = 0x25;
     pub const RETURN: u8 = 0x26;
+    pub const DESTRUCTURE: u8 = 0x27;
 
     pub const TYPE_NAME: u8 = 0x40;
     pub const PATTERN_WILDCARD: u8 = 0x41;
@@ -91,6 +92,23 @@ mod tag {
 
     pub const STRUCT_DECL: u8 = 0x60;
     pub const ENUM_DECL: u8 = 0x61;
+
+    /// A declaration's mode (`docs/linearity-and-effects.md` §3). An absent
+    /// annotation and a written `val` encode the same, because on a type
+    /// whose members are all `val` the word asserts exactly what absence
+    /// already checks — and a `val` that was not true never reaches here.
+    pub const MODE_VAL: u8 = 0x62;
+    pub const MODE_RES: u8 = 0x63;
+
+    /// The tag for a declared mode. Written out rather than cast from the
+    /// enum, so adding a mode cannot silently renumber the others.
+    pub fn mode_tag(mode: Option<lex_sys_syntax::ast::Mode>) -> u8 {
+        use lex_sys_syntax::ast::Mode;
+        match mode {
+            None | Some(Mode::Val) => MODE_VAL,
+            Some(Mode::Res) => MODE_RES,
+        }
+    }
 
     pub const NONE: u8 = 0x00;
     pub const SOME: u8 = 0x01;
@@ -313,6 +331,7 @@ fn hash_signature(ast: &Ast, decl: &FnDecl, type_ids: &HashMap<Symbol, Hash>) ->
 fn hash_struct(ast: &Ast, decl: &StructDecl) -> Hash {
     let mut encoder = Encoder::default();
     encoder.tag(tag::STRUCT_DECL);
+    encoder.tag(tag::mode_tag(decl.mode));
     encoder.str(ast.name_of(decl.name));
     encoder.len(decl.generics.len());
     encoder.len(decl.fields.len());
@@ -328,6 +347,7 @@ fn hash_struct(ast: &Ast, decl: &StructDecl) -> Hash {
 fn hash_enum(ast: &Ast, decl: &EnumDecl) -> Hash {
     let mut encoder = Encoder::default();
     encoder.tag(tag::ENUM_DECL);
+    encoder.tag(tag::mode_tag(decl.mode));
     encoder.str(ast.name_of(decl.name));
     encoder.len(decl.generics.len());
     encoder.len(decl.variants.len());
@@ -474,6 +494,22 @@ impl BodyHasher<'_> {
                     self.scope.binders.truncate(depth);
                 }
             }
+            Stmt::Destructure { struct_name, fields, value } => {
+                self.encoder.tag(tag::DESTRUCTURE);
+                self.type_reference(*struct_name);
+                // Field *names* are encoded, because which field each binder
+                // takes is what the pattern says; the binders themselves are
+                // positional from here on, like any other local.
+                self.encoder.len(fields.len());
+                for field in fields {
+                    self.encoder.str(self.ast.name_of(*field));
+                }
+                // The value is encoded before the binders exist, as for `let`.
+                self.expr(*value);
+                for field in fields {
+                    self.scope.binders.push(*field);
+                }
+            }
             Stmt::Return(value) => {
                 self.encoder.tag(tag::RETURN);
                 self.expr(*value);
@@ -532,7 +568,9 @@ impl BodyHasher<'_> {
                 // differing only in the order they list fields are the same
                 // value. Sorting by name would make that true of the hash too;
                 // it is left alone because the declaration's order is not
-                // known here, and `docs/canonical-ast.md` §8 keeps it open.
+                // known here, and `docs/canonical-ast.md` §8 keeps it open --
+                // as it does for a destructuring pattern, which has the same
+                // gap for the same reason.
                 self.encoder.len(fields.len());
                 for (field, value) in fields {
                     self.encoder.str(self.ast.name_of(*field));
@@ -589,6 +627,10 @@ mod tests {
 
     fn body(src: &str, name: &str) -> Hash {
         ids(src).function(name).expect("a function").body
+    }
+
+    fn ty(src: &str, name: &str) -> Hash {
+        ids(src).type_decl(name).expect("a type declaration").id
     }
 
     // ---- what must not change a hash -----------------------------------
@@ -777,6 +819,50 @@ mod tests {
     }
 
     // ---- domains and rendering -----------------------------------------
+
+    #[test]
+    fn a_redundant_val_does_not_change_a_type_hash() {
+        // `val` on a type whose members are all `val` asserts exactly what
+        // absence already checks, and a `val` that was not true is refused
+        // before it ever reaches here -- so it is a redundant annotation, in
+        // the same family as a redundant parenthesis.
+        assert_eq!(
+            ty("struct P { x: int, y: int }", "P"),
+            ty("val struct P { x: int, y: int }", "P")
+        );
+        assert_eq!(ty("enum E { A, B(int) }", "E"), ty("val enum E { A, B(int) }", "E"));
+    }
+
+    #[test]
+    fn res_changes_a_type_hash() {
+        // A `res` type is not the same type as a `val` one: one is linear and
+        // one is copyable, and every caller can tell.
+        assert_ne!(ty("struct F { fd: int }", "F"), ty("res struct F { fd: int }", "F"));
+        assert_ne!(ty("enum H { A }", "H"), ty("res enum H { A }", "H"));
+    }
+
+    #[test]
+    fn destructuring_is_its_own_statement() {
+        assert_ne!(
+            body("struct P { x: int } fn f(p: P) -> int { let P { x } = p; return x; }", "f"),
+            body("struct P { x: int } fn f(p: P) -> int { let x = p.x; return x; }", "f")
+        );
+    }
+
+    #[test]
+    fn a_destructuring_pattern_hashes_the_field_order_it_wrote() {
+        // A pattern binds by field name, so the two bodies below mean
+        // exactly the same thing and hash differently anyway. That is the
+        // same gap a struct literal's field order has, for the same reason
+        // -- the declaration's order is not known here -- and
+        // `docs/canonical-ast.md` §8 records both as open rather than
+        // pretending otherwise.
+        let written = "struct P { x: int, y: int } \
+                 fn f(p: P) -> int { let P { x, y } = p; return x; }";
+        let reordered = "struct P { x: int, y: int } \
+                 fn f(p: P) -> int { let P { y, x } = p; return x; }";
+        assert_ne!(body(written, "f"), body(reordered, "f"));
+    }
 
     #[test]
     fn the_domains_keep_the_three_kinds_apart() {

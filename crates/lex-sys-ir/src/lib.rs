@@ -27,6 +27,11 @@ use lex_sys_syntax::ast::{
 use lex_sys_syntax::span::{Diagnostic, Span};
 use lex_sys_types::{DefId, Type, Unifier, UnifyError};
 
+mod linear;
+
+pub use linear::Mode;
+use linear::{Event, Trace, mode_of};
+
 /// A local variable. Parameters occupy slots `0..n_params`; each `let`/`var`
 /// takes the next slot and never reuses one, so a shadowing binding is simply
 /// a different slot.
@@ -353,23 +358,27 @@ fn instance_name(base: &str, args: &[Type], unifier: &Unifier) -> String {
 
 /// A declared type, as the checker needs it: interned names, so a member
 /// lookup is an integer comparison.
-enum DefKind {
+pub(crate) enum DefKind {
     Struct(Vec<(Symbol, Type)>),
     Enum(Vec<(Symbol, Vec<Type>)>),
 }
 
-struct TypeDef {
+pub(crate) struct TypeDef {
     name: Symbol,
     def: DefId,
     /// Type parameters in declaration order; `Type::Param(i)` is the `i`th.
     generics: Vec<Symbol>,
+    /// The mode the declaration wrote, if it wrote one. `None` means the mode
+    /// is whatever the members make it (§3).
+    pub(crate) declared_mode: Option<Mode>,
     kind: DefKind,
     span: Span,
 }
 
 impl TypeDef {
-    /// Every type this one holds directly, for the size check.
-    fn members(&self) -> Box<dyn Iterator<Item = &Type> + '_> {
+    /// Every type this one holds directly, for the size check and for the
+    /// structural mode computation.
+    pub(crate) fn members(&self) -> Box<dyn Iterator<Item = &Type> + '_> {
         match &self.kind {
             DefKind::Struct(fields) => Box::new(fields.iter().map(|(_, ty)| ty)),
             DefKind::Enum(variants) => Box::new(variants.iter().flat_map(|(_, p)| p.iter())),
@@ -409,9 +418,9 @@ fn collect_types(ast: &Ast, unifier: &mut Unifier) -> Result<Vec<TypeDef>, Diagn
     let mut defs: Vec<TypeDef> = Vec::new();
 
     for (index, item) in ast.items.iter().enumerate() {
-        let (name_sym, noun, generics) = match item {
-            Item::Struct(decl) => (decl.name, "struct", decl.generics.clone()),
-            Item::Enum(decl) => (decl.name, "enum", decl.generics.clone()),
+        let (name_sym, noun, generics, declared_mode) = match item {
+            Item::Struct(decl) => (decl.name, "struct", decl.generics.clone(), decl.mode),
+            Item::Enum(decl) => (decl.name, "enum", decl.generics.clone(), decl.mode),
             Item::Fn(_) => continue,
         };
         let span = ast.item_span(ast::ItemId(index as u32));
@@ -436,7 +445,7 @@ fn collect_types(ast: &Ast, unifier: &mut Unifier) -> Result<Vec<TypeDef>, Diagn
             _ => DefKind::Enum(Vec::new()),
         };
         check_generic_names(ast, &generics, span)?;
-        defs.push(TypeDef { name: name_sym, def, generics, kind, span });
+        defs.push(TypeDef { name: name_sym, def, generics, declared_mode, kind, span });
     }
 
     for item in ast.items.iter() {
@@ -508,6 +517,29 @@ fn collect_types(ast: &Ast, unifier: &mut Unifier) -> Result<Vec<TypeDef>, Diagn
                     ast.name_of(defs[index].name)
                 ),
                 defs[index].span,
+            ));
+        }
+    }
+
+    // §3: a declared `val` is a promise about the whole type, so a `res`
+    // member breaks it. Inferring `res` instead would make the annotation
+    // decorative; the declaration is refused so the promise means something.
+    //
+    // This runs after the acyclicity check because `mode_of` walks members
+    // and relies on there being no cycle to walk forever in.
+    for def in defs.iter() {
+        if def.declared_mode != Some(Mode::Val) {
+            continue;
+        }
+        let members: Vec<Type> = def.members().cloned().collect();
+        if let Some(member) = members.iter().find(|m| mode_of(&defs, unifier, m) == Mode::Res) {
+            return Err(Diagnostic::new(
+                format!(
+                    "`{}` is declared `val`, but it holds `{}`, which is `res`",
+                    ast.name_of(def.name),
+                    unifier.display(member)
+                ),
+                def.span,
             ));
         }
     }
@@ -726,15 +758,18 @@ fn lower_function(
         scopes: vec![Vec::new()],
         slots: Vec::new(),
         ret: ret.clone(),
+        trace: Trace::new(),
     };
 
     for (param, ty) in decl.params.iter().zip(params.iter()) {
         // Parameters are immutable: the shape of a binding handed to you, not
-        // one you own outright.
-        f.declare(param.name, ty.clone(), false);
+        // one you own outright. A `res` parameter is live from entry, and the
+        // body owes exactly one consumption of it on every path.
+        f.declare(param.name, ty.clone(), false, ast.type_span(param.ty));
     }
     let mut body = f.block(&decl.body)?;
     let mut slots = f.slots.clone();
+    let trace = f.trace.finish();
 
     settle_types(&mut body, unifier);
     for slot in slots.iter_mut() {
@@ -752,6 +787,32 @@ fn lower_function(
                 ast.name_of(decl.name)
             ),
             ast.item_span(ast::ItemId(signature.item as u32)),
+        ));
+    }
+
+    // Linearity runs last, on settled types: a mode is a fact about a type,
+    // and a type is not a fact until inference is done (`linear.rs`).
+    //
+    // A generic body is checked once with its parameters rigid, where a
+    // parameter is `val` (§3 — mode is never inferred), and then again per
+    // instantiation, where it is whatever it was instantiated at. So mode
+    // polymorphism does fall out of monomorphisation, at the price §12
+    // warned about: a body that leaks its `T` is refused when someone
+    // instantiates it at a `res` type, not where it is written. The
+    // instantiation is named so the message says which one.
+    if let Err(error) = linear::check(defs, unifier, &slots, &trace) {
+        if args.is_empty() {
+            return Err(error);
+        }
+        let at: Vec<String> = args.iter().map(|a| unifier.display(a)).collect();
+        return Err(Diagnostic::new(
+            format!(
+                "{} (checking `{}` instantiated at `{}`)",
+                error.message,
+                ast.name_of(decl.name),
+                at.join("`, `")
+            ),
+            error.span,
         ));
     }
 
@@ -874,18 +935,30 @@ struct FnLowering<'a> {
     scopes: Vec<Vec<Binding>>,
     slots: Vec<Type>,
     ret: Type,
+    /// What the linearity checker replays once the types are settled
+    /// (`linear.rs`). Recorded here because this is where the spans are.
+    trace: Trace,
 }
 
 impl<'a> FnLowering<'a> {
-    fn declare(&mut self, name: Symbol, ty: Type, mutable: bool) -> Slot {
-        let slot = Slot(self.slots.len() as u32);
-        self.slots.push(ty.clone());
+    fn declare(&mut self, name: Symbol, ty: Type, mutable: bool, span: Span) -> Slot {
+        let slot = self.temp(ty.clone());
         self.scopes.last_mut().expect("a scope is always open").push(Binding {
             name,
             slot,
             ty,
             mutable,
         });
+        self.trace.emit(Event::Declare { slot, name: self.ast.name_of(name).to_owned(), span });
+        slot
+    }
+
+    /// A slot with no name: somewhere for a value to live while its parts are
+    /// taken out of it. It carries no linearity obligation of its own, because
+    /// consuming the value it was built from already discharged one.
+    fn temp(&mut self, ty: Type) -> Slot {
+        let slot = Slot(self.slots.len() as u32);
+        self.slots.push(ty);
         slot
     }
 
@@ -930,7 +1003,10 @@ impl<'a> FnLowering<'a> {
 
     fn block(&mut self, block: &Block) -> Result<Vec<Stmt>, Diagnostic> {
         self.scopes.push(Vec::new());
+        self.trace.open();
         let out = self.stmts(&block.stmts);
+        let events = self.trace.close();
+        self.trace.emit(Event::Scope(events));
         self.scopes.pop();
         out
     }
@@ -944,12 +1020,21 @@ impl<'a> FnLowering<'a> {
                     self.ast.stmt_span(id),
                 ));
             }
-            out.push(self.stmt(id)?);
+            out.extend(self.stmt(id)?);
         }
         Ok(out)
     }
 
-    fn stmt(&mut self, id: StmtId) -> Result<Stmt, Diagnostic> {
+    /// One source statement, which may lower to more than one IR statement:
+    /// destructuring binds each part separately.
+    fn stmt(&mut self, id: StmtId) -> Result<Vec<Stmt>, Diagnostic> {
+        if let AstStmt::Destructure { .. } = self.ast.stmt(id) {
+            return self.destructure(id);
+        }
+        Ok(vec![self.simple_stmt(id)?])
+    }
+
+    fn simple_stmt(&mut self, id: StmtId) -> Result<Stmt, Diagnostic> {
         let span = self.ast.stmt_span(id);
         Ok(match self.ast.stmt(id) {
             AstStmt::Let { name, mutable, ty, value } => {
@@ -980,7 +1065,7 @@ impl<'a> FnLowering<'a> {
                         span,
                     ));
                 }
-                let slot = self.declare(*name, declared, *mutable);
+                let slot = self.declare(*name, declared, *mutable, span);
                 Stmt::Store { slot, value }
             }
             AstStmt::Assign { name, value } => {
@@ -1001,21 +1086,43 @@ impl<'a> FnLowering<'a> {
                 }
                 let (slot, declared) = (binding.slot, binding.ty.clone());
                 self.expect_type(&declared, &found, value_span)?;
+                self.trace.emit(Event::Assign { slot, span });
                 Stmt::Store { slot, value }
             }
-            AstStmt::Expr(e) => Stmt::Eval(self.expr(*e)?.0),
+            AstStmt::Expr(e) => {
+                let (value, found) = self.expr(*e)?;
+                self.trace.emit(Event::Discard {
+                    ty: found,
+                    what: "this value",
+                    span: self.ast.expr_span(*e),
+                });
+                Stmt::Eval(value)
+            }
             AstStmt::If { cond, then_block, else_block } => {
                 let cond = self.condition(*cond)?;
+                self.trace.open();
                 let then_body = self.block(then_block)?;
+                let then_events = self.trace.close();
+                self.trace.open();
                 let else_body = match else_block {
                     Some(block) => self.block(block)?,
                     None => Vec::new(),
                 };
+                let else_events = self.trace.close();
+                // An `if` with no `else` still has two arms; the missing one
+                // is empty, which is exactly what makes a lone `if` that
+                // consumes a value a disagreement (§4.2).
+                self.trace.emit(Event::Branch { arms: vec![then_events, else_events], span });
                 Stmt::If { cond, then_body, else_body }
             }
             AstStmt::While { cond, body } => {
+                // The condition is evaluated before every iteration, so it
+                // belongs to the body as far as the back edge is concerned.
+                self.trace.open();
                 let cond = self.condition(*cond)?;
                 let body = self.block(body)?;
+                let events = self.trace.close();
+                self.trace.emit(Event::Loop { body: events, span });
                 Stmt::While { cond, body }
             }
             AstStmt::Match { scrutinee, arms } => self.match_stmt(*scrutinee, arms, span)?,
@@ -1023,9 +1130,101 @@ impl<'a> FnLowering<'a> {
                 let (value, found) = self.expr(*e)?;
                 let ret = self.ret.clone();
                 self.expect_type(&ret, &found, self.ast.expr_span(*e))?;
+                self.trace.emit(Event::Return { span });
                 Stmt::Return(value)
             }
+            AstStmt::Destructure { .. } => unreachable!("handled before the match"),
         })
+    }
+
+    /// `let File { fd } = f;` — §4.1's third consumer.
+    ///
+    /// The whole is spent and the parts are produced, each subject to the
+    /// rule in turn. Without it a `res` value could never be destroyed: there
+    /// is no `drop`, and a type whose parts are all `val` is exactly where an
+    /// obligation ends.
+    ///
+    /// The value is evaluated once into an unnamed slot, so `let P { a, b } =
+    /// make();` calls `make` once however many fields it has.
+    fn destructure(&mut self, id: StmtId) -> Result<Vec<Stmt>, Diagnostic> {
+        let span = self.ast.stmt_span(id);
+        let AstStmt::Destructure { struct_name, fields, value } = self.ast.stmt(id) else {
+            unreachable!("only called for a destructuring `let`");
+        };
+        let (struct_name, fields, value_id) = (*struct_name, fields.clone(), *value);
+        let value_span = self.ast.expr_span(value_id);
+        let (value, found) = self.expr(value_id)?;
+
+        let text = self.ast.name_of(struct_name);
+        let Some(def) = self.defs.iter().find(|d| d.name == struct_name) else {
+            return Err(Diagnostic::new(format!("`{text}` is not a struct"), span));
+        };
+        let (def_id, generic_count) = (def.def, def.generics.len());
+        let DefKind::Struct(declared) = &def.kind else {
+            return Err(Diagnostic::new(
+                format!("`{text}` is an enum, not a struct; take it apart with `match`"),
+                span,
+            ));
+        };
+        let declared = declared.clone();
+
+        let type_args = self.fresh_args(generic_count);
+        self.expect_type(&Type::Named(def_id, type_args.clone()), &found, value_span)?;
+
+        if fields.len() != declared.len() {
+            return Err(Diagnostic::new(
+                format!(
+                    "`{text}` has {} field{}, but this pattern names {}; destructuring takes the whole value apart",
+                    declared.len(),
+                    if declared.len() == 1 { "" } else { "s" },
+                    fields.len()
+                ),
+                span,
+            ));
+        }
+
+        let mut order: Vec<usize> = Vec::with_capacity(fields.len());
+        for (position, field) in fields.iter().enumerate() {
+            let field_text = self.ast.name_of(*field);
+            let Some(index) = declared.iter().position(|(n, _)| n == field) else {
+                return Err(Diagnostic::new(format!("`{text}` has no field `{field_text}`"), span));
+            };
+            if order.contains(&index) {
+                return Err(Diagnostic::new(format!("field `{field_text}` is named twice"), span));
+            }
+            if self.declared_in_current_scope(*field) {
+                return Err(Diagnostic::new(
+                    format!(
+                        "`{field_text}` is already bound in this block (shadowing is only allowed in an inner block)"
+                    ),
+                    span,
+                ));
+            }
+            if fields[..position].contains(field) {
+                return Err(Diagnostic::new(
+                    format!("`{field_text}` is bound twice in this pattern"),
+                    span,
+                ));
+            }
+            order.push(index);
+        }
+
+        let whole = self.temp(Type::Named(def_id, type_args.clone()));
+        let mut out = vec![Stmt::Store { slot: whole, value }];
+        for (field, index) in fields.iter().zip(order) {
+            let ty = declared[index].1.substitute(&type_args);
+            let slot = self.declare(*field, ty, false, span);
+            out.push(Stmt::Store {
+                slot,
+                value: Expr::Field {
+                    base: Box::new(Expr::Load(whole)),
+                    def: def_id,
+                    args: type_args.clone(),
+                    index: index as u32,
+                },
+            });
+        }
+        Ok(out)
     }
 
     /// Check a `match`: the scrutinee is an enum, every arm names a variant of
@@ -1064,9 +1263,11 @@ impl<'a> FnLowering<'a> {
         };
         let variants = variants.clone();
 
+        let scrutinee_ty = Type::Named(def_id, type_args.clone());
         let mut covered = vec![false; variants.len()];
         let mut wildcard = false;
         let mut lowered: Vec<Arm> = Vec::new();
+        let mut arm_events: Vec<Vec<Event>> = Vec::new();
 
         for arm in arms {
             if wildcard {
@@ -1132,7 +1333,18 @@ impl<'a> FnLowering<'a> {
             // Each arm's bindings live in their own scope, so two arms may
             // bind the same name to different types.
             self.scopes.push(Vec::new());
+            self.trace.open();
             let mut slots: Vec<Option<Slot>> = Vec::new();
+            if variant_index.is_none() {
+                // A `_` arm consumes the scrutinee and never names its parts.
+                // For a `val` enum that is a discard and costs nothing; for a
+                // `res` one it is the silent drop §4 exists to forbid.
+                self.trace.emit(Event::Discard {
+                    ty: scrutinee_ty.clone(),
+                    what: "the value matched here",
+                    span: scrutinee_span,
+                });
+            }
             if let Some(index) = variant_index {
                 // A binding's type comes from the scrutinee's own type
                 // arguments: matching `Option[int]` binds an `int`.
@@ -1143,6 +1355,7 @@ impl<'a> FnLowering<'a> {
                         Some(name) => {
                             if self.declared_in_current_scope(*name) {
                                 self.scopes.pop();
+                                self.trace.close();
                                 return Err(Diagnostic::new(
                                     format!(
                                         "`{}` is bound twice in this pattern",
@@ -1151,15 +1364,21 @@ impl<'a> FnLowering<'a> {
                                     span,
                                 ));
                             }
-                            slots.push(Some(self.declare(*name, ty, false)));
+                            slots.push(Some(self.declare(*name, ty, false, span)));
                         }
                         // `_` still occupies a payload position; it just has
-                        // no name, so the backend drops the value.
-                        None => slots.push(None),
+                        // no name, so the backend drops the value — which is
+                        // only allowed when there is nothing to drop.
+                        None => {
+                            self.trace.emit(Event::Discard { ty, what: "this payload", span });
+                            slots.push(None);
+                        }
                     }
                 }
             }
             let body = self.stmts(&arm.body.stmts);
+            let events = self.trace.close();
+            arm_events.push(vec![Event::Scope(events)]);
             self.scopes.pop();
             lowered.push(Arm { variant: variant_index, bindings: slots, body: body? });
         }
@@ -1177,6 +1396,9 @@ impl<'a> FnLowering<'a> {
             ));
         }
 
+        // A `match` is exhaustive by the check above, so its arms are the
+        // whole branch: there is no implicit fall-through arm to join.
+        self.trace.emit(Event::Branch { arms: arm_events, span });
         Ok(Stmt::Match { scrutinee: value, def: def_id, args: type_args, arms: lowered })
     }
 
@@ -1196,7 +1418,13 @@ impl<'a> FnLowering<'a> {
             AstExpr::Name(name) => {
                 let text = self.ast.name_of(*name);
                 match self.lookup(*name) {
-                    Some(binding) => (Expr::Load(binding.slot), binding.ty.clone()),
+                    Some(binding) => {
+                        let (slot, ty) = (binding.slot, binding.ty.clone());
+                        // Slice 1 has no borrowing, so every read of a `res`
+                        // binding is a move. §5 adds the other kind.
+                        self.trace.emit(Event::Use { slot, span });
+                        (Expr::Load(slot), ty)
+                    }
                     None if self.signatures.iter().any(|s| s.name == *name)
                         || Builtin::from_name(text).is_some() =>
                     {
@@ -1306,6 +1534,10 @@ impl<'a> FnLowering<'a> {
                     ));
                 };
                 let ty = fields[index].1.substitute(&type_args);
+                self.trace.emit(Event::Read {
+                    ty: Type::Named(def_id, type_args.clone()),
+                    span: base_span,
+                });
                 (
                     Expr::Field {
                         base: Box::new(lowered),
@@ -1392,7 +1624,18 @@ impl<'a> FnLowering<'a> {
                 let lhs_span = self.ast.expr_span(*lhs);
                 let rhs_span = self.ast.expr_span(*rhs);
                 let (l, lt) = self.expr(*lhs)?;
+                // `&&` and `||` do not evaluate their right operand when the
+                // left already decides, so anything it consumes is consumed
+                // conditionally — the same join as an `if` with no `else`.
+                let short_circuit = op.is_short_circuit();
+                if short_circuit {
+                    self.trace.open();
+                }
                 let (r, rt) = self.expr(*rhs)?;
+                if short_circuit {
+                    let events = self.trace.close();
+                    self.trace.emit(Event::Branch { arms: vec![events, Vec::new()], span });
+                }
 
                 // Both sides agree first, then the operator says what it
                 // accepts. Reporting in that order blames the operand that
@@ -1537,7 +1780,7 @@ mod tests {
     use super::*;
     use lex_sys_syntax::parse;
 
-    fn lower_src(src: &str) -> Result<Program, Diagnostic> {
+    pub(super) fn lower_src(src: &str) -> Result<Program, Diagnostic> {
         lower(&parse(src).expect("should parse"))
     }
 
@@ -2167,5 +2410,304 @@ mod tests {
         // `g` -- a caller never learns anything from a callee's body.
         let message = error("fn g() -> int { return true; } fn f() -> int { return g(); }");
         assert!(message.contains("expected `int`, found `bool`"), "{message}");
+    }
+}
+
+/// Modes and linearity: `docs/linearity-and-effects.md` §3 and §4.
+#[cfg(test)]
+mod linearity_tests {
+    use super::tests::lower_src;
+    use super::{Diagnostic, Program};
+
+    /// A `res` type, a way to make one, and a way to spend one -- the three
+    /// things every case below needs.
+    const PRELUDE: &str = "\
+        res struct File { fd: int } \
+        fn open(n: int) -> File { return File { fd: n }; } \
+        fn close(f: File) -> int { let File { fd } = f; return fd; } ";
+
+    fn check(body: &str) -> Result<Program, Diagnostic> {
+        lower_src(&format!("{PRELUDE}{body}"))
+    }
+
+    fn refused(body: &str) -> String {
+        check(body).expect_err("this should be refused").message
+    }
+
+    fn accepted(body: &str) {
+        check(body).expect("this should be accepted");
+    }
+
+    #[test]
+    fn a_res_value_consumed_once_is_accepted() {
+        accepted("fn main() -> int { return close(open(1)); }");
+    }
+
+    #[test]
+    fn a_res_value_used_twice_is_refused() {
+        let message = refused(
+            "struct Pair { a: File, b: File } \
+             fn main() -> int { let f = open(1); let p = Pair { a: f, b: f }; return 0; }",
+        );
+        assert!(message.contains("already been consumed"), "{message}");
+    }
+
+    #[test]
+    fn a_res_value_used_after_a_move_is_refused() {
+        let message =
+            refused("fn main() -> int { let f = open(1); let a = close(f); return close(f); }");
+        assert!(message.contains("already been consumed"), "{message}");
+    }
+
+    #[test]
+    fn a_res_value_live_at_a_return_is_refused() {
+        let message = refused("fn main() -> int { let f = open(1); return 0; }");
+        assert!(message.contains("consumed on every path"), "{message}");
+    }
+
+    #[test]
+    fn a_res_value_live_at_the_end_of_a_block_is_refused() {
+        let message = refused("fn main() -> int { if true { let f = open(1); } return 0; }");
+        assert!(message.contains("still live at the end of this block"), "{message}");
+    }
+
+    #[test]
+    fn branches_must_agree_about_what_is_live() {
+        let message = refused(
+            "fn main() -> int { let f = open(1); if true { let a = close(f); } return 0; }",
+        );
+        assert!(message.contains("branches disagree about `f`"), "{message}");
+    }
+
+    #[test]
+    fn branches_that_agree_are_accepted() {
+        accepted(
+            "fn main() -> int { let f = open(1); \
+             if true { let a = close(f); } else { let b = close(f); } return 0; }",
+        );
+    }
+
+    #[test]
+    fn an_arm_that_returns_does_not_have_to_agree() {
+        // A `return` is not at the merge point, so it takes no part in the
+        // join. Without that, §4.1's own accepting example would be refused.
+        accepted(
+            "fn main() -> int { let f = open(1); \
+             if true { return close(f); } return close(f); }",
+        );
+    }
+
+    #[test]
+    fn an_arm_may_create_and_spend_a_value_of_its_own() {
+        // The `then` arm declares and consumes `f`; the empty `else` never
+        // sees it. That is not a disagreement -- a binding declared inside an
+        // arm dies with the arm, and its own block already checked it.
+        accepted("fn main() -> int { if true { let f = open(1); let a = close(f); } return 0; }");
+    }
+
+    #[test]
+    fn a_loop_may_not_consume_an_outer_binding() {
+        let message = refused(
+            "fn main() -> int { let f = open(1); var i = 0; \
+             while i < 2 { let a = close(f); i = i + 1; } return 0; }",
+        );
+        assert!(message.contains("consumed inside this loop"), "{message}");
+    }
+
+    #[test]
+    fn a_loop_that_consumes_what_it_creates_is_accepted() {
+        accepted(
+            "fn main() -> int { var i = 0; \
+             while i < 2 { let f = open(i); let a = close(f); i = i + 1; } return 0; }",
+        );
+    }
+
+    #[test]
+    fn a_conditionally_evaluated_operand_is_a_branch() {
+        // `&&` does not evaluate its right operand when the left decides, so
+        // a consumption there happens on one path only.
+        let message = refused(
+            "fn spend(f: File) -> bool { let a = close(f); return true; } \
+             fn main() -> int { let f = open(1); \
+             let b = false && spend(f); return 0; }",
+        );
+        assert!(message.contains("branches disagree"), "{message}");
+    }
+
+    #[test]
+    fn a_res_value_cannot_be_discarded() {
+        let message = refused("fn main() -> int { open(1); return 0; }");
+        assert!(message.contains("cannot be discarded"), "{message}");
+    }
+
+    #[test]
+    fn a_val_value_may_be_discarded() {
+        accepted("fn main() -> int { close(open(1)); return 0; }");
+    }
+
+    #[test]
+    fn a_field_cannot_be_read_out_of_a_res_value() {
+        let message =
+            refused("fn main() -> int { let f = open(1); let n = f.fd; return close(f); }");
+        assert!(message.contains("a field cannot be read out of it"), "{message}");
+    }
+
+    #[test]
+    fn assigning_over_a_live_res_binding_is_refused() {
+        let message =
+            refused("fn main() -> int { var f = open(1); f = open(2); return close(f); }");
+        assert!(message.contains("would discard the `res` value"), "{message}");
+    }
+
+    #[test]
+    fn assigning_over_a_spent_res_binding_is_accepted() {
+        accepted(
+            "fn main() -> int { var f = open(1); let a = close(f); f = open(2); \
+             return close(f); }",
+        );
+    }
+
+    #[test]
+    fn a_wildcard_arm_may_not_swallow_a_res_scrutinee() {
+        let message = refused(
+            "enum Slot { Empty, Full(File) } \
+             fn size(s: Slot) -> int { match s { Slot::Empty => { return 0; } \
+             _ => { return 1; } } } fn main() -> int { return 0; }",
+        );
+        assert!(message.contains("the value matched here is `res`"), "{message}");
+    }
+
+    #[test]
+    fn an_ignored_res_payload_is_refused() {
+        let message = refused(
+            "enum Slot { Empty, Full(File) } \
+             fn size(s: Slot) -> int { match s { Slot::Empty => { return 0; } \
+             Slot::Full(_) => { return 1; } } } fn main() -> int { return 0; }",
+        );
+        assert!(message.contains("this payload is `res`"), "{message}");
+    }
+
+    #[test]
+    fn an_ignored_val_payload_is_accepted() {
+        accepted(
+            "enum Slot { Empty, Full(int) } \
+             fn size(s: Slot) -> int { match s { Slot::Empty => { return 0; } \
+             Slot::Full(_) => { return 1; } } } fn main() -> int { return 0; }",
+        );
+    }
+
+    #[test]
+    fn mode_is_inferred_from_members() {
+        let message = refused(
+            "struct Holder { f: File } \
+             fn main() -> int { let h = Holder { f: open(1) }; return 0; }",
+        );
+        assert!(message.contains("consumed on every path"), "{message}");
+    }
+
+    #[test]
+    fn a_val_declaration_may_not_hold_a_res_member() {
+        let message = refused("val struct Wrapper { f: File } fn main() -> int { return 0; }");
+        assert!(message.contains("declared `val`, but it holds"), "{message}");
+    }
+
+    #[test]
+    fn a_val_declaration_of_val_members_is_accepted() {
+        accepted("val struct Point { x: int, y: int } fn main() -> int { return 0; }");
+    }
+
+    #[test]
+    fn a_generic_type_takes_its_mode_from_its_arguments() {
+        // `Held[int]` is `val` and may be dropped; `Held[File]` is `res`.
+        accepted(
+            "struct Held[T] { value: T } fn main() -> int { let h = Held { value: 1 }; return 0; }",
+        );
+        let message = refused(
+            "struct Held[T] { value: T } \
+             fn main() -> int { let h = Held { value: open(1) }; return 0; }",
+        );
+        assert!(message.contains("consumed on every path"), "{message}");
+    }
+
+    #[test]
+    fn a_generic_function_is_checked_at_each_instantiation() {
+        // The body is accepted where it is written, because a type parameter
+        // is `val` (§3). The copy at `File` is where it fails, and the
+        // message says which copy.
+        let message = refused(
+            "fn sink[T](x: T) -> int { return 0; } fn main() -> int { return sink(open(1)); }",
+        );
+        assert!(message.contains("instantiated at `File`"), "{message}");
+        accepted("fn sink[T](x: T) -> int { return 0; } fn main() -> int { return sink(1); }");
+    }
+
+    #[test]
+    fn destructuring_consumes_the_whole_and_produces_the_parts() {
+        accepted(
+            "struct Pair { a: File, b: File } \
+             fn main() -> int { let p = Pair { a: open(1), b: open(2) }; \
+             let Pair { a, b } = p; return close(a) + close(b); }",
+        );
+    }
+
+    #[test]
+    fn a_destructured_part_carries_its_own_obligation() {
+        let message = refused(
+            "struct Pair { a: File, b: File } \
+             fn main() -> int { let p = Pair { a: open(1), b: open(2) }; \
+             let Pair { a, b } = p; return close(a); }",
+        );
+        assert!(message.contains("consumed on every path"), "{message}");
+    }
+
+    #[test]
+    fn a_partial_destructuring_is_refused() {
+        let message = refused(
+            "struct Pair { a: File, b: File } \
+             fn main() -> int { let p = Pair { a: open(1), b: open(2) }; \
+             let Pair { a } = p; return close(a); }",
+        );
+        assert!(message.contains("takes the whole value apart"), "{message}");
+    }
+
+    #[test]
+    fn destructuring_names_the_declared_fields() {
+        let message = refused("fn main() -> int { let File { handle } = open(1); return handle; }");
+        assert!(message.contains("has no field `handle`"), "{message}");
+        let message = refused("fn main() -> int { let Missing { x } = open(1); return x; }");
+        assert!(message.contains("is not a struct"), "{message}");
+    }
+
+    #[test]
+    fn destructuring_evaluates_its_value_once() {
+        // Two fields, one call: the value goes into an unnamed slot and the
+        // parts come out of it.
+        let program = check(
+            "struct Pair { a: int, b: int } \
+             fn make() -> Pair { return Pair { a: 1, b: 2 }; } \
+             fn main() -> int { let Pair { a, b } = make(); return a + b; }",
+        )
+        .expect("accepted");
+        let main = program.func(program.find("main").expect("main"));
+        let calls = format!("{:?}", main.body).matches("Call").count();
+        assert_eq!(calls, 1, "{:?}", main.body);
+    }
+
+    #[test]
+    fn an_enum_may_be_declared_res() {
+        let message = refused(
+            "res enum Handle { Closed, Open(int) } \
+             fn main() -> int { let h = Handle::Closed; return 0; }",
+        );
+        assert!(message.contains("consumed on every path"), "{message}");
+    }
+
+    #[test]
+    fn the_linearity_check_says_where() {
+        // Every rule here reports at a span the programmer wrote, not at the
+        // enclosing function: the trace carries spans precisely so it can.
+        let source = format!("{PRELUDE}fn main() -> int {{ let f = open(1); return 0; }}");
+        let error = lower_src(&source).expect_err("refused");
+        assert!(source[error.span.start as usize..error.span.end as usize].starts_with("return"));
     }
 }
