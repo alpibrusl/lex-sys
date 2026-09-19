@@ -25,7 +25,7 @@ use lex_sys_syntax::ast::{
     self, Ast, Block, Expr as AstExpr, ExprId, Item, Stmt as AstStmt, StmtId, Symbol, TypeId,
 };
 use lex_sys_syntax::span::{Diagnostic, Span};
-use lex_sys_types::{Type, Unifier, UnifyError};
+use lex_sys_types::{DefId, Type, Unifier, UnifyError};
 
 /// A local variable. Parameters occupy slots `0..n_params`; each `let`/`var`
 /// takes the next slot and never reuses one, so a shadowing binding is simply
@@ -124,10 +124,30 @@ pub enum Expr {
     Int(i64),
     Bool(bool),
     Load(Slot),
+    /// A struct value. Fields are in *declaration* order whatever order they
+    /// were written in, so the backend never has to consult a name.
+    Struct {
+        def: DefId,
+        fields: Vec<Expr>,
+    },
+    /// `base.index`, by declaration position rather than by name. The struct
+    /// is named too, so the backend never has to re-derive the base's type.
+    Field {
+        base: Box<Expr>,
+        def: DefId,
+        index: u32,
+    },
     Neg(Box<Expr>),
     Not(Box<Expr>),
-    Bin { op: BinOp, lhs: Box<Expr>, rhs: Box<Expr> },
-    Call { callee: Callee, args: Vec<Expr> },
+    Bin {
+        op: BinOp,
+        lhs: Box<Expr>,
+        rhs: Box<Expr>,
+    },
+    Call {
+        callee: Callee,
+        args: Vec<Expr>,
+    },
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -169,14 +189,28 @@ impl Func {
     }
 }
 
+/// A declared struct, as the backend needs it: names for diagnostics and
+/// field types in declaration order.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct StructInfo {
+    pub name: String,
+    pub fields: Vec<(String, Type)>,
+}
+
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct Program {
     pub funcs: Vec<Func>,
+    /// Indexed by [`DefId`].
+    pub structs: Vec<StructInfo>,
 }
 
 impl Program {
     pub fn func(&self, id: FuncId) -> &Func {
         &self.funcs[id.0 as usize]
+    }
+
+    pub fn struct_info(&self, def: DefId) -> &StructInfo {
+        &self.structs[def.0 as usize]
     }
 
     pub fn find(&self, name: &str) -> Option<FuncId> {
@@ -209,16 +243,113 @@ struct Signature {
     ret: Type,
 }
 
+/// A declared struct, as the checker needs it: interned names, so a field
+/// lookup is an integer comparison.
+struct StructDef {
+    name: Symbol,
+    def: DefId,
+    fields: Vec<(Symbol, Type)>,
+    span: Span,
+}
+
+/// Can `from` reach `target` by following field types?
+///
+/// M1 has no references, so a struct that contains itself — directly or
+/// through others — has no finite size. There is no representation to pick and
+/// no depth to stop at, so it is refused rather than approximated.
+fn reaches(structs: &[StructDef], from: usize, target: usize, seen: &mut [bool]) -> bool {
+    if seen[from] {
+        return false;
+    }
+    seen[from] = true;
+    structs[from].fields.iter().any(|(_, ty)| match ty {
+        Type::Named(def, _) => {
+            let next = def.0 as usize;
+            next == target || reaches(structs, next, target, seen)
+        }
+        _ => false,
+    })
+}
+
+/// Collect every struct declaration, in three passes.
+///
+/// Names first, so a field may mention a struct declared later in the file;
+/// then field types, which need those names; then the size check, which needs
+/// every field type. Each pass needs the previous one complete, which is why
+/// they are passes and not one loop.
+fn collect_structs(ast: &Ast, unifier: &mut Unifier) -> Result<Vec<StructDef>, Diagnostic> {
+    let mut structs: Vec<StructDef> = Vec::new();
+
+    for (index, item) in ast.items.iter().enumerate() {
+        let Item::Struct(decl) = item else { continue };
+        let span = ast.item_span(ast::ItemId(index as u32));
+        let name = ast.name_of(decl.name);
+
+        if matches!(name, "int" | "bool") {
+            return Err(Diagnostic::new(
+                format!("`{name}` is a built-in type and cannot be redeclared"),
+                span,
+            ));
+        }
+        if structs.iter().any(|s| s.name == decl.name) {
+            return Err(Diagnostic::new(format!("struct `{name}` is declared twice"), span));
+        }
+
+        // Ids are handed out in declaration order, so `DefId(i)` indexes
+        // `structs[i]` and the backend can use the same numbering.
+        let def = unifier.declare(name);
+        structs.push(StructDef { name: decl.name, def, fields: Vec::new(), span });
+    }
+
+    for item in ast.items.iter() {
+        let Item::Struct(decl) = item else { continue };
+        let position = structs.iter().position(|s| s.name == decl.name).expect("declared above");
+        let span = structs[position].span;
+
+        let mut fields: Vec<(Symbol, Type)> = Vec::new();
+        for field in &decl.fields {
+            if fields.iter().any(|(n, _)| *n == field.name) {
+                return Err(Diagnostic::new(
+                    format!(
+                        "field `{}` is declared twice in `{}`",
+                        ast.name_of(field.name),
+                        ast.name_of(decl.name)
+                    ),
+                    span,
+                ));
+            }
+            fields.push((field.name, resolve_type(ast, &structs, field.ty)?));
+        }
+        structs[position].fields = fields;
+    }
+
+    for index in 0..structs.len() {
+        let mut seen = vec![false; structs.len()];
+        if reaches(&structs, index, index, &mut seen) {
+            return Err(Diagnostic::new(
+                format!(
+                    "struct `{}` contains itself, so it has no finite size (M1 has no references)",
+                    ast.name_of(structs[index].name)
+                ),
+                structs[index].span,
+            ));
+        }
+    }
+
+    Ok(structs)
+}
+
 /// Resolve and check an AST, producing IR a backend can lower without failing.
 pub fn lower(ast: &Ast) -> Result<Program, Diagnostic> {
     let mut unifier = Unifier::new();
+    let structs = collect_structs(ast, &mut unifier)?;
 
     // Pass 1: every function is visible to every other, so collect signatures
     // before checking any body. Definition order in the file is irrelevant,
     // and no body is ever consulted to type a call.
     let mut signatures: Vec<Signature> = Vec::new();
     for (index, item) in ast.items.iter().enumerate() {
-        let Item::Fn(decl) = item;
+        let Item::Fn(decl) = item else { continue };
         let name = ast.name_of(decl.name);
         let span = ast.item_span(ast::ItemId(index as u32));
 
@@ -242,21 +373,37 @@ pub fn lower(ast: &Ast) -> Result<Program, Diagnostic> {
                 ));
             }
             seen.push(param.name);
-            params.push(resolve_type(ast, &unifier, param.ty)?);
+            params.push(resolve_type(ast, &structs, param.ty)?);
         }
 
-        let ret = resolve_type(ast, &unifier, decl.ret)?;
+        let ret = resolve_type(ast, &structs, decl.ret)?;
         signatures.push(Signature { name: decl.name, params, ret });
     }
 
-    let mut program = Program::default();
+    let mut program = Program {
+        funcs: Vec::new(),
+        structs: structs
+            .iter()
+            .map(|s| StructInfo {
+                name: ast.name_of(s.name).to_owned(),
+                fields: s
+                    .fields
+                    .iter()
+                    .map(|(n, t)| (ast.name_of(*n).to_owned(), t.clone()))
+                    .collect(),
+            })
+            .collect(),
+    };
+
     for (index, item) in ast.items.iter().enumerate() {
-        let Item::Fn(decl) = item;
-        let signature = &signatures[index];
+        let Item::Fn(decl) = item else { continue };
+        let signature =
+            signatures.iter().find(|s| s.name == decl.name).expect("collected in the pass above");
 
         let mut f = FnLowering {
             ast,
             signatures: &signatures,
+            structs: &structs,
             unifier: &mut unifier,
             scopes: vec![Vec::new()],
             slots: Vec::new(),
@@ -298,7 +445,7 @@ pub fn lower(ast: &Ast) -> Result<Program, Diagnostic> {
 /// M1 has two primitive types and no declared ones yet, so this is short. It
 /// is a function rather than a match at each use site because unknown-type
 /// errors must read the same wherever a type is written.
-fn resolve_type(ast: &Ast, _unifier: &Unifier, id: TypeId) -> Result<Type, Diagnostic> {
+fn resolve_type(ast: &Ast, structs: &[StructDef], id: TypeId) -> Result<Type, Diagnostic> {
     let written = ast.ty(id);
     let name = ast.name_of(written.name);
     let span = ast.type_span(id);
@@ -306,14 +453,17 @@ fn resolve_type(ast: &Ast, _unifier: &Unifier, id: TypeId) -> Result<Type, Diagn
     let ty = match name {
         "int" => Type::Int,
         "bool" => Type::Bool,
-        other => {
-            return Err(Diagnostic::new(
-                format!("unknown type `{other}` (M1 has `int` and `bool`)"),
-                span,
-            ));
-        }
+        other => match structs.iter().find(|s| s.name == written.name) {
+            Some(def) => Type::Named(def.def, Vec::new()),
+            None => {
+                return Err(Diagnostic::new(format!("unknown type `{other}`"), span));
+            }
+        },
     };
 
+    // Nothing in M1 is generic yet, so every type takes zero arguments. The
+    // written form already allows them, which is why this is a check rather
+    // than a parse error.
     if !written.args.is_empty() {
         return Err(Diagnostic::new(format!("`{name}` takes no type arguments"), span));
     }
@@ -330,6 +480,7 @@ struct Binding {
 struct FnLowering<'a> {
     ast: &'a Ast,
     signatures: &'a [Signature],
+    structs: &'a [StructDef],
     unifier: &'a mut Unifier,
     scopes: Vec<Vec<Binding>>,
     slots: Vec<Type>,
@@ -406,7 +557,7 @@ impl<'a> FnLowering<'a> {
                 let (value, found) = self.expr(*value)?;
                 let declared = match ty {
                     Some(written) => {
-                        let declared = resolve_type(self.ast, self.unifier, *written)?;
+                        let declared = resolve_type(self.ast, self.structs, *written)?;
                         self.expect_type(
                             &declared,
                             &found,
@@ -507,6 +658,81 @@ impl<'a> FnLowering<'a> {
                     }
                 }
             }
+            AstExpr::StructLit { name, fields } => {
+                let text = self.ast.name_of(*name);
+                let Some(def) = self.structs.iter().find(|s| s.name == *name) else {
+                    return Err(Diagnostic::new(format!("`{text}` is not a struct"), span));
+                };
+                // Copied out before checking any field value, because
+                // checking borrows `self` and the table lives beside it.
+                let (def_id, declared) = (def.def, def.fields.clone());
+
+                let mut values: Vec<Option<Expr>> = vec![None; declared.len()];
+                for (field, value) in fields {
+                    let field_text = self.ast.name_of(*field);
+                    let Some(index) = declared.iter().position(|(n, _)| n == field) else {
+                        return Err(Diagnostic::new(
+                            format!("`{text}` has no field `{field_text}`"),
+                            span,
+                        ));
+                    };
+                    if values[index].is_some() {
+                        return Err(Diagnostic::new(
+                            format!("field `{field_text}` is given twice"),
+                            span,
+                        ));
+                    }
+                    let value_span = self.ast.expr_span(*value);
+                    let (lowered, found) = self.expr(*value)?;
+                    self.expect_type(&declared[index].1, &found, value_span)?;
+                    values[index] = Some(lowered);
+                }
+
+                // A struct value has every field or it is not one. There is no
+                // default to fall back on and no zero to invent.
+                if let Some(missing) = values.iter().position(Option::is_none) {
+                    return Err(Diagnostic::new(
+                        format!(
+                            "missing field `{}` in `{text}`",
+                            self.ast.name_of(declared[missing].0)
+                        ),
+                        span,
+                    ));
+                }
+
+                (
+                    Expr::Struct {
+                        def: def_id,
+                        fields: values.into_iter().map(|v| v.expect("checked above")).collect(),
+                    },
+                    Type::Named(def_id, Vec::new()),
+                )
+            }
+            AstExpr::Field { base, name } => {
+                let base_span = self.ast.expr_span(*base);
+                let (lowered, base_ty) = self.expr(*base)?;
+                let resolved = self.unifier.resolve(&base_ty);
+                let Type::Named(def_id, _) = resolved else {
+                    return Err(Diagnostic::new(
+                        format!("`{}` has no fields", self.unifier.display(&resolved)),
+                        base_span,
+                    ));
+                };
+                let def = self
+                    .structs
+                    .iter()
+                    .find(|s| s.def == def_id)
+                    .expect("a named type is a declared struct");
+                let field_text = self.ast.name_of(*name);
+                let Some(index) = def.fields.iter().position(|(n, _)| n == name) else {
+                    return Err(Diagnostic::new(
+                        format!("`{}` has no field `{field_text}`", self.ast.name_of(def.name)),
+                        span,
+                    ));
+                };
+                let ty = def.fields[index].1.clone();
+                (Expr::Field { base: Box::new(lowered), def: def_id, index: index as u32 }, ty)
+            }
             AstExpr::Unary { op, operand } => {
                 let operand_span = self.ast.expr_span(*operand);
                 let (inner, found) = self.expr(*operand)?;
@@ -543,8 +769,21 @@ impl<'a> FnLowering<'a> {
                     BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
                         self.expect_type(&Type::Int, &operand, lhs_span)?;
                     }
-                    // `==` and `!=` compare any two values of the same type.
-                    BinOp::Eq | BinOp::Ne => {}
+                    // `==` and `!=` compare two values of the same *scalar*
+                    // type. Structs would need a field-wise comparison, which
+                    // is a decision about what equality means rather than a
+                    // missing instruction, so M1 refuses instead of guessing.
+                    BinOp::Eq | BinOp::Ne => {
+                        if !matches!(operand, Type::Int | Type::Bool) {
+                            return Err(Diagnostic::new(
+                                format!(
+                                    "`{}` cannot be compared with `==` (M1 compares `int` and `bool`)",
+                                    self.unifier.display(&operand)
+                                ),
+                                lhs_span,
+                            ));
+                        }
+                    }
                 }
                 let result = op.result(&operand);
                 (Expr::Bin { op, lhs: Box::new(l), rhs: Box::new(r) }, result)
@@ -851,6 +1090,112 @@ mod tests {
     #[test]
     fn a_primitive_takes_no_type_arguments() {
         assert!(error("fn f() -> int[bool] { return 0; }").contains("takes no type arguments"));
+    }
+
+    // ---- structs -------------------------------------------------------
+
+    #[test]
+    fn a_struct_literal_is_reordered_into_declaration_order() {
+        // Written y-then-x; the IR holds x-then-y, so the backend never has
+        // to consult a field name.
+        let f = main_fn("struct P { x: int, y: bool } fn f() -> P { return P { y: true, x: 7 }; }");
+        let Stmt::Return(Expr::Struct { fields, .. }) = &f.body[0] else { panic!("{:?}", f.body) };
+        assert_eq!(fields[0], Expr::Int(7));
+        assert_eq!(fields[1], Expr::Bool(true));
+    }
+
+    #[test]
+    fn a_field_access_becomes_an_index() {
+        let f = main_fn("struct P { x: int, y: int } fn f(p: P) -> int { return p.y; }");
+        let Stmt::Return(Expr::Field { index, .. }) = &f.body[0] else { panic!() };
+        assert_eq!(*index, 1);
+    }
+
+    #[test]
+    fn a_struct_literal_must_give_every_field_exactly_once() {
+        let decl = "struct P { x: int, y: int } ";
+        assert!(
+            error(&format!("{decl}fn f() -> P {{ return P {{ x: 1 }}; }}"))
+                .contains("missing field `y`")
+        );
+        assert!(
+            error(&format!("{decl}fn f() -> P {{ return P {{ x: 1, y: 2, z: 3 }}; }}"))
+                .contains("has no field `z`")
+        );
+        assert!(
+            error(&format!("{decl}fn f() -> P {{ return P {{ x: 1, x: 2, y: 3 }}; }}"))
+                .contains("given twice")
+        );
+        assert!(
+            error(&format!("{decl}fn f() -> P {{ return P {{ x: true, y: 2 }}; }}"))
+                .contains("expected `int`, found `bool`")
+        );
+    }
+
+    #[test]
+    fn fields_are_checked_against_the_declaration() {
+        assert!(
+            error("struct P { x: int } fn f(p: P) -> int { return p.z; }")
+                .contains("`P` has no field `z`")
+        );
+        assert!(error("fn f() -> int { let x = 1; return x.y; }").contains("`int` has no fields"));
+    }
+
+    #[test]
+    fn structs_may_nest_and_be_passed_by_value() {
+        let p = lower_src(
+            "struct P { x: int } struct L { a: P, b: P }              fn mid(l: L) -> int { return (l.a.x + l.b.x) / 2; }              fn f() -> int { return mid(L { a: P { x: 1 }, b: P { x: 3 } }); }",
+        );
+        assert!(p.is_ok(), "{:?}", p.err());
+    }
+
+    #[test]
+    fn a_struct_that_contains_itself_is_refused() {
+        // No references in M1, so this has no finite size. Both the direct and
+        // the mutual case, because the check is reachability rather than a
+        // look at one field.
+        assert!(
+            error("struct N { next: N } fn f() -> int { return 0; }").contains("contains itself")
+        );
+        assert!(
+            error("struct A { b: B } struct B { a: A } fn f() -> int { return 0; }")
+                .contains("contains itself")
+        );
+        // ...but two fields of the same struct type are perfectly finite.
+        assert!(
+            lower_src("struct P { x: int } struct L { a: P, b: P } fn f() -> int { return 0; }")
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn struct_declarations_are_checked_for_duplicates() {
+        assert!(
+            error("struct P { x: int } struct P { y: int } fn f() -> int { return 0; }")
+                .contains("declared twice")
+        );
+        assert!(
+            error("struct P { x: int, x: bool } fn f() -> int { return 0; }")
+                .contains("field `x` is declared twice")
+        );
+        assert!(
+            error("struct int { x: int } fn f() -> int { return 0; }").contains("built-in type")
+        );
+    }
+
+    #[test]
+    fn a_struct_may_mention_one_declared_later() {
+        assert!(
+            lower_src("struct A { b: B } struct B { x: int } fn f() -> int { return 0; }").is_ok()
+        );
+    }
+
+    #[test]
+    fn structs_are_not_compared_with_equality() {
+        assert!(
+            error("struct P { x: int } fn f(a: P, b: P) -> bool { return a == b; }")
+                .contains("cannot be compared")
+        );
     }
 
     #[test]

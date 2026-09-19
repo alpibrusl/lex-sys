@@ -23,20 +23,45 @@ use lex_sys_ir::{
 use lex_sys_types::Type;
 use target_lexicon::Triple;
 
-/// The machine type a lex-sys type is held in.
+/// The machine types a lex-sys type is held in, in field order.
+///
+/// A struct is **scalarised**: it is not a block of memory with a layout, it
+/// is its leaf fields, each in its own register or stack argument. M1 has no
+/// references and no recursive structs, so every value is a finite tree of
+/// scalars and this always terminates.
+///
+/// That also means M1 makes no layout decisions at all. Deterministic layout
+/// is a commitment (#1) and `docs/defined-behaviour.md` is where it gets
+/// decided; choosing one here to make the backend easier would be choosing it
+/// by accident.
 ///
 /// `bool` is an `i8` because that is what Cranelift's `icmp` produces, so a
 /// comparison *is* a `bool` with nothing to convert. M0 widened every
 /// comparison to `i64` and called it an `int`; the type system now says what
 /// was always true about the value.
-fn clif_type(ty: &Type) -> types::Type {
+fn leaves_into(ty: &Type, program: &Program, out: &mut Vec<types::Type>) {
     match ty {
-        Type::Int => types::I64,
-        Type::Bool => types::I8,
+        Type::Int => out.push(types::I64),
+        Type::Bool => out.push(types::I8),
+        Type::Named(def, _) => {
+            for (_, field) in &program.struct_info(*def).fields {
+                leaves_into(field, program, out);
+            }
+        }
         other => {
             unreachable!("`{other:?}` reached the backend; the checker should have refused it")
         }
     }
+}
+
+fn leaves(ty: &Type, program: &Program) -> Vec<types::Type> {
+    let mut out = Vec::new();
+    leaves_into(ty, program, &mut out);
+    out
+}
+
+fn leaf_count(ty: &Type, program: &Program) -> u32 {
+    leaves(ty, program).len() as u32
 }
 
 /// Every lex-sys function is emitted under this prefix, so a program may define
@@ -126,6 +151,9 @@ impl<'a> Emitter<'a> {
     /// resolve.
     fn emit(&mut self, entry: &str) -> Result<(), CodegenError> {
         let call_conv = self.module.isa().default_call_conv();
+        // Bound once: the body emitter borrows the module mutably, so the
+        // program has to be reached through a separate binding.
+        let program = self.program;
 
         // Declare every lex-sys function first: calls are resolved against
         // declarations, so definition order in the file never matters.
@@ -134,9 +162,13 @@ impl<'a> Emitter<'a> {
             let mut sig = self.module.make_signature();
             sig.call_conv = call_conv;
             for slot in &func.slots[..func.n_params as usize] {
-                sig.params.push(AbiParam::new(clif_type(slot)));
+                for leaf in leaves(slot, self.program) {
+                    sig.params.push(AbiParam::new(leaf));
+                }
             }
-            sig.returns.push(AbiParam::new(clif_type(&func.ret)));
+            for leaf in leaves(&func.ret, self.program) {
+                sig.returns.push(AbiParam::new(leaf));
+            }
             let id = self
                 .module
                 .declare_function(&format!("{PREFIX}{}", func.name), Linkage::Local, &sig)
@@ -165,14 +197,8 @@ impl<'a> Emitter<'a> {
 
             {
                 let builder = FunctionBuilder::new(&mut ctx.func, &mut fb_ctx);
-                let mut body = BodyEmitter {
-                    builder,
-                    module: &mut self.module,
-                    declared: &declared,
-                    putchar,
-                    func,
-                    next_var: func.n_slots(),
-                };
+                let mut body =
+                    BodyEmitter::new(builder, &mut self.module, &declared, putchar, func, program);
                 body.emit_func(func);
                 body.builder.finalize();
             }
@@ -232,41 +258,88 @@ struct BodyEmitter<'a, 'f> {
     declared: &'a [FuncId],
     putchar: FuncId,
     func: &'a Func,
-    /// Slots occupy `0..n_slots`; temporaries the backend needs for its own
-    /// purposes are numbered above them.
+    program: &'a Program,
+    /// Where each slot's leaves begin among the function's variables.
+    slot_base: Vec<u32>,
+    /// Slot leaves occupy the variables below this; temporaries the backend
+    /// needs for its own purposes are numbered from here.
     next_var: u32,
 }
 
 impl<'a, 'f> BodyEmitter<'a, 'f> {
+    fn new(
+        builder: FunctionBuilder<'f>,
+        module: &'a mut ObjectModule,
+        declared: &'a [FuncId],
+        putchar: FuncId,
+        func: &'a Func,
+        program: &'a Program,
+    ) -> Self {
+        let mut slot_base = Vec::with_capacity(func.slots.len());
+        let mut next_var = 0;
+        for slot in &func.slots {
+            slot_base.push(next_var);
+            next_var += leaf_count(slot, program);
+        }
+        Self { builder, module, declared, putchar, func, program, slot_base, next_var }
+    }
+
+    /// A fresh variable the backend owns, numbered above every slot leaf.
+    fn temporary(&mut self, ty: types::Type) -> Variable {
+        let var = Variable::from_u32(self.next_var);
+        self.next_var += 1;
+        self.builder.declare_var(var, ty);
+        var
+    }
+
     fn emit_func(&mut self, func: &Func) {
         let entry = self.builder.create_block();
         self.builder.append_block_params_for_function_params(entry);
         self.builder.switch_to_block(entry);
         self.builder.seal_block(entry);
 
-        // Every slot is a Cranelift variable; the SSA builder turns them back
-        // into values. Parameters take their incoming values, everything else
-        // starts at zero so no path can observe an undefined slot.
+        // Every leaf of every slot is a Cranelift variable; the SSA builder
+        // turns them back into values. Parameters take their incoming values,
+        // everything else starts at zero so no path can observe an undefined
+        // slot.
         for (index, ty) in func.slots.iter().enumerate() {
-            self.builder.declare_var(Variable::from_u32(index as u32), clif_type(ty));
+            let base = self.slot_base[index];
+            for (offset, leaf) in leaves(ty, self.program).into_iter().enumerate() {
+                self.builder.declare_var(Variable::from_u32(base + offset as u32), leaf);
+            }
         }
-        for slot in 0..func.n_params {
-            let value = self.builder.block_params(entry)[slot as usize];
-            self.builder.def_var(Variable::from_u32(slot), value);
+
+        let param_leaves: u32 = func.slots[..func.n_params as usize]
+            .iter()
+            .map(|ty| leaf_count(ty, self.program))
+            .sum();
+        for index in 0..param_leaves {
+            let value = self.builder.block_params(entry)[index as usize];
+            self.builder.def_var(Variable::from_u32(index), value);
         }
-        for slot in func.n_params..func.n_slots() {
-            let ty = clif_type(&func.slots[slot as usize]);
-            let zero = self.builder.ins().iconst(ty, 0);
-            self.builder.def_var(Variable::from_u32(slot), zero);
+        for (index, ty) in func.slots.iter().enumerate().skip(func.n_params as usize) {
+            let base = self.slot_base[index];
+            for (offset, leaf) in leaves(ty, self.program).into_iter().enumerate() {
+                let zero = self.builder.ins().iconst(leaf, 0);
+                self.builder.def_var(Variable::from_u32(base + offset as u32), zero);
+            }
         }
 
         let terminated = self.stmts(&func.body);
         if !terminated {
             // Unreachable in a well-formed program: lowering proved every path
             // returns. Emitted so the block is filled whatever happens.
-            let zero = self.builder.ins().iconst(clif_type(&func.ret), 0);
-            self.builder.ins().return_(&[zero]);
+            self.return_zero();
         }
+    }
+
+    /// Return a zero of the function's return type, however many leaves it has.
+    fn return_zero(&mut self) {
+        let zeros: Vec<Value> = leaves(&self.func.ret, self.program)
+            .into_iter()
+            .map(|leaf| self.builder.ins().iconst(leaf, 0))
+            .collect();
+        self.builder.ins().return_(&zeros);
     }
 
     /// Emit a statement list; returns whether control left via `return`.
@@ -274,15 +347,18 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
         for stmt in stmts {
             match stmt {
                 Stmt::Store { slot, value } => {
-                    let value = self.expr(value);
-                    self.builder.def_var(Variable::from_u32(slot.0), value);
+                    let values = self.expr(value);
+                    let base = self.slot_base[slot.0 as usize];
+                    for (offset, value) in values.into_iter().enumerate() {
+                        self.builder.def_var(Variable::from_u32(base + offset as u32), value);
+                    }
                 }
                 Stmt::Eval(expr) => {
                     self.expr(expr);
                 }
                 Stmt::Return(expr) => {
-                    let value = self.expr(expr);
-                    self.builder.ins().return_(&[value]);
+                    let values = self.expr(expr);
+                    self.builder.ins().return_(&values);
                     return true;
                 }
                 Stmt::If { cond, then_body, else_body } => {
@@ -297,7 +373,7 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
     }
 
     fn if_stmt(&mut self, cond: &Expr, then_body: &[Stmt], else_body: &[Stmt]) -> bool {
-        let cond = self.expr(cond);
+        let cond = self.scalar(cond);
         let then_block = self.builder.create_block();
         let else_block = self.builder.create_block();
         let merge = self.builder.create_block();
@@ -324,9 +400,8 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
         self.builder.seal_block(merge);
         if both_returned {
             // Nothing branches here. Fill it anyway: an empty block is not a
-            // legal function, and this costs one instruction the linker drops.
-            let zero = self.builder.ins().iconst(clif_type(&self.func.ret), 0);
-            self.builder.ins().return_(&[zero]);
+            // legal function, and this costs instructions the linker drops.
+            self.return_zero();
         }
         both_returned
     }
@@ -339,7 +414,7 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
         self.builder.ins().jump(header, &[]);
         // The header stays unsealed until the back edge is emitted.
         self.builder.switch_to_block(header);
-        let cond = self.expr(cond);
+        let cond = self.scalar(cond);
         self.builder.ins().brif(cond, body_block, &[], exit, &[]);
 
         self.builder.switch_to_block(body_block);
@@ -353,44 +428,75 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
         self.builder.seal_block(exit);
     }
 
-    fn expr(&mut self, expr: &Expr) -> Value {
+    /// An expression whose type has exactly one leaf.
+    fn scalar(&mut self, expr: &Expr) -> Value {
+        let values = self.expr(expr);
+        debug_assert_eq!(values.len(), 1, "expected a scalar, got {} leaves", values.len());
+        values[0]
+    }
+
+    /// Emit an expression as its leaf values, in field order.
+    ///
+    /// A scalar yields one value and a struct yields one per leaf field, which
+    /// is why this returns a vector rather than a `Value`: there is no single
+    /// register a struct lives in, because it does not live in memory either.
+    fn expr(&mut self, expr: &Expr) -> Vec<Value> {
         match expr {
-            Expr::Int(v) => self.builder.ins().iconst(types::I64, *v),
-            Expr::Bool(v) => self.builder.ins().iconst(types::I8, i64::from(*v)),
-            Expr::Load(slot) => self.builder.use_var(Variable::from_u32(slot.0)),
+            Expr::Int(v) => vec![self.builder.ins().iconst(types::I64, *v)],
+            Expr::Bool(v) => vec![self.builder.ins().iconst(types::I8, i64::from(*v))],
+            Expr::Load(slot) => {
+                let base = self.slot_base[slot.0 as usize];
+                let count = leaf_count(&self.func.slots[slot.0 as usize], self.program);
+                (0..count)
+                    .map(|offset| self.builder.use_var(Variable::from_u32(base + offset)))
+                    .collect()
+            }
+            Expr::Struct { fields, .. } => {
+                fields.iter().flat_map(|field| self.expr(field)).collect()
+            }
+            Expr::Field { base, def, index } => {
+                let values = self.expr(base);
+                let info = self.program.struct_info(*def);
+                let start: u32 = info.fields[..*index as usize]
+                    .iter()
+                    .map(|(_, ty)| leaf_count(ty, self.program))
+                    .sum();
+                let len = leaf_count(&info.fields[*index as usize].1, self.program);
+                values[start as usize..(start + len) as usize].to_vec()
+            }
             Expr::Neg(inner) => {
-                let v = self.expr(inner);
-                self.builder.ins().ineg(v)
+                let v = self.scalar(inner);
+                vec![self.builder.ins().ineg(v)]
             }
             Expr::Not(inner) => {
                 // A `bool` is 0 or 1, so flipping the low bit is the negation.
-                let v = self.expr(inner);
-                self.builder.ins().bxor_imm(v, 1)
+                let v = self.scalar(inner);
+                vec![self.builder.ins().bxor_imm(v, 1)]
             }
             Expr::Bin { op, lhs, rhs } if op.is_short_circuit() => {
-                self.short_circuit(*op, lhs, rhs)
+                vec![self.short_circuit(*op, lhs, rhs)]
             }
             Expr::Bin { op, lhs, rhs } => {
-                let a = self.expr(lhs);
-                let b = self.expr(rhs);
-                self.binary(*op, a, b)
+                let a = self.scalar(lhs);
+                let b = self.scalar(rhs);
+                vec![self.binary(*op, a, b)]
             }
             Expr::Call { callee, args } => {
-                let args: Vec<Value> = args.iter().map(|a| self.expr(a)).collect();
+                let args: Vec<Value> = args.iter().flat_map(|a| self.expr(a)).collect();
                 match callee {
                     Callee::Fn(id) => {
                         let f = self
                             .module
                             .declare_func_in_func(self.declared[id.0 as usize], self.builder.func);
                         let call = self.builder.ins().call(f, &args);
-                        self.builder.inst_results(call)[0]
+                        self.builder.inst_results(call).to_vec()
                     }
                     Callee::Builtin(Builtin::PutChar) => {
                         let f = self.module.declare_func_in_func(self.putchar, self.builder.func);
                         let arg = self.builder.ins().ireduce(types::I32, args[0]);
                         let call = self.builder.ins().call(f, &[arg]);
                         let result = self.builder.inst_results(call)[0];
-                        self.builder.ins().sextend(types::I64, result)
+                        vec![self.builder.ins().sextend(types::I64, result)]
                     }
                 }
             }
@@ -404,14 +510,12 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
     /// The result travels in a variable rather than a block parameter, so this
     /// reuses the same SSA construction the slots already use.
     fn short_circuit(&mut self, op: BinOp, lhs: &Expr, rhs: &Expr) -> Value {
-        let result = Variable::from_u32(self.next_var);
-        self.next_var += 1;
-        self.builder.declare_var(result, types::I8);
+        let result = self.temporary(types::I8);
 
         let rhs_block = self.builder.create_block();
         let merge = self.builder.create_block();
 
-        let a = self.expr(lhs);
+        let a = self.scalar(lhs);
         // Short-circuiting means the answer is the left operand itself.
         self.builder.def_var(result, a);
         match op {
@@ -422,7 +526,7 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
 
         self.builder.switch_to_block(rhs_block);
         self.builder.seal_block(rhs_block);
-        let b = self.expr(rhs);
+        let b = self.scalar(rhs);
         self.builder.def_var(result, b);
         self.builder.ins().jump(merge, &[]);
 

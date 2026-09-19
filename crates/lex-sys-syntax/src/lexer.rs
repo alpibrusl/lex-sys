@@ -20,6 +20,7 @@ pub enum TokenKind {
     Return,
     True,
     False,
+    Struct,
     // punctuation
     LParen,
     RParen,
@@ -28,6 +29,7 @@ pub enum TokenKind {
     LBracket,
     RBracket,
     Comma,
+    Dot,
     Semi,
     Colon,
     Arrow,
@@ -64,6 +66,7 @@ impl TokenKind {
             TokenKind::Return => "`return`",
             TokenKind::True => "`true`",
             TokenKind::False => "`false`",
+            TokenKind::Struct => "`struct`",
             TokenKind::LParen => "`(`",
             TokenKind::RParen => "`)`",
             TokenKind::LBrace => "`{`",
@@ -71,6 +74,7 @@ impl TokenKind {
             TokenKind::LBracket => "`[`",
             TokenKind::RBracket => "`]`",
             TokenKind::Comma => "`,`",
+            TokenKind::Dot => "`.`",
             TokenKind::Semi => "`;`",
             TokenKind::Colon => "`:`",
             TokenKind::Arrow => "`->`",
@@ -166,6 +170,7 @@ pub fn tokenize(text: &str) -> Result<Vec<Token>, Diagnostic> {
             (b'[', _) => one(TokenKind::LBracket),
             (b']', _) => one(TokenKind::RBracket),
             (b',', _) => one(TokenKind::Comma),
+            (b'.', _) => one(TokenKind::Dot),
             (b';', _) => one(TokenKind::Semi),
             (b':', _) => one(TokenKind::Colon),
             (b'=', _) => one(TokenKind::Eq),
@@ -212,6 +217,7 @@ fn keyword(s: &str) -> Option<TokenKind> {
         "return" => TokenKind::Return,
         "true" => TokenKind::True,
         "false" => TokenKind::False,
+        "struct" => TokenKind::Struct,
         _ => return None,
     })
 }

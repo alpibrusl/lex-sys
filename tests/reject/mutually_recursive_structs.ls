@@ -1,0 +1,8 @@
+//~ ERROR contains itself
+
+struct A { b: B }
+struct B { a: A }
+
+fn main() -> int {
+    return 0;
+}

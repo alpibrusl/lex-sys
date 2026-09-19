@@ -9,7 +9,7 @@ use crate::span::{Diagnostic, Span};
 
 pub fn parse(source: &str) -> Result<Ast, Diagnostic> {
     let tokens = tokenize(source)?;
-    let mut p = Parser { source, tokens, pos: 0, ast: Ast::default() };
+    let mut p = Parser { source, tokens, pos: 0, ast: Ast::default(), no_struct_literal: false };
     p.unit()?;
     Ok(p.ast)
 }
@@ -19,6 +19,11 @@ struct Parser<'a> {
     tokens: Vec<Token>,
     pos: usize,
     ast: Ast,
+    /// True while parsing the condition of an `if` or `while`, where
+    /// `Point { .. }` cannot be told from the body's opening brace. Rust has
+    /// the same ambiguity and resolves it the same way: no struct literal
+    /// here, and parentheses if you really meant one.
+    no_struct_literal: bool,
 }
 
 impl<'a> Parser<'a> {
@@ -70,13 +75,15 @@ impl<'a> Parser<'a> {
 
     fn unit(&mut self) -> Result<(), Diagnostic> {
         while self.peek().kind != TokenKind::Eof {
-            if self.peek().kind != TokenKind::Fn {
-                return Err(self.err(format!(
-                    "expected `fn`, found {} (M0 has no items other than functions)",
-                    self.peek().kind.describe()
-                )));
-            }
-            self.fn_decl()?;
+            match self.peek().kind {
+                TokenKind::Fn => self.fn_decl()?,
+                TokenKind::Struct => self.struct_decl()?,
+                other => {
+                    return Err(
+                        self.err(format!("expected `fn` or `struct`, found {}", other.describe()))
+                    );
+                }
+            };
         }
         Ok(())
     }
@@ -104,6 +111,25 @@ impl<'a> Parser<'a> {
 
         let (body, end) = self.block()?;
         Ok(self.ast.push_item(Item::Fn(FnDecl { name, params, ret, body }), start.to(end)))
+    }
+
+    fn struct_decl(&mut self) -> Result<ItemId, Diagnostic> {
+        let start = self.expect(TokenKind::Struct)?.span;
+        let name = self.ident()?;
+        self.expect(TokenKind::LBrace)?;
+
+        let mut fields = Vec::new();
+        while self.peek().kind != TokenKind::RBrace {
+            let name = self.ident()?;
+            self.expect(TokenKind::Colon)?;
+            let ty = self.type_expr()?;
+            fields.push(FieldDecl { name, ty });
+            if !self.eat(TokenKind::Comma) {
+                break;
+            }
+        }
+        let end = self.expect(TokenKind::RBrace)?.span;
+        Ok(self.ast.push_item(Item::Struct(StructDecl { name, fields }), start.to(end)))
     }
 
     fn ident(&mut self) -> Result<Symbol, Diagnostic> {
@@ -195,9 +221,19 @@ impl<'a> Parser<'a> {
         Ok(self.ast.push_stmt(Stmt::Return(value), kw.span.to(end)))
     }
 
+    /// An `if`/`while` condition: an expression that may not be a bare struct
+    /// literal, because its brace would be taken for the body's.
+    fn condition(&mut self) -> Result<ExprId, Diagnostic> {
+        let outer = self.no_struct_literal;
+        self.no_struct_literal = true;
+        let cond = self.expr();
+        self.no_struct_literal = outer;
+        cond
+    }
+
     fn if_stmt(&mut self) -> Result<StmtId, Diagnostic> {
         let kw = self.bump();
-        let cond = self.expr()?;
+        let cond = self.condition()?;
         let (then_block, mut end) = self.block()?;
         let mut else_block = None;
         if self.eat(TokenKind::Else) {
@@ -217,7 +253,7 @@ impl<'a> Parser<'a> {
 
     fn while_stmt(&mut self) -> Result<StmtId, Diagnostic> {
         let kw = self.bump();
-        let cond = self.expr()?;
+        let cond = self.condition()?;
         let (body, end) = self.block()?;
         Ok(self.ast.push_stmt(Stmt::While { cond, body }, kw.span.to(end)))
     }
@@ -288,7 +324,34 @@ impl<'a> Parser<'a> {
             let span = minus.span.to(self.ast.expr_span(operand));
             return Ok(self.ast.push_expr(Expr::Unary { op: UnOp::Neg, operand }, span));
         }
-        self.primary()
+        self.postfix()
+    }
+
+    /// Field access binds tighter than any operator: `-p.x` negates the field,
+    /// and `a.x + b.y` adds two fields.
+    fn postfix(&mut self) -> Result<ExprId, Diagnostic> {
+        let mut base = self.primary()?;
+        while self.peek().kind == TokenKind::Dot {
+            self.bump();
+            let tok = self.peek();
+            let name = self.ident()?;
+            let span = self.ast.expr_span(base).to(tok.span);
+            base = self.ast.push_expr(Expr::Field { base, name }, span);
+        }
+        Ok(base)
+    }
+
+    /// Parse `inner` with struct literals allowed again: inside brackets of any
+    /// kind there is no brace to confuse with a block.
+    fn bracketed<T>(
+        &mut self,
+        inner: impl FnOnce(&mut Self) -> Result<T, Diagnostic>,
+    ) -> Result<T, Diagnostic> {
+        let outer = self.no_struct_literal;
+        self.no_struct_literal = false;
+        let result = inner(self);
+        self.no_struct_literal = outer;
+        result
     }
 
     fn primary(&mut self) -> Result<ExprId, Diagnostic> {
@@ -305,24 +368,46 @@ impl<'a> Parser<'a> {
             }
             TokenKind::Ident => {
                 let name = self.ident()?;
-                if self.peek().kind != TokenKind::LParen {
-                    return Ok(self.ast.push_expr(Expr::Name(name), tok.span));
-                }
-                self.bump();
-                let mut args = Vec::new();
-                while self.peek().kind != TokenKind::RParen {
-                    args.push(self.expr()?);
-                    if !self.eat(TokenKind::Comma) {
-                        break;
+                match self.peek().kind {
+                    TokenKind::LParen => {
+                        self.bump();
+                        let args = self.bracketed(|p| {
+                            let mut args = Vec::new();
+                            while p.peek().kind != TokenKind::RParen {
+                                args.push(p.expr()?);
+                                if !p.eat(TokenKind::Comma) {
+                                    break;
+                                }
+                            }
+                            Ok(args)
+                        })?;
+                        let end = self.expect(TokenKind::RParen)?.span;
+                        Ok(self.ast.push_expr(Expr::Call { callee: name, args }, tok.span.to(end)))
                     }
+                    TokenKind::LBrace if !self.no_struct_literal => {
+                        self.bump();
+                        let fields = self.bracketed(|p| {
+                            let mut fields = Vec::new();
+                            while p.peek().kind != TokenKind::RBrace {
+                                let field = p.ident()?;
+                                p.expect(TokenKind::Colon)?;
+                                fields.push((field, p.expr()?));
+                                if !p.eat(TokenKind::Comma) {
+                                    break;
+                                }
+                            }
+                            Ok(fields)
+                        })?;
+                        let end = self.expect(TokenKind::RBrace)?.span;
+                        Ok(self.ast.push_expr(Expr::StructLit { name, fields }, tok.span.to(end)))
+                    }
+                    _ => Ok(self.ast.push_expr(Expr::Name(name), tok.span)),
                 }
-                let end = self.expect(TokenKind::RParen)?.span;
-                Ok(self.ast.push_expr(Expr::Call { callee: name, args }, tok.span.to(end)))
             }
             TokenKind::LParen => {
                 // Grouping leaves no node behind: parentheses are formatting.
                 self.bump();
-                let inner = self.expr()?;
+                let inner = self.bracketed(|p| p.expr())?;
                 self.expect(TokenKind::RParen)?;
                 Ok(inner)
             }
@@ -350,9 +435,18 @@ impl<'a> Parser<'a> {
 mod tests {
     use super::*;
 
+    /// Parse, and hand back the first function. Items other than functions
+    /// are skipped, so a fixture may declare a struct alongside it.
     fn one_fn(src: &str) -> (Ast, FnDecl) {
         let ast = parse(src).expect("should parse");
-        let Item::Fn(decl) = ast.items[0].clone();
+        let decl = ast
+            .items
+            .iter()
+            .find_map(|item| match item {
+                Item::Fn(decl) => Some(decl.clone()),
+                Item::Struct(_) => None,
+            })
+            .expect("a function");
         (ast, decl)
     }
 
@@ -509,6 +603,64 @@ mod tests {
         let Stmt::Return(e) = ast.stmt(decl.body.stmts[0]) else { panic!() };
         let Expr::Call { args, .. } = ast.expr(*e) else { panic!() };
         assert_eq!(args.len(), 2);
+    }
+
+    #[test]
+    fn parses_a_struct_declaration() {
+        let ast = parse("struct Point { x: int, y: bool }").unwrap();
+        let Item::Struct(decl) = &ast.items[0] else { panic!() };
+        assert_eq!(ast.name_of(decl.name), "Point");
+        let fields: Vec<(&str, &str)> = decl
+            .fields
+            .iter()
+            .map(|f| (ast.name_of(f.name), ast.name_of(ast.ty(f.ty).name)))
+            .collect();
+        assert_eq!(fields, [("x", "int"), ("y", "bool")]);
+    }
+
+    #[test]
+    fn parses_a_struct_literal_and_field_access() {
+        let (ast, decl) =
+            one_fn("fn f() -> int { let p = Point { x: 1, y: 2 }; return p.x + p.y; }");
+        let Stmt::Let { value, .. } = ast.stmt(decl.body.stmts[0]) else { panic!() };
+        let Expr::StructLit { name, fields } = ast.expr(*value) else { panic!() };
+        assert_eq!(ast.name_of(*name), "Point");
+        assert_eq!(fields.len(), 2);
+
+        let Stmt::Return(e) = ast.stmt(decl.body.stmts[1]) else { panic!() };
+        let Expr::Binary { lhs, .. } = ast.expr(*e) else { panic!() };
+        let Expr::Field { name, .. } = ast.expr(*lhs) else { panic!() };
+        assert_eq!(ast.name_of(*name), "x");
+    }
+
+    #[test]
+    fn field_access_binds_tighter_than_any_operator() {
+        // `-p.x` negates the field, not the struct.
+        let (ast, decl) = one_fn("fn f() -> int { return -p.x; }");
+        let Stmt::Return(e) = ast.stmt(decl.body.stmts[0]) else { panic!() };
+        let Expr::Unary { op: UnOp::Neg, operand } = ast.expr(*e) else { panic!() };
+        assert!(matches!(ast.expr(*operand), Expr::Field { .. }));
+    }
+
+    #[test]
+    fn a_condition_does_not_swallow_the_body_as_a_struct_literal() {
+        // `if p { }` is a condition and a body, not a literal `p { }`.
+        let (ast, decl) = one_fn("fn f() -> int { if p { return 1; } return 0; }");
+        let Stmt::If { cond, .. } = ast.stmt(decl.body.stmts[0]) else { panic!() };
+        assert!(matches!(ast.expr(*cond), Expr::Name(_)));
+
+        // Parentheses are how you say you meant the literal.
+        let (ast, decl) = one_fn("fn f() -> int { if (P { b: true }).b { return 1; } return 0; }");
+        let Stmt::If { cond, .. } = ast.stmt(decl.body.stmts[0]) else { panic!() };
+        assert!(matches!(ast.expr(*cond), Expr::Field { .. }));
+    }
+
+    #[test]
+    fn a_struct_literal_is_allowed_again_inside_brackets() {
+        let (ast, decl) = one_fn("fn f() -> int { if g(P { x: 1 }) { return 1; } return 0; }");
+        let Stmt::If { cond, .. } = ast.stmt(decl.body.stmts[0]) else { panic!() };
+        let Expr::Call { args, .. } = ast.expr(*cond) else { panic!() };
+        assert!(matches!(ast.expr(args[0]), Expr::StructLit { .. }));
     }
 
     #[test]

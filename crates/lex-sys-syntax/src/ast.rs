@@ -123,6 +123,17 @@ pub enum Expr {
     Int(i64),
     Bool(bool),
     Name(Symbol),
+    /// `Point { x: 1, y: 2 }` — fields in the order written, which need not be
+    /// the order they were declared.
+    StructLit {
+        name: Symbol,
+        fields: Vec<(Symbol, ExprId)>,
+    },
+    /// `p.x`
+    Field {
+        base: ExprId,
+        name: Symbol,
+    },
     Unary {
         op: UnOp,
         operand: ExprId,
@@ -188,8 +199,21 @@ pub struct FnDecl {
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
+pub struct FieldDecl {
+    pub name: Symbol,
+    pub ty: TypeId,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct StructDecl {
+    pub name: Symbol,
+    pub fields: Vec<FieldDecl>,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Item {
     Fn(FnDecl),
+    Struct(StructDecl),
 }
 
 /// A parsed compilation unit: three arenas, three span side tables, one
