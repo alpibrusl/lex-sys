@@ -16,6 +16,7 @@
 //! `run` is the exception: it replaces its own status with the compiled
 //! program's, so `lex-sys run p.ls` and `lex-sys build p.ls && ./p` agree.
 
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
@@ -215,14 +216,29 @@ fn print_ids(input: &Path) -> Result<(), Failure> {
     lex_sys_ir::lower(&ast).map_err(|d| refused(d.render(&file)))?;
 
     let identities = lex_sys_id::identify(&ast);
-    for decl in &identities.types {
-        println!("type {:<24} {}", decl.name, decl.id);
+
+    // Written through a locked handle rather than `println!`, which panics on
+    // a closed pipe: `lex-sys ids big.ls | head` is an ordinary thing to do,
+    // and a backtrace is the wrong answer to it.
+    let stdout = io::stdout();
+    let mut out = stdout.lock();
+    let written = (|| -> io::Result<()> {
+        for decl in &identities.types {
+            writeln!(out, "type {:<24} {}", decl.name, decl.id)?;
+        }
+        for func in &identities.functions {
+            writeln!(out, "sig  {:<24} {}", func.name, func.sig)?;
+            writeln!(out, "body {:<24} {}", func.name, func.body)?;
+        }
+        out.flush()
+    })();
+
+    match written {
+        Ok(()) => Ok(()),
+        // The reader stopped listening. That is their business, not an error.
+        Err(e) if e.kind() == io::ErrorKind::BrokenPipe => Ok(()),
+        Err(e) => Err(environment(format!("cannot write to stdout: {e}"))),
     }
-    for func in &identities.functions {
-        println!("sig  {:<24} {}", func.name, func.sig);
-        println!("body {:<24} {}", func.name, func.body);
-    }
-    Ok(())
 }
 
 fn build(input: &Path, output: &Path, emit: Emit) -> Result<(), Failure> {

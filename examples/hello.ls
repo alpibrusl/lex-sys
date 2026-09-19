@@ -1,11 +1,17 @@
-// hello.ls — the M0 smoke program (#3).
+// hello.ls — the smoke program (#3), and the narrowest program the language
+// can express.
 //
-// M0 has one type, `int`. There are no strings, no arrays and no FFI yet, so
-// the greeting travels as two packed 64-bit words, seven bytes each, and is
-// unpacked a byte at a time. That is not how anyone will write lex-sys once M3
-// lands slices and strings — it is how you write a program when the language
-// is exactly integers, functions, arithmetic, `if`, `while` and local
-// bindings, which is precisely what this milestone claims to have.
+// It is still written the way M0 forced: there are no strings and no arrays
+// even now, so the greeting travels as two packed 64-bit words, seven bytes
+// each, unpacked a byte at a time. M3's slices are what change that.
+//
+// Deliberately left in its original form. The language has grown a type
+// system, structs, enums and generics since — see `tour.ls` for those — and
+// this file is worth keeping as the thing CI has built and run on both targets
+// since the first milestone.
+//
+//~ STDOUT Hello, world!
+//~ EXIT 0
 
 // Write the low seven bytes of `word`, least significant first.
 fn put_word(word: int) -> int {

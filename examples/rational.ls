@@ -11,6 +11,14 @@
 // contains itself, and with no references that has no finite size. The
 // language gets pointers in M2 and that program becomes writable. This is the
 // most real thing M1 can run, not a sketch of one.
+//
+//~ STDOUT 3/4 -1/3
+//~ STDOUT 5/6 1/6 1/6 3/2
+//~ STDOUT D Z
+//~ STDOUT YN 7 T
+//~ STDOUT <=>
+//~ STDOUT 49/20
+//~ EXIT 0
 
 // ---------------------------------------------------------------- output ---
 
