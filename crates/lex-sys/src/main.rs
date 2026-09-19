@@ -28,11 +28,15 @@ usage:
     lex-sys build <file.ls> [-o <output>] [--emit exe|obj]
     lex-sys check <file.ls>
     lex-sys run   <file.ls>
+    lex-sys ids   <file.ls>
     lex-sys --version
 
 options:
     -o <output>     where to write the result (default: the input's stem)
     --emit exe|obj  emit a linked executable (default) or a bare object file
+
+`ids` prints each declaration's content hash: a signature and a body for
+every function, one identity for every type. See docs/canonical-ast.md.
 ";
 
 const EXIT_REFUSED: u8 = 1;
@@ -94,6 +98,11 @@ fn run(args: &[String]) -> Result<ExitCode, Failure> {
         "check" => {
             let (input, _, _) = parse_args(&args[1..], false)?;
             compile_to_ir(&input)?;
+            Ok(ExitCode::SUCCESS)
+        }
+        "ids" => {
+            let (input, _, _) = parse_args(&args[1..], false)?;
+            print_ids(&input)?;
             Ok(ExitCode::SUCCESS)
         }
         "build" => {
@@ -191,6 +200,29 @@ fn compile_to_ir(input: &Path) -> Result<lex_sys_ir::Program, Failure> {
     }
 
     Ok(program)
+}
+
+/// Print every unit's content hash.
+///
+/// The program is checked first: hashing something that does not compile would
+/// hand out an identity for a thing that is not a program.
+fn print_ids(input: &Path) -> Result<(), Failure> {
+    let text = std::fs::read_to_string(input)
+        .map_err(|e| environment(format!("cannot read `{}`: {e}", input.display())))?;
+    let file = SourceFile::new(input.display().to_string(), text);
+
+    let ast = parse(&file.text).map_err(|d| refused(d.render(&file)))?;
+    lex_sys_ir::lower(&ast).map_err(|d| refused(d.render(&file)))?;
+
+    let identities = lex_sys_id::identify(&ast);
+    for decl in &identities.types {
+        println!("type {:<24} {}", decl.name, decl.id);
+    }
+    for func in &identities.functions {
+        println!("sig  {:<24} {}", func.name, func.sig);
+        println!("body {:<24} {}", func.name, func.body);
+    }
+    Ok(())
 }
 
 fn build(input: &Path, output: &Path, emit: Emit) -> Result<(), Failure> {

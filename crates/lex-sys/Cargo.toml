@@ -15,4 +15,5 @@ path = "src/main.rs"
 lex-sys-syntax.workspace = true
 lex-sys-ir.workspace = true
 lex-sys-types.workspace = true
+lex-sys-id.workspace = true
 lex-sys-codegen.workspace = true
