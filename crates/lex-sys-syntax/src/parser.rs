@@ -108,7 +108,7 @@ impl<'a> Parser<'a> {
     fn fn_decl(&mut self) -> Result<ItemId, Diagnostic> {
         let start = self.expect(TokenKind::Fn)?.span;
         let name = self.ident()?;
-        let generics = self.generic_params()?;
+        let (generics, regions, outlives) = self.declaration_params()?;
 
         self.expect(TokenKind::LParen)?;
         let mut params = Vec::new();
@@ -128,9 +128,10 @@ impl<'a> Parser<'a> {
         let ret = self.type_expr()?;
 
         let (body, end) = self.block()?;
-        Ok(self
-            .ast
-            .push_item(Item::Fn(FnDecl { name, generics, params, ret, body }), start.to(end)))
+        Ok(self.ast.push_item(
+            Item::Fn(FnDecl { name, generics, regions, outlives, params, ret, body }),
+            start.to(end),
+        ))
     }
 
     fn struct_decl(
@@ -197,17 +198,55 @@ impl<'a> Parser<'a> {
 
     /// `[A, B]` after a declaration's name, or nothing.
     fn generic_params(&mut self) -> Result<Vec<Symbol>, Diagnostic> {
+        let (generics, regions, _) = self.declaration_params()?;
+        if let Some(region) = regions.first() {
+            let _ = region;
+            return Err(self
+                .err("a type declaration has no region parameters; only a function can take one"));
+        }
+        Ok(generics)
+    }
+
+    /// `[T, &r, &s where s <= r]` after a declaration's name, or nothing.
+    ///
+    /// A region parameter wears its `&` at the binder (§5.1). The document
+    /// writes `fn len[r](s: &r Bytes)` and leaves which is which to be read
+    /// off the parameter list; marking the binder means a declaration says so
+    /// by itself, and a region parameter nobody used is still a region.
+    #[allow(clippy::type_complexity)]
+    fn declaration_params(
+        &mut self,
+    ) -> Result<(Vec<Symbol>, Vec<Symbol>, Vec<(Symbol, Symbol)>), Diagnostic> {
         let mut generics = Vec::new();
+        let mut regions = Vec::new();
+        let mut outlives = Vec::new();
         if self.eat(TokenKind::LBracket) {
-            while self.peek().kind != TokenKind::RBracket {
-                generics.push(self.ident()?);
+            while !matches!(self.peek().kind, TokenKind::RBracket | TokenKind::Where) {
+                if self.eat(TokenKind::Amp) {
+                    regions.push(self.ident()?);
+                } else {
+                    generics.push(self.ident()?);
+                }
                 if !self.eat(TokenKind::Comma) {
                     break;
                 }
             }
+            // `where a <= b` — `b` outlives `a` (§5.2). The relation is a
+            // stack, so each clause is one pair and there is nothing to solve.
+            if self.eat(TokenKind::Where) {
+                loop {
+                    let inner = self.ident()?;
+                    self.expect(TokenKind::LtEq)?;
+                    let outer = self.ident()?;
+                    outlives.push((inner, outer));
+                    if !self.eat(TokenKind::Comma) {
+                        break;
+                    }
+                }
+            }
             self.expect(TokenKind::RBracket)?;
         }
-        Ok(generics)
+        Ok((generics, regions, outlives))
     }
 
     fn ident(&mut self) -> Result<Symbol, Diagnostic> {
@@ -222,6 +261,17 @@ impl<'a> Parser<'a> {
     /// checker's job.
     fn type_expr(&mut self) -> Result<TypeId, Diagnostic> {
         let tok = self.peek();
+        // `&r T` / `&!r T`: the region is named before the referent, so a
+        // reference reads left to right as "a reference, valid for r, to T".
+        if self.eat(TokenKind::Amp) {
+            let unique = self.eat(TokenKind::Bang);
+            let region = self.ident()?;
+            let inner = self.type_expr()?;
+            let end = self.ast.type_span(inner);
+            return Ok(self
+                .ast
+                .push_type(TypeExpr::Ref { unique, region, inner }, tok.span.to(end)));
+        }
         let name = self.ident()?;
         let mut args = Vec::new();
         let mut end = tok.span;
@@ -234,7 +284,7 @@ impl<'a> Parser<'a> {
             }
             end = self.expect(TokenKind::RBracket)?.span;
         }
-        Ok(self.ast.push_type(TypeExpr { name, args }, tok.span.to(end)))
+        Ok(self.ast.push_type(TypeExpr::Name { name, args }, tok.span.to(end)))
     }
 
     // ---- statements ----------------------------------------------------
@@ -260,6 +310,7 @@ impl<'a> Parser<'a> {
             TokenKind::If => self.if_stmt(),
             TokenKind::While => self.while_stmt(),
             TokenKind::Match => self.match_stmt(),
+            TokenKind::Borrow => self.borrow_stmt(),
             // `x = e;` — an assignment, not an expression: M0 has no
             // assignment expressions, so this is decided by lookahead.
             TokenKind::Ident if self.peek_at(1).kind == TokenKind::Eq => self.assign_stmt(),
@@ -410,6 +461,32 @@ impl<'a> Parser<'a> {
         let cond = self.condition()?;
         let (body, end) = self.block()?;
         Ok(self.ast.push_stmt(Stmt::While { cond, body }, kw.span.to(end)))
+    }
+
+    /// `borrow x as &r in { .. }` / `borrow mut x as &!r in { .. }`.
+    ///
+    /// The `&` and the `!` are written at the binder for the same reason they
+    /// are written in a type: a reader should not have to look anywhere else
+    /// to know whether this freezes `x` or locks it. The two must agree, so
+    /// `borrow mut x as &r` is refused here rather than silently picking one.
+    fn borrow_stmt(&mut self) -> Result<StmtId, Diagnostic> {
+        let kw = self.bump();
+        let unique = self.eat(TokenKind::Mut);
+        let value = self.ident()?;
+        self.expect(TokenKind::As)?;
+        self.expect(TokenKind::Amp)?;
+        let bang = self.eat(TokenKind::Bang);
+        if bang != unique {
+            return Err(self.err(if unique {
+                "`borrow mut` binds a unique reference; write `as &!r`"
+            } else {
+                "`as &!r` binds a unique reference; write `borrow mut`"
+            }));
+        }
+        let region = self.ident()?;
+        self.expect(TokenKind::In)?;
+        let (body, end) = self.block()?;
+        Ok(self.ast.push_stmt(Stmt::Borrow { value, unique, region, body }, kw.span.to(end)))
     }
 
     // ---- expressions ---------------------------------------------------
@@ -632,7 +709,7 @@ mod tests {
         let (ast, decl) = one_fn("fn add(a: int, b: int) -> int { return a + b; }");
         assert_eq!(ast.name_of(decl.name), "add");
         assert_eq!(decl.params.len(), 2);
-        assert_eq!(ast.name_of(ast.ty(decl.ret).name), "int");
+        assert_eq!(ast.name_of(ast.ty(decl.ret).head().expect("a named type")), "int");
         assert_eq!(decl.body.stmts.len(), 1);
     }
 
@@ -735,7 +812,7 @@ mod tests {
         // type *expression*; that it names nothing is for the checker to say,
         // which is also the only place that knows what the names mean.
         let (ast, decl) = one_fn("fn f() -> i32 { return 0; }");
-        assert_eq!(ast.name_of(ast.ty(decl.ret).name), "i32");
+        assert_eq!(ast.name_of(ast.ty(decl.ret).head().expect("a named type")), "i32");
         assert_eq!(ast.type_span(decl.ret), crate::span::Span::new(10, 13));
     }
 
@@ -743,8 +820,9 @@ mod tests {
     fn a_type_may_take_arguments() {
         let (ast, decl) = one_fn("fn f() -> Pair[int, bool] { return 0; }");
         let ret = ast.ty(decl.ret);
-        assert_eq!(ast.name_of(ret.name), "Pair");
-        let args: Vec<&str> = ret.args.iter().map(|&a| ast.name_of(ast.ty(a).name)).collect();
+        assert_eq!(ast.name_of(ret.head().expect("a named type")), "Pair");
+        let args: Vec<&str> =
+            ret.args().iter().map(|&a| ast.name_of(ast.ty(a).head().unwrap())).collect();
         assert_eq!(args, ["int", "bool"]);
     }
 
@@ -790,7 +868,7 @@ mod tests {
         let fields: Vec<(&str, &str)> = decl
             .fields
             .iter()
-            .map(|f| (ast.name_of(f.name), ast.name_of(ast.ty(f.ty).name)))
+            .map(|f| (ast.name_of(f.name), ast.name_of(ast.ty(f.ty).head().unwrap())))
             .collect();
         assert_eq!(fields, [("x", "int"), ("y", "bool")]);
     }
@@ -897,5 +975,105 @@ mod tests {
     fn an_ordinary_let_is_still_an_ordinary_let() {
         let (ast, decl) = one_fn("fn f() -> int { let x = P { a: 1 }; return 0; }");
         assert!(matches!(ast.stmt(decl.body.stmts[0]), Stmt::Let { .. }));
+    }
+
+    // ---- borrowing (`docs/linearity-and-effects.md` §5) -----------------
+
+    #[test]
+    fn a_reference_type_names_its_region_first() {
+        let (ast, decl) = one_fn("fn f(s: &r Bytes) -> int { return 0; }");
+        let TypeExpr::Ref { unique, region, inner } = ast.ty(decl.params[0].ty) else {
+            panic!("expected a reference type")
+        };
+        assert!(!unique);
+        assert_eq!(ast.name_of(*region), "r");
+        assert_eq!(ast.name_of(ast.ty(*inner).head().unwrap()), "Bytes");
+    }
+
+    #[test]
+    fn a_unique_reference_wears_a_bang() {
+        let (ast, decl) = one_fn("fn f(s: &!r Bytes) -> int { return 0; }");
+        let TypeExpr::Ref { unique, .. } = ast.ty(decl.params[0].ty) else { panic!() };
+        assert!(unique);
+    }
+
+    #[test]
+    fn references_nest() {
+        let (ast, decl) = one_fn("fn f(s: &a &b int) -> int { return 0; }");
+        let TypeExpr::Ref { region, inner, .. } = ast.ty(decl.params[0].ty) else { panic!() };
+        assert_eq!(ast.name_of(*region), "a");
+        let TypeExpr::Ref { region, .. } = ast.ty(*inner) else { panic!("expected a reference") };
+        assert_eq!(ast.name_of(*region), "b");
+    }
+
+    #[test]
+    fn a_region_parameter_wears_its_ampersand_at_the_binder() {
+        let (ast, decl) = one_fn("fn f[T, &r](x: T, s: &r T) -> int { return 0; }");
+        let types: Vec<&str> = decl.generics.iter().map(|g| ast.name_of(*g)).collect();
+        let regions: Vec<&str> = decl.regions.iter().map(|g| ast.name_of(*g)).collect();
+        assert_eq!(types, ["T"]);
+        assert_eq!(regions, ["r"]);
+    }
+
+    #[test]
+    fn a_region_parameter_nobody_uses_is_still_a_region() {
+        // The point of marking the binder: this declaration is unambiguous
+        // even though no parameter mentions `r`.
+        let (ast, decl) = one_fn("fn f[&r]() -> int { return 0; }");
+        assert_eq!(decl.regions.len(), 1);
+        assert_eq!(ast.name_of(decl.regions[0]), "r");
+        assert!(decl.generics.is_empty());
+    }
+
+    #[test]
+    fn a_where_clause_declares_an_outlives_pair() {
+        let (ast, decl) = one_fn(
+            "fn f[&dst, &src where src <= dst](d: &dst int, s: &src int) -> int { return 0; }",
+        );
+        let pairs: Vec<(&str, &str)> =
+            decl.outlives.iter().map(|(a, b)| (ast.name_of(*a), ast.name_of(*b))).collect();
+        assert_eq!(pairs, [("src", "dst")]);
+    }
+
+    #[test]
+    fn a_type_declaration_takes_no_region_parameters() {
+        let err = parse("struct S[&r] { x: int }").unwrap_err();
+        assert!(err.message.contains("no region parameters"), "{}", err.message);
+    }
+
+    #[test]
+    fn a_borrow_statement_binds_a_region_and_a_reference() {
+        let (ast, decl) = one_fn("fn f(x: int) -> int { borrow x as &r in { return 0; } }");
+        let Stmt::Borrow { value, unique, region, body } = ast.stmt(decl.body.stmts[0]) else {
+            panic!("expected a borrow")
+        };
+        assert_eq!(ast.name_of(*value), "x");
+        assert!(!unique);
+        assert_eq!(ast.name_of(*region), "r");
+        assert_eq!(body.stmts.len(), 1);
+    }
+
+    #[test]
+    fn borrow_mut_binds_a_unique_reference() {
+        let (ast, decl) = one_fn("fn f(x: int) -> int { borrow mut x as &!r in { return 0; } }");
+        let Stmt::Borrow { unique, .. } = ast.stmt(decl.body.stmts[0]) else { panic!() };
+        assert!(unique);
+    }
+
+    #[test]
+    fn the_two_halves_of_a_borrow_must_agree() {
+        // Writing `mut` in one place and not the other is a typo, not a
+        // shorthand, so neither spelling is quietly preferred.
+        let err = parse("fn f(x: int) -> int { borrow mut x as &r in { return 0; } }").unwrap_err();
+        assert!(err.message.contains("write `as &!r`"), "{}", err.message);
+        let err = parse("fn f(x: int) -> int { borrow x as &!r in { return 0; } }").unwrap_err();
+        assert!(err.message.contains("write `borrow mut`"), "{}", err.message);
+    }
+
+    #[test]
+    fn a_lone_ampersand_is_not_a_conjunction() {
+        let (ast, decl) = one_fn("fn f(a: bool, b: bool) -> bool { return a && b; }");
+        let Stmt::Return(value) = ast.stmt(decl.body.stmts[0]) else { panic!() };
+        assert!(matches!(ast.expr(*value), Expr::Binary { op: BinOp::And, .. }));
     }
 }

@@ -10,15 +10,18 @@ defined behaviour, and a canonical content-addressable AST designed in from day 
 > structs, enums with exhaustive pattern matching, and monomorphised generics.
 > Every declaration has a content hash (`lex-sys ids`).
 >
-> **Linear resources work.** A type is `res` or `val`, a `res` value is
-> consumed exactly once on every path, and the checker refuses a leak, a
-> double use, a silent drop and a loop that spends an outer binding. That is
-> §3 and §4 of the now-settled
+> **Linear resources and shared borrows work.** A type is `res` or `val`, a
+> `res` value is consumed exactly once on every path, and `borrow x as &r in
+> { .. }` gives you a non-owning read without a borrow checker — a region is
+> a block, and the outlives relation is a stack. That is §3, §4 and §5 of the
+> now-settled
 > [`docs/linearity-and-effects.md`](docs/linearity-and-effects.md).
 >
-> **Effects are not here yet,** nor borrowing, regions or arenas — §5 onward
-> of the same document. There are also no strings, no slices, no allocation
-> and no FFI: those are M3. Do not mistake this for a usable language yet.
+> **Unique borrows are not here yet** (`borrow mut`, `&!r`): the syntax
+> parses and the checker refuses it. **Effects and capabilities** — the other
+> half of the thesis — are §7 and §8, still design. There are also no
+> strings, no slices, no allocation and no FFI: those are M3. Do not mistake
+> this for a usable language yet.
 
 ## What this is
 
@@ -93,6 +96,7 @@ cargo run -p lex-sys -- run examples/tour.ls
 # M1 enum: 0 12 20
 # M1 generic: 5 3 z
 # M2 linear: 4 7 9 5 6
+# M2 borrow: 4 8 12
 ```
 
 `examples/tour.ls` is the shortest honest answer to "what can this language
@@ -102,8 +106,9 @@ with a generic `Result[T]` threaded through every fallible operation.
 
 **What exists:** `int` and `bool`, functions and calls, arithmetic and
 comparison, `&&`/`||` with short-circuiting, `if`/`else`, `while`, `let`/`var`
-bindings, structs, enums with exhaustive `match`, generics over both — and
-`res`/`val` modes with exactly-once linearity, including destructuring `let`.
+bindings, structs, enums with exhaustive `match`, generics over both,
+`res`/`val` modes with exactly-once linearity and destructuring `let`, and
+shared borrows with lexical regions.
 
 ```
 res struct Ticket { serial: int }
@@ -118,6 +123,23 @@ Mode is structural: a `res` member makes the whole aggregate `res`, and
 `Held[File]` is `res` where `Held[int]` is `val`. There is no `drop` and no
 destructor — a resource is destroyed by naming the function that knows how,
 which is what keeps an effect row honest once there are effect rows.
+
+Looking at a resource without spending it is a borrow:
+
+```
+fn serial_of[&r](t: &r Ticket) -> int { return t.serial; }
+
+borrow held as &r in {
+    putchar(48 + serial_of(r));   // `held` is frozen; `r` reads it
+}                                 // owned again here
+```
+
+There is **no borrow checker**. A region is a block, so a reference's validity
+is lexical rather than inferred: no non-lexical lifetimes, no variance, no
+dataflow. A binding is `Owned` or `Frozen`, set at block entry and restored at
+block exit; `r_inner <= r_outer` holds exactly when the outer block encloses
+the inner one, which is a walk up a stack; and escape is an occurs-check over
+one type.
 
 **What does not, yet:** strings, slices, allocation, references, FFI — and the
 capability-typed effects that linearity exists to carry (§5 onward). That is
@@ -173,7 +195,7 @@ carry them exists now, while it is cheap.
 
 | Doc | What | Status |
 |---|---|---|
-| [`docs/linearity-and-effects.md`](docs/linearity-and-effects.md) | The M2 gate: linear ownership, capability-typed effects, how they unify, and 23 must-reject fixtures written out as the conformance suite | settled; §3–4 implemented, §5 on still design |
+| [`docs/linearity-and-effects.md`](docs/linearity-and-effects.md) | The M2 gate: linear ownership, capability-typed effects, how they unify, and 23 must-reject fixtures written out as the conformance suite | settled; §3–5 implemented bar unique borrows, §6 on still design |
 | [`docs/bootstrap.md`](docs/bootstrap.md) | What M0 settled: bootstrap host (Rust), extension (`.ls`), the M0 surface, what is scaffolding and what replaces it | written |
 | [`docs/canonical-ast.md`](docs/canonical-ast.md) | Canonicalisation rules and per-unit identity: what is hashed, and what a hash is allowed to change with | written, implemented |
 | `docs/memory-model.md` | Regions, escape, the escape hatches and their cost | not written (M2) |
@@ -193,7 +215,7 @@ M0–M3 with acceptance criteria, sequencing, risks and open decisions.
 |---|---|---|
 | **M0** — native hello world ([#3](https://github.com/alpibrusl/lex-sys/issues/3)) | Lexer, parser, AST, IR, Cranelift backend, a real executable | **done** — green on both targets |
 | **M1** — typed core | Type checker, `bool`, structs, ADTs with exhaustiveness, monomorphised generics. No linearity, no effects — deliberately | **done** |
-| **M2** — the actual thesis ([#2](https://github.com/alpibrusl/lex-sys/issues/2)) | Linear ownership, effect rows and capability-passing as **one** system | started — modes and linearity (§3–4) land; borrowing, regions and effects next |
+| **M2** — the actual thesis ([#2](https://github.com/alpibrusl/lex-sys/issues/2)) | Linear ownership, effect rows and capability-passing as **one** system | started — modes, linearity and shared borrows (§3–5) land; unique borrows, then effects |
 | **M3** — minimal but real | Slices and strings, arenas, libc FFI, settled overflow semantics, canonical printer, per-unit identity | started — per-unit identity landed |
 
 Deliberately excluded from "minimal": borrow checker, traits, `comptime`, own

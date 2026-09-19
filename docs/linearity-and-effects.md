@@ -6,15 +6,19 @@
 > now the specification the implementation is measured against; §12 lists what
 > is still open, and nothing there blocks the rest.
 >
-> **Implemented: §3 (modes) and §4 (linearity),** including the joins in §4.2
-> and the back-edge rule in §4.3. The first seven fixtures in §11 are in
-> `tests/reject/`, with accepting counterparts in `tests/accept/`, and §11
-> marks each row.
+> **Implemented: §3 (modes), §4 (linearity), and §5's shared borrows** —
+> including the joins in §4.2, the back-edge rule in §4.3, the escape
+> occurs-check of §5 rule 4, and the outlives stack of §5.2 with its `where`
+> clauses. §11 marks each fixture row.
 >
-> **Not implemented: §5 onward** — borrowing, regions, arenas, effects,
-> capabilities and the escape hatches. Every rule those sections state is
-> still design, and a program that needs one is refused today with a message
-> pointing here.
+> **Not implemented: unique borrows** (`borrow mut`, `&!r`) — the syntax
+> parses and the checker refuses it rather than accepting a `&!` whose
+> uniqueness nothing enforces. **Nor §6 onward**: arenas, effects,
+> capabilities and the escape hatches are still design.
+>
+> Where the concrete syntax below differs from what was implemented, §5.3
+> says so and why. The syntax here was always illustrative (§1); the rules
+> are what this document is for.
 
 This document is the spec the M2 conformance suite encodes. Section 11 is that
 suite, written out as a fixture list, and it is the part to argue with hardest:
@@ -311,7 +315,8 @@ borrow f as &r in {
 // f is owned again here; r does not exist
 ```
 
-Four rules, all local:
+Four rules, all local (the spelling differs a little from what was built —
+see §5.3):
 
 1. **`borrow x as &r in { .. }`** freezes `x` for the block and binds a
    reference of type `&r T`. Frozen means: not movable, not consumable, not
@@ -393,10 +398,11 @@ fn double_shared(buf: Bytes) -> [] int {
 ### 5.1 Region parameters on functions
 
 A function that takes a reference is region-polymorphic, with the region
-written:
+written. The binder wears an `&`, so which parameters are regions is a fact
+about the declaration rather than something read off the parameter list:
 
 ```
-fn len[r](s: &r Bytes) -> [] int
+fn len[&r](s: &r Bytes) -> [] int
 ```
 
 At a call site the region parameter is instantiated with the caller's region.
@@ -418,7 +424,7 @@ A function may declare the same relation between its region parameters, and the
 call site discharges it with the same lexical lookup:
 
 ```
-fn copy_into[dst, src where src <= dst](d: &!dst Bytes, s: &src Bytes) -> [] int
+fn copy_into[&dst, &src where src <= dst](d: &!dst Bytes, s: &src Bytes) -> [] int
 ```
 
 Checking `src <= dst` is a walk up a stack whose depth is the block nesting of
@@ -433,6 +439,41 @@ fn unrelated(a: Bytes, b: Bytes) -> [] int {
     // ✗ `x` and `y` are siblings; neither outlives the other
 }
 ```
+
+Instantiation is one assignment, which has a consequence worth stating: a
+function with *one* region parameter requires all its reference arguments to
+be at one region, and whichever argument is checked first decides which. Two
+references from different blocks cannot both fit, even when one outlives the
+other — the coercion runs from the argument to the parameter, not between two
+arguments. Declaring two parameters and the `where` clause that relates them
+is how a function says it accepts both, and that is exactly what
+`copy_into` above is for. Widening this is constraint solving, which §10
+spends its whole argument refusing.
+
+### 5.3 What was built, where it differs
+
+§1 says the syntax here is illustrative. Three places where the implementation
+chose differently, and why:
+
+- **`borrow` is a statement, not an expression.** lex-sys blocks are
+  statement lists with no tail expression, so `borrow f as &r in { r }` has
+  nowhere to put a result. It is shaped like `if` and `while` instead, and a
+  value leaves a block the way it always has — by `return`, which is the case
+  rule 4 is about.
+- **A region binder wears its `&`:** `fn len[&r]`, not `fn len[r]`. Reading
+  which bracket entries are regions off the parameter list leaves a region
+  nobody used ambiguous, and makes every diagnostic about the declaration a
+  riddle.
+- **Escape is checked in two places, not one.** Rule 4 says the block's
+  result may not mention `r`. With no block result, the two ways out are a
+  `return` and a binding declared outside the block whose type inference
+  fills in from inside it. Both are the same occurs-check over one type;
+  `tests/reject/reference_escapes_via_inference.ls` is the second one, and it
+  is not hypothetical.
+
+There is no `*r` yet: a reference to a struct is read with `.field`, which
+covers what §5's own examples do. A reference to a scalar can be made and
+passed and not otherwise read, which is a wart rather than a rule.
 
 ---
 
@@ -767,22 +808,28 @@ rest are the sections not yet implemented.
 | `use_after_move.ls` | A consumed value may not be used | 4.1 | ✓ |
 | `branches_disagree.ls` | Branches must agree about what is live | 4.2 | ✓ |
 | `consume_in_loop.ls` | A loop body may not consume an outer binding | 4.3 | ✓ |
-| `reference_escapes_borrow.ls` | A block's result may not mention its region | 5 |
-| `move_while_frozen.ls` | A frozen value may not be moved or consumed | 5 |
-| `read_while_locked.ls` | A uniquely borrowed value may not be read | 5 |
-| `two_unique_borrows.ls` | One unique borrow at a time | 5 |
-| `unrelated_regions.ls` | Sibling regions do not outlive each other | 5.2 |
-| `region_param_unsatisfied.ls` | A declared `<=` must hold at the call site | 5.2 |
-| `reference_escapes_arena.ls` | Nothing mentioning the arena's region escapes it | 6 |
-| `inner_region_stored_in_outer.ls` | An inner region's reference may not be stored outward | 6 |
-| `arena_holds_res.ls` | `alloc` takes `val` data only | 6.1 |
-| `undeclared_effect.ls` | A call's row must be a subset of the declared row | 7.2 |
-| `effect_declared_not_performed.ls` | An over-wide row is an error | 7.3 |
-| `effect_widened.ls` | A capability may be narrowed, never widened | 7.4 |
-| `no_ambient_capability.ls` | There is no way to obtain a capability but to be given one | 8.2 |
-| `capability_used_after_release.ls` | A capability is a resource | 8.3 |
-| `capability_leaked.ls` | A capability must be released | 8.3 |
-| `ffi_without_capability.ls` | A foreign call requires its `Ffi` capability | 8.4 |
+| `reference_escapes_borrow.ls` | A block's result may not mention its region | 5 | ✓ |
+| `move_while_frozen.ls` | A frozen value may not be moved or consumed | 5 | ✓ |
+| `read_while_locked.ls` | A uniquely borrowed value may not be read | 5 | |
+| `two_unique_borrows.ls` | One unique borrow at a time | 5 | |
+| `unrelated_regions.ls` | Sibling regions do not outlive each other | 5.2 | ✓ |
+| `region_param_unsatisfied.ls` | A declared `<=` must hold at the call site | 5.2 | ✓ |
+| `reference_escapes_arena.ls` | Nothing mentioning the arena's region escapes it | 6 | |
+| `inner_region_stored_in_outer.ls` | An inner region's reference may not be stored outward | 6 | |
+| `arena_holds_res.ls` | `alloc` takes `val` data only | 6.1 | |
+| `undeclared_effect.ls` | A call's row must be a subset of the declared row | 7.2 | |
+| `effect_declared_not_performed.ls` | An over-wide row is an error | 7.3 | |
+| `effect_widened.ls` | A capability may be narrowed, never widened | 7.4 | |
+| `no_ambient_capability.ls` | There is no way to obtain a capability but to be given one | 8.2 | |
+| `capability_used_after_release.ls` | A capability is a resource | 8.3 | |
+| `capability_leaked.ls` | A capability must be released | 8.3 | |
+| `ffi_without_capability.ls` | A foreign call requires its `Ffi` capability | 8.4 | |
+
+§5 adds six must-reject fixtures beyond the table, for the rules §5.3
+describes and for the syntax: `region_not_in_scope.ls`,
+`reference_escapes_via_inference.ls`, `assign_while_frozen.ls`,
+`borrow_after_move.ls`, `unique_borrow_not_yet.ls` and
+`borrow_mode_mismatch.ls`.
 
 §4.1's four accidental consumers and §3.1's instantiation rule add six more
 must-reject fixtures beyond the table — `res_discarded.ls`,
@@ -799,13 +846,13 @@ that rejects everything is not a rule either:
 |---|---|---|
 | `consume_once.ls` | The straight-line happy path | ✓ |
 | `consume_on_both_paths.ls` | Branch agreement | ✓ |
-| `borrow_and_return.ls` | A borrow used and discarded inside its region |
-| `two_shared_borrows.ls` | Shared borrows nest |
-| `nested_regions.ls` | An inner region reading an outer one |
-| `arena_roundtrip.ls` | Allocate, walk, release in O(1) |
-| `effect_exact.ls` | A row that is exactly what the body performs |
-| `narrowed_capability.ls` | Attenuation, and a call that fits inside it |
-| `threaded_io.ls` | `main` splitting `World` and threading `Io` down three frames |
+| `borrow_and_return.ls` | A borrow used and discarded inside its region | ✓ |
+| `two_shared_borrows.ls` | Shared borrows nest | ✓ |
+| `nested_regions.ls` | An inner region reading an outer one | ✓ |
+| `arena_roundtrip.ls` | Allocate, walk, release in O(1) | |
+| `effect_exact.ls` | A row that is exactly what the body performs | |
+| `narrowed_capability.ls` | Attenuation, and a call that fits inside it | |
+| `threaded_io.ls` | `main` splitting `World` and threading `Io` down three frames | |
 
 ---
 

@@ -86,9 +86,30 @@ impl Interner {
 /// which is where the program's meaning lives. Arguments are a `Vec` so
 /// generics need no second syntax when they arrive.
 #[derive(Clone, PartialEq, Eq, Debug)]
-pub struct TypeExpr {
-    pub name: Symbol,
-    pub args: Vec<TypeId>,
+pub enum TypeExpr {
+    /// `int`, `Pair[int, bool]` — a name, optionally applied to arguments.
+    Name { name: Symbol, args: Vec<TypeId> },
+    /// `&r T` and `&!r T` (`docs/linearity-and-effects.md` §5). The region is
+    /// a name the parser does not resolve, exactly like a type's name.
+    Ref { unique: bool, region: Symbol, inner: TypeId },
+}
+
+impl TypeExpr {
+    /// The name written at the head, for a plain type. A reference has none:
+    /// `&r T` names no type of its own, it points at one.
+    pub fn head(&self) -> Option<Symbol> {
+        match self {
+            TypeExpr::Name { name, .. } => Some(*name),
+            TypeExpr::Ref { .. } => None,
+        }
+    }
+
+    pub fn args(&self) -> &[TypeId] {
+        match self {
+            TypeExpr::Name { args, .. } => args,
+            TypeExpr::Ref { .. } => &[],
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -190,6 +211,22 @@ pub enum Stmt {
         fields: Vec<Symbol>,
         value: ExprId,
     },
+    /// `borrow x as &r in { .. }` / `borrow mut x as &!r in { .. }`.
+    ///
+    /// Introduces a region and binds a reference, both called `region`: the
+    /// name is the region in a type and the reference in an expression, which
+    /// is how §5 writes it (`borrow f as &r in { size(r) }`).
+    ///
+    /// A statement rather than an expression: lex-sys blocks are statement
+    /// lists, so there is no tail expression for a value to come out of. §5's
+    /// examples are illustrative, and this keeps `borrow` shaped like `if`
+    /// and `while`.
+    Borrow {
+        value: Symbol,
+        unique: bool,
+        region: Symbol,
+        body: Block,
+    },
     /// `e;` — the value is discarded.
     Expr(ExprId),
     If {
@@ -218,6 +255,14 @@ pub struct Param {
 pub struct FnDecl {
     pub name: Symbol,
     pub generics: Vec<Symbol>,
+    /// Region parameters, written `&r` in the same bracket list as the type
+    /// parameters (§5.1). They are marked at the binder rather than inferred
+    /// from use, so `fn f[T, &r]` says which is which without reading the
+    /// parameter list — and an unused one is still unambiguous.
+    pub regions: Vec<Symbol>,
+    /// `where a <= b`, meaning `b` outlives `a` (§5.2). Each pair is
+    /// `(inner, outer)` and both name region parameters.
+    pub outlives: Vec<(Symbol, Symbol)>,
     pub params: Vec<Param>,
     pub ret: TypeId,
     pub body: Block,

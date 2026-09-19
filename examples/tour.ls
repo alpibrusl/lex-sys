@@ -10,6 +10,7 @@
 //~ STDOUT M1 enum: 0 12 20
 //~ STDOUT M1 generic: 5 3 z
 //~ STDOUT M2 linear: 4 7 9 5 6
+//~ STDOUT M2 borrow: 4 8 12
 //~ EXIT 0
 
 // ---------------------------------------------------------------- output ---
@@ -233,6 +234,65 @@ fn m2_linear() -> int {
     return newline();
 }
 
+// ------------------------------------------------------ M2: borrowing ----
+// Linearity alone says a resource is used exactly once. That leaves no way to
+// *look* at one without spending it -- `t.serial` on an owned `Ticket` is
+// refused, because reading a part out of a value without taking it apart is a
+// non-owning read, and a non-owning read is a borrow.
+//
+// So: `borrow x as &r in { .. }`. The block introduces a region `r`, freezes
+// `x` for its duration, and binds a reference `r` of type `&r Ticket`. The
+// name does both jobs, which is how §5 writes it.
+//
+// There is no borrow checker. A reference's validity is a *lexical* fact: a
+// region is a block, full stop. No non-lexical lifetimes, no inference, no
+// variance -- a binding is `Owned` or `Frozen`, set at block entry and
+// restored at block exit, and escape is an occurs-check on one type.
+
+// Region-polymorphic, with the region written (§5.1). At a call site the
+// parameter is instantiated with the caller's region: one name, one
+// assignment, nothing that can fail to terminate.
+fn serial_of[&r](t: &r Ticket) -> int {
+    return t.serial;
+}
+
+// `src <= dst` says `dst` outlives `src` (§5.2). Checking it is a walk up the
+// stack of enclosing blocks -- O(depth), no fixpoint, total.
+fn later_of[&dst, &src where src <= dst](a: &dst Ticket, b: &src Ticket) -> int {
+    return serial_of(a) + serial_of(b);
+}
+
+fn m2_borrow() -> int {
+    putchar(77); putchar(50); space();          // "M2 "
+    putchar(98); putchar(111); putchar(114); putchar(114); putchar(111);
+    putchar(119); putchar(58); space();         // "borrow: "
+
+    let held = issue(4);
+
+    borrow held as &r in {
+        // Reading through the reference, which the owned value refuses.
+        print_nat(r.serial);
+
+        // Shared borrows nest: freezing is not exclusive, because two
+        // readers neither move the value nor change it.
+        space();
+        borrow held as &inner in {
+            print_nat(serial_of(r) + serial_of(inner));
+        }
+
+        // `r` comes from the enclosing block, so it outlives `inner` and may
+        // be used where `&inner` is expected. Nothing else coerces.
+        space();
+        borrow held as &inner in {
+            print_nat(later_of(r, inner) + serial_of(r));
+        }
+    }
+
+    // Owned again, and still owed exactly one consumption.
+    let spent = redeem(held);
+    return newline();
+}
+
 fn main() -> int {
     m0();
     m1_bool();
@@ -240,5 +300,6 @@ fn main() -> int {
     m1_enum();
     m1_generic();
     m2_linear();
+    m2_borrow();
     return 0;
 }

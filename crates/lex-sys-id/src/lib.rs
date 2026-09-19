@@ -89,6 +89,9 @@ mod tag {
     pub const TYPE_NAME: u8 = 0x40;
     pub const PATTERN_WILDCARD: u8 = 0x41;
     pub const PATTERN_VARIANT: u8 = 0x42;
+    /// `&r T`; the `!` of a unique reference rides the following `bool`.
+    pub const TYPE_REF: u8 = 0x43;
+    pub const BORROW: u8 = 0x44;
 
     pub const STRUCT_DECL: u8 = 0x60;
     pub const ENUM_DECL: u8 = 0x61;
@@ -293,23 +296,44 @@ fn encode_type(
     id: TypeId,
     type_ids: &HashMap<Symbol, Hash>,
     generics: &[Symbol],
+    regions: &[Symbol],
 ) {
     let written: &TypeExpr = ast.ty(id);
+
+    // A region is positional for the same reason a generic parameter is:
+    // `fn len[&r](s: &r Bytes)` and `fn len[&q](s: &q Bytes)` are one
+    // signature, and no caller can tell them apart.
+    if let TypeExpr::Ref { unique, region, inner } = written {
+        let (unique, region, inner) = (*unique, *region, *inner);
+        encoder.tag(tag::TYPE_REF).bool(unique);
+        match regions.iter().rposition(|r| *r == region) {
+            Some(index) => {
+                encoder.tag(tag::LOCAL).u32(index as u32);
+            }
+            None => {
+                encoder.tag(tag::NONE).str(ast.name_of(region));
+            }
+        }
+        encode_type(ast, encoder, inner, type_ids, generics, regions);
+        return;
+    }
+
+    let (name, args) = (written.head().expect("not a reference"), written.args().to_vec());
     encoder.tag(tag::TYPE_NAME);
 
     // A generic parameter is positional: `f[T](x: T)` and `f[U](x: U)` differ
     // in no way a caller can see.
-    if let Some(index) = generics.iter().position(|g| *g == written.name) {
+    if let Some(index) = generics.iter().position(|g| *g == name) {
         encoder.tag(tag::LOCAL).u32(index as u32);
-    } else if let Some(hash) = type_ids.get(&written.name) {
+    } else if let Some(hash) = type_ids.get(&name) {
         encoder.tag(tag::FREE).hash(*hash);
     } else {
-        encoder.tag(tag::NONE).str(ast.name_of(written.name));
+        encoder.tag(tag::NONE).str(ast.name_of(name));
     }
 
-    encoder.len(written.args.len());
-    for arg in &written.args {
-        encode_type(ast, encoder, *arg, type_ids, generics);
+    encoder.len(args.len());
+    for arg in &args {
+        encode_type(ast, encoder, *arg, type_ids, generics, regions);
     }
 }
 
@@ -318,13 +342,29 @@ fn hash_signature(ast: &Ast, decl: &FnDecl, type_ids: &HashMap<Symbol, Hash>) ->
     encoder.str(ast.name_of(decl.name));
     // The *count* of generics, not their names.
     encoder.len(decl.generics.len());
+    // The *count* of region parameters, and the `where` clauses as pairs of
+    // positions: both are part of the contract, and neither depends on the
+    // names chosen.
+    encoder.len(decl.regions.len());
+    encoder.len(decl.outlives.len());
+    for (inner, outer) in &decl.outlives {
+        // `u32::MAX` stands for a name that is not a region parameter. The
+        // checker refuses that; the hasher runs whether or not it did, and a
+        // total encoding is what keeps `lex-sys ids` from panicking on a
+        // program that is about to be rejected anyway.
+        let position = |sym: &Symbol| {
+            decl.regions.iter().position(|r| r == sym).map_or(u32::MAX, |i| i as u32)
+        };
+        encoder.u32(position(inner));
+        encoder.u32(position(outer));
+    }
     encoder.len(decl.params.len());
     for param in &decl.params {
         // Parameter names are excluded: lex-sys has no named arguments, so a
         // caller cannot observe them.
-        encode_type(ast, &mut encoder, param.ty, type_ids, &decl.generics);
+        encode_type(ast, &mut encoder, param.ty, type_ids, &decl.generics, &decl.regions);
     }
-    encode_type(ast, &mut encoder, decl.ret, type_ids, &decl.generics);
+    encode_type(ast, &mut encoder, decl.ret, type_ids, &decl.generics, &decl.regions);
     encoder.finish(DOMAIN_SIG)
 }
 
@@ -339,7 +379,7 @@ fn hash_struct(ast: &Ast, decl: &StructDecl) -> Hash {
         // Field names *are* observable: a literal names them, and field order
         // is positional to the backend.
         encoder.str(ast.name_of(field.name));
-        encode_type(ast, &mut encoder, field.ty, &HashMap::new(), &decl.generics);
+        encode_type(ast, &mut encoder, field.ty, &HashMap::new(), &decl.generics, &[]);
     }
     encoder.finish(DOMAIN_TYPE)
 }
@@ -355,7 +395,7 @@ fn hash_enum(ast: &Ast, decl: &EnumDecl) -> Hash {
         encoder.str(ast.name_of(variant.name));
         encoder.len(variant.payload.len());
         for ty in &variant.payload {
-            encode_type(ast, &mut encoder, *ty, &HashMap::new(), &decl.generics);
+            encode_type(ast, &mut encoder, *ty, &HashMap::new(), &decl.generics, &[]);
         }
     }
     encoder.finish(DOMAIN_TYPE)
@@ -380,6 +420,9 @@ struct BodyHasher<'a> {
     sig_ids: &'a HashMap<Symbol, Hash>,
     type_ids: &'a HashMap<Symbol, Hash>,
     generics: Vec<Symbol>,
+    /// The regions nameable here: the declaration's parameters, plus one per
+    /// `borrow` block currently open. Positional, like every other binder.
+    regions: Vec<Symbol>,
     scope: Scope,
     encoder: Encoder,
 }
@@ -398,6 +441,9 @@ fn hash_body(
         // Parameters are the outermost binders, so a body referring to its
         // first parameter says "binder 0" whatever that parameter is called.
         scope: Scope { binders: decl.params.iter().map(|p| p.name).collect() },
+        // Region parameters are the outermost regions, exactly as parameters
+        // are the outermost binders; a `borrow` block pushes onto this.
+        regions: decl.regions.clone(),
         encoder: Encoder::default(),
     };
     hasher.block(&decl.body);
@@ -423,7 +469,15 @@ impl BodyHasher<'_> {
                     Some(written) => {
                         self.encoder.tag(tag::SOME);
                         let (written, generics) = (*written, self.generics.clone());
-                        encode_type(self.ast, &mut self.encoder, written, self.type_ids, &generics);
+                        let regions = self.regions.clone();
+                        encode_type(
+                            self.ast,
+                            &mut self.encoder,
+                            written,
+                            self.type_ids,
+                            &generics,
+                            &regions,
+                        );
                     }
                     None => {
                         self.encoder.tag(tag::NONE);
@@ -493,6 +547,19 @@ impl BodyHasher<'_> {
                     self.block(&arm.body);
                     self.scope.binders.truncate(depth);
                 }
+            }
+            Stmt::Borrow { value, unique, region, body } => {
+                self.encoder.tag(tag::BORROW).bool(*unique);
+                // The value being borrowed is an ordinary name reference.
+                self.name(*value);
+                // The region and the reference share one name and both are
+                // positional, so `borrow f as &r in` and `borrow f as &q in`
+                // are one body.
+                self.regions.push(*region);
+                self.scope.binders.push(*region);
+                self.block(body);
+                self.scope.binders.pop();
+                self.regions.pop();
             }
             Stmt::Destructure { struct_name, fields, value } => {
                 self.encoder.tag(tag::DESTRUCTURE);
@@ -862,6 +929,77 @@ mod tests {
         let reordered = "struct P { x: int, y: int } \
                  fn f(p: P) -> int { let P { y, x } = p; return x; }";
         assert_ne!(body(written, "f"), body(reordered, "f"));
+    }
+
+    // ---- regions (`docs/linearity-and-effects.md` §5) -------------------
+
+    #[test]
+    fn a_region_parameter_is_positional() {
+        // The same argument as a type parameter: no caller can tell `r` from
+        // `q`, so the two signatures are one.
+        assert_eq!(
+            sig("fn len[&r](s: &r int) -> int { return 0; }", "len"),
+            sig("fn len[&q](s: &q int) -> int { return 0; }", "len")
+        );
+    }
+
+    #[test]
+    fn a_reference_is_not_its_referent() {
+        assert_ne!(
+            sig("fn f(s: &r int) -> int { return 0; }", "f"),
+            sig("fn f(s: int) -> int { return 0; }", "f")
+        );
+    }
+
+    #[test]
+    fn uniqueness_is_part_of_a_signature() {
+        assert_ne!(
+            sig("fn f[&r](s: &r int) -> int { return 0; }", "f"),
+            sig("fn f[&r](s: &!r int) -> int { return 0; }", "f")
+        );
+    }
+
+    #[test]
+    fn which_region_a_parameter_names_is_part_of_a_signature() {
+        assert_ne!(
+            sig("fn f[&a, &b](x: &a int, y: &b int) -> int { return 0; }", "f"),
+            sig("fn f[&a, &b](x: &a int, y: &a int) -> int { return 0; }", "f")
+        );
+    }
+
+    #[test]
+    fn a_where_clause_is_part_of_a_signature() {
+        // It is an obligation on every caller, so it is exactly the kind of
+        // thing `SigId` exists to cover.
+        assert_ne!(
+            sig("fn f[&a, &b](x: &a int, y: &b int) -> int { return 0; }", "f"),
+            sig("fn f[&a, &b where b <= a](x: &a int, y: &b int) -> int { return 0; }", "f")
+        );
+    }
+
+    #[test]
+    fn a_borrow_blocks_region_name_does_not_reach_the_body_hash() {
+        // Positional inside a body too, like any other binder.
+        assert_eq!(
+            body("fn f(x: int) -> int { borrow x as &r in { return 0; } return 1; }", "f"),
+            body("fn f(x: int) -> int { borrow x as &q in { return 0; } return 1; }", "f")
+        );
+    }
+
+    #[test]
+    fn what_is_borrowed_does_reach_the_body_hash() {
+        assert_ne!(
+            body("fn f(x: int, y: int) -> int { borrow x as &r in { return 0; } return 1; }", "f"),
+            body("fn f(x: int, y: int) -> int { borrow y as &r in { return 0; } return 1; }", "f")
+        );
+    }
+
+    #[test]
+    fn a_shared_borrow_is_not_a_unique_one() {
+        assert_ne!(
+            body("fn f(x: int) -> int { borrow x as &r in { return 0; } return 1; }", "f"),
+            body("fn f(x: int) -> int { borrow mut x as &!r in { return 0; } return 1; }", "f")
+        );
     }
 
     #[test]

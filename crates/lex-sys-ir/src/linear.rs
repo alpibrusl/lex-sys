@@ -49,12 +49,16 @@ pub(crate) fn mode_of(defs: &[TypeDef], unifier: &Unifier, ty: &Type) -> Mode {
             // else — so this recursion terminates without a seen set.
             let members: Vec<Type> = defs[index].members().cloned().collect();
             for member in members {
-                if mode_of(defs, unifier, &member.substitute(&args)) == Mode::Res {
+                if mode_of(defs, unifier, &member.substitute(&args, &[])) == Mode::Res {
                     return Mode::Res;
                 }
             }
             Mode::Val
         }
+        // §5 rule 3: `&r T` and `&!r T` are `val` whatever `T` is. Copyable
+        // and discardable, which is sound precisely because the referent is
+        // frozen or locked for the whole region and the region is a block.
+        Type::Ref { .. } => Mode::Val,
         _ => Mode::Val,
     }
 }
@@ -86,6 +90,14 @@ pub(crate) enum Event {
     Read { ty: Type, span: Span },
     /// A `return`. Every live obligation must be discharged by now.
     Return { span: Span },
+    /// A `borrow` block opened over this slot (§5 rule 1). Frozen means not
+    /// movable and not consumable — a read is still fine, which is the whole
+    /// point, and for a `val` slot a read was never a move so nothing
+    /// changes.
+    Freeze { slot: Slot, span: Span },
+    /// The block closed and the slot is owned again. §5: "a three-valued flag
+    /// set at block entry and restored at block exit".
+    Thaw { slot: Slot },
     /// A block. Whatever it declared must be dead when it closes.
     Scope(Vec<Event>),
     /// `if`/`else`, a `match`'s arms, or the right-hand side of `&&`/`||`.
@@ -145,6 +157,10 @@ struct Check<'a> {
     /// Filled in by `Declare`, so an error can name the binding it is about.
     names: Vec<Option<(String, Span)>>,
     state: Vec<State>,
+    /// How many `borrow` blocks are open over each slot. A count rather than
+    /// a flag because shared borrows nest (§5's `two_shared_borrows`), and
+    /// the innermost one closing must not thaw the whole thing.
+    frozen: Vec<u32>,
 }
 
 /// Check one function body's trace. `slots` are the settled slot types.
@@ -160,6 +176,7 @@ pub(crate) fn check(
         slots,
         names: vec![None; slots.len()],
         state: vec![State::Untracked; slots.len()],
+        frozen: vec![0; slots.len()],
     };
     check.run(events)?;
     Ok(())
@@ -188,8 +205,36 @@ impl Check<'_> {
                     self.state[slot.0 as usize] =
                         if self.is_res(*slot) { State::Live } else { State::Untracked };
                 }
+                Event::Freeze { slot, span } => {
+                    if self.state[slot.0 as usize] == State::Moved {
+                        return Err(Diagnostic::new(
+                            format!(
+                                "`{}` has already been consumed; there is nothing left to borrow",
+                                self.name(*slot)
+                            ),
+                            *span,
+                        ));
+                    }
+                    self.frozen[slot.0 as usize] += 1;
+                }
+                Event::Thaw { slot } => {
+                    self.frozen[slot.0 as usize] -= 1;
+                }
                 Event::Use { slot, span } => match self.state[slot.0 as usize] {
                     State::Untracked => {}
+                    // Reading a `res` binding *is* moving it — this slice has
+                    // no non-owning read of an owned name — so a frozen one
+                    // cannot be read at all. §5 rule 1: frozen means not
+                    // movable, not consumable.
+                    State::Live if self.frozen[slot.0 as usize] > 0 => {
+                        return Err(Diagnostic::new(
+                            format!(
+                                "`{}` is frozen by an enclosing `borrow`, so it cannot be moved or consumed here",
+                                self.name(*slot)
+                            ),
+                            *span,
+                        ));
+                    }
                     State::Live => self.state[slot.0 as usize] = State::Moved,
                     State::Moved => {
                         return Err(Diagnostic::new(
@@ -202,6 +247,18 @@ impl Check<'_> {
                     }
                 },
                 Event::Assign { slot, span } => {
+                    // A frozen binding may not change underneath a reference
+                    // to it. §5 rule 1 says not movable and not consumable;
+                    // assignment is the third way to break the promise.
+                    if self.frozen[slot.0 as usize] > 0 {
+                        return Err(Diagnostic::new(
+                            format!(
+                                "`{}` is frozen by an enclosing `borrow`, so it cannot be assigned to here",
+                                self.name(*slot)
+                            ),
+                            *span,
+                        ));
+                    }
                     if self.state[slot.0 as usize] == State::Live {
                         return Err(Diagnostic::new(
                             format!(
