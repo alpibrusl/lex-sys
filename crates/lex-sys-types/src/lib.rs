@@ -59,6 +59,15 @@ impl Type {
         matches!(self, Type::Var(_))
     }
 
+    /// Does an unsolved variable survive anywhere in this type?
+    pub fn has_var(&self) -> bool {
+        match self {
+            Type::Var(_) => true,
+            Type::Named(_, args) => args.iter().any(Type::has_var),
+            _ => false,
+        }
+    }
+
     /// Replace each `Param(i)` with `args[i]`.
     pub fn substitute(&self, args: &[Type]) -> Type {
         match self {
@@ -91,6 +100,9 @@ pub struct Unifier {
     /// Names for rendering a `Named` type in a diagnostic. The driver supplies
     /// them; this crate never invents one.
     names: Vec<String>,
+    /// The type parameters of whichever declaration is being checked, so a
+    /// diagnostic can say `T` rather than `T0`.
+    param_names: Vec<String>,
 }
 
 impl Unifier {
@@ -107,6 +119,12 @@ impl Unifier {
 
     pub fn name_of(&self, def: DefId) -> &str {
         &self.names[def.0 as usize]
+    }
+
+    /// Set the parameter names used when rendering `Type::Param`, for the
+    /// declaration about to be checked.
+    pub fn set_param_names(&mut self, names: Vec<String>) {
+        self.param_names = names;
     }
 
     pub fn fresh(&mut self) -> Type {
@@ -171,7 +189,9 @@ impl Unifier {
             Type::Int => "int".to_owned(),
             Type::Bool => "bool".to_owned(),
             Type::Unit => "()".to_owned(),
-            Type::Param(i) => format!("T{i}"),
+            Type::Param(i) => {
+                self.param_names.get(i as usize).cloned().unwrap_or_else(|| format!("T{i}"))
+            }
             Type::Var(v) => format!("?{}", v.0),
             Type::Named(def, args) if args.is_empty() => self.name_of(def).to_owned(),
             Type::Named(def, args) => {

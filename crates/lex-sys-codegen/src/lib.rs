@@ -44,10 +44,14 @@ fn leaves_into(ty: &Type, program: &Program, out: &mut Vec<types::Type>) {
     match ty {
         Type::Int => out.push(types::I64),
         Type::Bool => out.push(types::I8),
-        Type::Named(def, _) => match program.type_info(*def) {
+        // A generic type's members are written in terms of its parameters, so
+        // they are substituted here rather than monomorphised: `Pair[int,
+        // bool]` and `Pair[bool, int]` are two leaf layouts of one
+        // declaration. Only *functions* are copied per instantiation.
+        Type::Named(def, args) => match program.type_info(*def) {
             TypeInfo::Struct { fields, .. } => {
                 for (_, field) in fields {
-                    leaves_into(field, program, out);
+                    leaves_into(&field.substitute(args), program, out);
                 }
             }
             // An enum is a tag followed by *every* variant's payload, each in
@@ -60,7 +64,7 @@ fn leaves_into(ty: &Type, program: &Program, out: &mut Vec<types::Type>) {
                 out.push(types::I64);
                 for (_, payload) in variants {
                     for ty in payload {
-                        leaves_into(ty, program, out);
+                        leaves_into(&ty.substitute(args), program, out);
                     }
                 }
             }
@@ -384,8 +388,8 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
                     }
                 }
                 Stmt::While { cond, body } => self.while_stmt(cond, body),
-                Stmt::Match { scrutinee, def, arms } => {
-                    if self.match_stmt(scrutinee, *def, arms) {
+                Stmt::Match { scrutinee, def, args, arms } => {
+                    if self.match_stmt(scrutinee, *def, args, arms) {
                         return true;
                     }
                 }
@@ -452,17 +456,17 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
 
     /// Where a variant's payload starts among an enum's leaves, and how many
     /// leaves each payload position occupies.
-    fn variant_layout(&self, def: DefId, variant: u32) -> (u32, Vec<u32>) {
+    fn variant_layout(&self, def: DefId, args: &[Type], variant: u32) -> (u32, Vec<u32>) {
         let TypeInfo::Enum { variants, .. } = self.program.type_info(def) else {
             unreachable!("a variant of a struct should have been refused");
         };
+        let width = |ty: &Type| leaf_count(&ty.substitute(args), self.program);
         // One for the tag, then every earlier variant's payload.
         let mut offset = 1;
         for (_, payload) in &variants[..variant as usize] {
-            offset += payload.iter().map(|ty| leaf_count(ty, self.program)).sum::<u32>();
+            offset += payload.iter().map(&width).sum::<u32>();
         }
-        let widths =
-            variants[variant as usize].1.iter().map(|ty| leaf_count(ty, self.program)).collect();
+        let widths = variants[variant as usize].1.iter().map(&width).collect();
         (offset, widths)
     }
 
@@ -471,7 +475,7 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
     /// A jump table would be faster and is the obvious later move; a chain is
     /// what M1 needs and is easier to be sure of. Returns whether every arm
     /// returned, which makes the whole `match` a terminator.
-    fn match_stmt(&mut self, scrutinee: &Expr, def: DefId, arms: &[Arm]) -> bool {
+    fn match_stmt(&mut self, scrutinee: &Expr, def: DefId, args: &[Type], arms: &[Arm]) -> bool {
         let values = self.expr(scrutinee);
         let tag = values[0];
         let merge = self.builder.create_block();
@@ -495,7 +499,7 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
 
                     self.builder.switch_to_block(body_block);
                     self.builder.seal_block(body_block);
-                    self.bind_payload(def, variant, arm, &values);
+                    self.bind_payload(def, args, variant, arm, &values);
                     let returned = self.stmts(&arm.body);
                     if !returned {
                         self.builder.ins().jump(merge, &[]);
@@ -534,8 +538,15 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
     }
 
     /// Copy a matched variant's payload into the slots its pattern bound.
-    fn bind_payload(&mut self, def: DefId, variant: u32, arm: &Arm, values: &[Value]) {
-        let (offset, widths) = self.variant_layout(def, variant);
+    fn bind_payload(
+        &mut self,
+        def: DefId,
+        args: &[Type],
+        variant: u32,
+        arm: &Arm,
+        values: &[Value],
+    ) {
+        let (offset, widths) = self.variant_layout(def, args, variant);
         let mut at = offset as usize;
         for (binding, width) in arm.bindings.iter().zip(widths) {
             if let Some(slot) = binding {
@@ -577,23 +588,24 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
             Expr::Struct { fields, .. } => {
                 fields.iter().flat_map(|field| self.expr(field)).collect()
             }
-            Expr::Field { base, def, index } => {
+            Expr::Field { base, def, args, index } => {
                 let values = self.expr(base);
                 let TypeInfo::Struct { fields, .. } = self.program.type_info(*def) else {
                     unreachable!("a field access on an enum should have been refused");
                 };
                 let start: u32 = fields[..*index as usize]
                     .iter()
-                    .map(|(_, ty)| leaf_count(ty, self.program))
+                    .map(|(_, ty)| leaf_count(&ty.substitute(args), self.program))
                     .sum();
-                let len = leaf_count(&fields[*index as usize].1, self.program);
+                let len = leaf_count(&fields[*index as usize].1.substitute(args), self.program);
                 values[start as usize..(start + len) as usize].to_vec()
             }
-            Expr::Enum { def, variant, payload } => {
-                let (offset, widths) = self.variant_layout(*def, *variant);
-                let total = leaf_count(&Type::Named(*def, Vec::new()), self.program);
+            Expr::Enum { def, args, variant, payload } => {
+                let whole = Type::Named(*def, args.clone());
+                let (offset, widths) = self.variant_layout(*def, args, *variant);
+                let total = leaf_count(&whole, self.program);
                 let payload: Vec<Vec<Value>> = payload.iter().map(|e| self.expr(e)).collect();
-                let all = leaves(&Type::Named(*def, Vec::new()), self.program);
+                let all = leaves(&whole, self.program);
 
                 // The tag, then every variant's leaves. This variant's are the
                 // values just computed; the rest are zeroed, because a value

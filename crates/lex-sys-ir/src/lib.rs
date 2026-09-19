@@ -135,11 +135,15 @@ pub enum Expr {
     Field {
         base: Box<Expr>,
         def: DefId,
+        /// The base's type arguments, so the backend can compute the field's
+        /// position without re-deriving the type.
+        args: Vec<Type>,
         index: u32,
     },
     /// An enum value: which variant, and its payload.
     Enum {
         def: DefId,
+        args: Vec<Type>,
         variant: u32,
         payload: Vec<Expr>,
     },
@@ -178,6 +182,7 @@ pub enum Stmt {
     Match {
         scrutinee: Expr,
         def: DefId,
+        args: Vec<Type>,
         arms: Vec<Arm>,
     },
     Return(Expr),
@@ -272,8 +277,78 @@ pub fn terminates(body: &[Stmt]) -> bool {
 /// is ever checked against.
 struct Signature {
     name: Symbol,
+    /// Type parameters in declaration order; `Type::Param(i)` is the `i`th.
+    generics: Vec<Symbol>,
     params: Vec<Type>,
     ret: Type,
+    /// Position of the declaration among the unit's items.
+    item: usize,
+}
+
+/// One monomorphic copy of a function: which function, and the type arguments
+/// it was instantiated at. A non-generic function has exactly one, with no
+/// arguments.
+struct Instance {
+    signature: usize,
+    args: Vec<Type>,
+}
+
+/// The monomorphisation worklist.
+///
+/// Generics are erased by *copying*: `first[int]` and `first[bool]` become two
+/// ordinary functions. That is the commitment in #1 — monomorphised generics,
+/// zero cost — and it is what lets the backend keep scalarising, since every
+/// function it sees has concrete types.
+///
+/// A copy's id is its index here, assigned when a call site first asks for it.
+/// The body may not be lowered yet, which is why ids are handed out eagerly
+/// and the bodies filled in afterwards: a generic function may call itself.
+struct Mono {
+    instances: Vec<Instance>,
+    pending: Vec<usize>,
+    /// False while checking a generic function rigidly, where instantiations
+    /// are hypothetical and must not be emitted.
+    recording: bool,
+}
+
+impl Mono {
+    fn new(recording: bool) -> Self {
+        Self { instances: Vec::new(), pending: Vec::new(), recording }
+    }
+
+    /// The id of this instance, creating it if it is new.
+    fn request(&mut self, signature: usize, args: Vec<Type>) -> FuncId {
+        if !self.recording {
+            // Checking a generic body: the call is type-checked, but no copy
+            // is emitted for a type argument that is itself a parameter.
+            return FuncId(0);
+        }
+        if let Some(index) =
+            self.instances.iter().position(|i| i.signature == signature && i.args == args)
+        {
+            return FuncId(index as u32);
+        }
+        self.instances.push(Instance { signature, args });
+        let index = self.instances.len() - 1;
+        self.pending.push(index);
+        FuncId(index as u32)
+    }
+}
+
+/// A name for one monomorphic copy.
+///
+/// `first[int, bool]` becomes `first$int$bool`. Two instantiations of the same
+/// function must not collide, and the name is what the linker sees.
+fn instance_name(base: &str, args: &[Type], unifier: &Unifier) -> String {
+    if args.is_empty() {
+        return base.to_owned();
+    }
+    let mut name = base.to_owned();
+    for arg in args {
+        name.push('$');
+        name.push_str(&unifier.display(arg).replace(['[', ']', ' '], "_").replace(',', "_"));
+    }
+    name
 }
 
 /// A declared type, as the checker needs it: interned names, so a member
@@ -286,6 +361,8 @@ enum DefKind {
 struct TypeDef {
     name: Symbol,
     def: DefId,
+    /// Type parameters in declaration order; `Type::Param(i)` is the `i`th.
+    generics: Vec<Symbol>,
     kind: DefKind,
     span: Span,
 }
@@ -332,9 +409,9 @@ fn collect_types(ast: &Ast, unifier: &mut Unifier) -> Result<Vec<TypeDef>, Diagn
     let mut defs: Vec<TypeDef> = Vec::new();
 
     for (index, item) in ast.items.iter().enumerate() {
-        let (name_sym, noun) = match item {
-            Item::Struct(decl) => (decl.name, "struct"),
-            Item::Enum(decl) => (decl.name, "enum"),
+        let (name_sym, noun, generics) = match item {
+            Item::Struct(decl) => (decl.name, "struct", decl.generics.clone()),
+            Item::Enum(decl) => (decl.name, "enum", decl.generics.clone()),
             Item::Fn(_) => continue,
         };
         let span = ast.item_span(ast::ItemId(index as u32));
@@ -358,7 +435,8 @@ fn collect_types(ast: &Ast, unifier: &mut Unifier) -> Result<Vec<TypeDef>, Diagn
             "struct" => DefKind::Struct(Vec::new()),
             _ => DefKind::Enum(Vec::new()),
         };
-        defs.push(TypeDef { name: name_sym, def, kind, span });
+        check_generic_names(ast, &generics, span)?;
+        defs.push(TypeDef { name: name_sym, def, generics, kind, span });
     }
 
     for item in ast.items.iter() {
@@ -378,7 +456,8 @@ fn collect_types(ast: &Ast, unifier: &mut Unifier) -> Result<Vec<TypeDef>, Diagn
                             span,
                         ));
                     }
-                    fields.push((field.name, resolve_type(ast, &defs, field.ty)?));
+                    let generics = defs[position].generics.clone();
+                    fields.push((field.name, resolve_type(ast, &defs, &generics, field.ty)?));
                 }
                 defs[position].kind = DefKind::Struct(fields);
             }
@@ -406,10 +485,11 @@ fn collect_types(ast: &Ast, unifier: &mut Unifier) -> Result<Vec<TypeDef>, Diagn
                             span,
                         ));
                     }
+                    let generics = defs[position].generics.clone();
                     let payload = variant
                         .payload
                         .iter()
-                        .map(|ty| resolve_type(ast, &defs, *ty))
+                        .map(|ty| resolve_type(ast, &defs, &generics, *ty))
                         .collect::<Result<Vec<_>, _>>()?;
                     variants.push((variant.name, payload));
                 }
@@ -440,9 +520,9 @@ pub fn lower(ast: &Ast) -> Result<Program, Diagnostic> {
     let mut unifier = Unifier::new();
     let defs = collect_types(ast, &mut unifier)?;
 
-    // Pass 1: every function is visible to every other, so collect signatures
-    // before checking any body. Definition order in the file is irrelevant,
-    // and no body is ever consulted to type a call.
+    // Every function is visible to every other, so collect signatures before
+    // checking any body. Definition order in the file is irrelevant, and no
+    // body is ever consulted to type a call.
     let mut signatures: Vec<Signature> = Vec::new();
     for (index, item) in ast.items.iter().enumerate() {
         let Item::Fn(decl) = item else { continue };
@@ -458,6 +538,7 @@ pub fn lower(ast: &Ast) -> Result<Program, Diagnostic> {
         if signatures.iter().any(|s| s.name == decl.name) {
             return Err(Diagnostic::new(format!("function `{name}` is defined twice"), span));
         }
+        check_generic_names(ast, &decl.generics, span)?;
 
         let mut seen: Vec<Symbol> = Vec::new();
         let mut params = Vec::new();
@@ -469,15 +550,57 @@ pub fn lower(ast: &Ast) -> Result<Program, Diagnostic> {
                 ));
             }
             seen.push(param.name);
-            params.push(resolve_type(ast, &defs, param.ty)?);
+            params.push(resolve_type(ast, &defs, &decl.generics, param.ty)?);
         }
 
-        let ret = resolve_type(ast, &defs, decl.ret)?;
-        signatures.push(Signature { name: decl.name, params, ret });
+        let ret = resolve_type(ast, &defs, &decl.generics, decl.ret)?;
+        signatures.push(Signature {
+            name: decl.name,
+            generics: decl.generics.clone(),
+            params,
+            ret,
+            item: index,
+        });
     }
 
-    let mut program = Program {
-        funcs: Vec::new(),
+    // Pass 1: check each generic function once, with its parameters rigid.
+    //
+    // Without this an unused generic function is never checked at all, since
+    // pass 2 only reaches what is called. Rigid parameters are also the
+    // stronger check: a body that type-checks for every `T` is checked once,
+    // rather than once per instantiation and never for the `T` nobody used.
+    for (index, signature) in signatures.iter().enumerate() {
+        if signature.generics.is_empty() {
+            continue;
+        }
+        let rigid: Vec<Type> = (0..signature.generics.len() as u32).map(Type::Param).collect();
+        let mut checking = Mono::new(false);
+        lower_function(ast, &defs, &signatures, &mut unifier, index, &rigid, &mut checking)?;
+    }
+
+    // Pass 2: emit a copy of every function actually reachable, starting from
+    // the ones that need no type arguments.
+    let mut mono = Mono::new(true);
+    for (index, signature) in signatures.iter().enumerate() {
+        if signature.generics.is_empty() {
+            mono.request(index, Vec::new());
+        }
+    }
+
+    let mut funcs: Vec<Option<Func>> = Vec::new();
+    while let Some(instance) = mono.pending.pop() {
+        let (signature, args) =
+            (mono.instances[instance].signature, mono.instances[instance].args.clone());
+        let func =
+            lower_function(ast, &defs, &signatures, &mut unifier, signature, &args, &mut mono)?;
+        if funcs.len() <= instance {
+            funcs.resize_with(instance + 1, || None);
+        }
+        funcs[instance] = Some(func);
+    }
+
+    Ok(Program {
+        funcs: funcs.into_iter().map(|f| f.expect("every requested instance is lowered")).collect(),
         types: defs
             .iter()
             .map(|d| match &d.kind {
@@ -497,79 +620,235 @@ pub fn lower(ast: &Ast) -> Result<Program, Diagnostic> {
                 },
             })
             .collect(),
+    })
+}
+
+/// Replace every inference variable in a lowered body with what it was solved
+/// to.
+///
+/// Types are written into the IR while checking is still in progress, so a
+/// node can capture a variable that a later statement settles — `let x:
+/// Option[int] = Option::None;` builds the value before the annotation has
+/// said what `T` is. One walk afterwards settles them all.
+fn settle_types(stmts: &mut [Stmt], unifier: &Unifier) {
+    for stmt in stmts {
+        match stmt {
+            Stmt::Store { value, .. } | Stmt::Eval(value) | Stmt::Return(value) => {
+                settle_expr(value, unifier)
+            }
+            Stmt::If { cond, then_body, else_body } => {
+                settle_expr(cond, unifier);
+                settle_types(then_body, unifier);
+                settle_types(else_body, unifier);
+            }
+            Stmt::While { cond, body } => {
+                settle_expr(cond, unifier);
+                settle_types(body, unifier);
+            }
+            Stmt::Match { scrutinee, args, arms, .. } => {
+                settle_expr(scrutinee, unifier);
+                for arg in args.iter_mut() {
+                    *arg = unifier.resolve(arg);
+                }
+                for arm in arms {
+                    settle_types(&mut arm.body, unifier);
+                }
+            }
+        }
+    }
+}
+
+fn settle_expr(expr: &mut Expr, unifier: &Unifier) {
+    match expr {
+        Expr::Int(_) | Expr::Bool(_) | Expr::Load(_) => {}
+        Expr::Neg(inner) | Expr::Not(inner) => settle_expr(inner, unifier),
+        Expr::Bin { lhs, rhs, .. } => {
+            settle_expr(lhs, unifier);
+            settle_expr(rhs, unifier);
+        }
+        Expr::Call { args, .. } => {
+            for arg in args {
+                settle_expr(arg, unifier);
+            }
+        }
+        Expr::Struct { fields, .. } => {
+            for field in fields {
+                settle_expr(field, unifier);
+            }
+        }
+        Expr::Field { base, args, .. } => {
+            settle_expr(base, unifier);
+            for arg in args.iter_mut() {
+                *arg = unifier.resolve(arg);
+            }
+        }
+        Expr::Enum { args, payload, .. } => {
+            for arg in args.iter_mut() {
+                *arg = unifier.resolve(arg);
+            }
+            for value in payload {
+                settle_expr(value, unifier);
+            }
+        }
+    }
+}
+
+/// Check and lower one function at one instantiation.
+fn lower_function(
+    ast: &Ast,
+    defs: &[TypeDef],
+    signatures: &[Signature],
+    unifier: &mut Unifier,
+    index: usize,
+    args: &[Type],
+    mono: &mut Mono,
+) -> Result<Func, Diagnostic> {
+    let signature = &signatures[index];
+    let Item::Fn(decl) = &ast.items[signature.item] else {
+        unreachable!("a signature always names a function");
     };
 
-    for (index, item) in ast.items.iter().enumerate() {
-        let Item::Fn(decl) = item else { continue };
-        let signature =
-            signatures.iter().find(|s| s.name == decl.name).expect("collected in the pass above");
+    let params: Vec<Type> = signature.params.iter().map(|t| t.substitute(args)).collect();
+    let ret = signature.ret.substitute(args);
 
-        let mut f = FnLowering {
-            ast,
-            signatures: &signatures,
-            defs: &defs,
-            unifier: &mut unifier,
-            scopes: vec![Vec::new()],
-            slots: Vec::new(),
-            ret: signature.ret.clone(),
-        };
+    // So a diagnostic inside this body says `T` rather than `T0`.
+    unifier
+        .set_param_names(signature.generics.iter().map(|g| ast.name_of(*g).to_owned()).collect());
 
-        for (param, ty) in decl.params.iter().zip(signature.params.iter()) {
-            // Parameters are immutable: the shape of a binding handed to you,
-            // not one you own outright.
-            f.declare(param.name, ty.clone(), false);
-        }
-        let body = f.block(&decl.body)?;
-        let slots = f.slots.clone();
+    let mut f = FnLowering {
+        ast,
+        signatures,
+        defs,
+        unifier,
+        mono,
+        generic_names: signature.generics.clone(),
+        generics: args.to_vec(),
+        scopes: vec![Vec::new()],
+        slots: Vec::new(),
+        ret: ret.clone(),
+    };
 
-        if !terminates(&body) {
-            return Err(Diagnostic::new(
-                format!(
-                    "function `{}` can finish without returning a value",
-                    ast.name_of(decl.name)
-                ),
-                ast.item_span(ast::ItemId(index as u32)),
-            ));
-        }
+    for (param, ty) in decl.params.iter().zip(params.iter()) {
+        // Parameters are immutable: the shape of a binding handed to you, not
+        // one you own outright.
+        f.declare(param.name, ty.clone(), false);
+    }
+    let mut body = f.block(&decl.body)?;
+    let mut slots = f.slots.clone();
 
-        program.funcs.push(Func {
-            name: ast.name_of(decl.name).to_owned(),
-            n_params: decl.params.len() as u32,
-            slots,
-            ret: signature.ret.clone(),
-            body,
-        });
+    settle_types(&mut body, unifier);
+    for slot in slots.iter_mut() {
+        *slot = unifier.resolve(slot);
     }
 
-    Ok(program)
+    // A slot whose type never got settled means the program did not say
+    // enough. Better to name it here than to hand the backend a type that is
+    // still a question.
+    if let Some(unsettled) = slots.iter().find(|ty| ty.has_var()) {
+        let _ = unsettled;
+        return Err(Diagnostic::new(
+            format!(
+                "cannot tell what type a binding in `{}` has; add an annotation",
+                ast.name_of(decl.name)
+            ),
+            ast.item_span(ast::ItemId(signature.item as u32)),
+        ));
+    }
+
+    if !terminates(&body) {
+        return Err(Diagnostic::new(
+            format!("function `{}` can finish without returning a value", ast.name_of(decl.name)),
+            ast.item_span(ast::ItemId(signature.item as u32)),
+        ));
+    }
+
+    Ok(Func {
+        name: instance_name(ast.name_of(decl.name), args, unifier),
+        n_params: decl.params.len() as u32,
+        slots,
+        ret,
+        body,
+    })
+}
+
+/// A declaration's type parameters must be distinct and must not shadow a
+/// built-in type name.
+fn check_generic_names(ast: &Ast, generics: &[Symbol], span: Span) -> Result<(), Diagnostic> {
+    let mut seen: Vec<Symbol> = Vec::new();
+    for name in generics {
+        let text = ast.name_of(*name);
+        if matches!(text, "int" | "bool") {
+            return Err(Diagnostic::new(
+                format!("`{text}` is a built-in type and cannot be a type parameter"),
+                span,
+            ));
+        }
+        if seen.contains(name) {
+            return Err(Diagnostic::new(
+                format!("type parameter `{text}` is declared twice"),
+                span,
+            ));
+        }
+        seen.push(*name);
+    }
+    Ok(())
 }
 
 /// Turn a written type into a real one.
 ///
-/// M1 has two primitive types and no declared ones yet, so this is short. It
-/// is a function rather than a match at each use site because unknown-type
-/// errors must read the same wherever a type is written.
-fn resolve_type(ast: &Ast, defs: &[TypeDef], id: TypeId) -> Result<Type, Diagnostic> {
+/// `generics` is the enclosing declaration's type parameters; a written name
+/// matching one of them is that parameter rather than a lookup. Parameters
+/// shadow nothing else, because a declaration that named one `int` was already
+/// refused.
+fn resolve_type(
+    ast: &Ast,
+    defs: &[TypeDef],
+    generics: &[Symbol],
+    id: TypeId,
+) -> Result<Type, Diagnostic> {
     let written = ast.ty(id);
     let name = ast.name_of(written.name);
     let span = ast.type_span(id);
 
-    let ty = match name {
-        "int" => Type::Int,
-        "bool" => Type::Bool,
+    let args = written
+        .args
+        .iter()
+        .map(|arg| resolve_type(ast, defs, generics, *arg))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    if let Some(index) = generics.iter().position(|g| *g == written.name) {
+        if !args.is_empty() {
+            return Err(Diagnostic::new(
+                format!("type parameter `{name}` takes no type arguments"),
+                span,
+            ));
+        }
+        return Ok(Type::Param(index as u32));
+    }
+
+    let (ty, arity) = match name {
+        "int" => (Type::Int, 0),
+        "bool" => (Type::Bool, 0),
         other => match defs.iter().find(|d| d.name == written.name) {
-            Some(def) => Type::Named(def.def, Vec::new()),
-            None => {
-                return Err(Diagnostic::new(format!("unknown type `{other}`"), span));
-            }
+            Some(def) => (Type::Named(def.def, args.clone()), def.generics.len()),
+            None => return Err(Diagnostic::new(format!("unknown type `{other}`"), span)),
         },
     };
 
-    // Nothing in M1 is generic yet, so every type takes zero arguments. The
-    // written form already allows them, which is why this is a check rather
-    // than a parse error.
-    if !written.args.is_empty() {
-        return Err(Diagnostic::new(format!("`{name}` takes no type arguments"), span));
+    if args.len() != arity {
+        return Err(Diagnostic::new(
+            if arity == 0 {
+                format!("`{name}` takes no type arguments")
+            } else {
+                format!(
+                    "`{name}` takes {arity} type argument{}, but {} {} given",
+                    if arity == 1 { "" } else { "s" },
+                    args.len(),
+                    if args.len() == 1 { "was" } else { "were" }
+                )
+            },
+            span,
+        ));
     }
     Ok(ty)
 }
@@ -586,6 +865,12 @@ struct FnLowering<'a> {
     signatures: &'a [Signature],
     defs: &'a [TypeDef],
     unifier: &'a mut Unifier,
+    mono: &'a mut Mono,
+    /// The names of this function's type parameters, so a written type can
+    /// resolve to `Type::Param`...
+    generic_names: Vec<Symbol>,
+    /// ...and what each was instantiated at, so it can then be substituted.
+    generics: Vec<Type>,
     scopes: Vec<Vec<Binding>>,
     slots: Vec<Type>,
     ret: Type,
@@ -610,6 +895,18 @@ impl<'a> FnLowering<'a> {
 
     fn declared_in_current_scope(&self, name: Symbol) -> bool {
         self.scopes.last().is_some_and(|scope| scope.iter().any(|b| b.name == name))
+    }
+
+    /// A type as written inside this body: resolved against the function's own
+    /// type parameters, then substituted with what they were instantiated at.
+    fn written_type(&self, id: TypeId) -> Result<Type, Diagnostic> {
+        let resolved = resolve_type(self.ast, self.defs, &self.generic_names, id)?;
+        Ok(resolved.substitute(&self.generics))
+    }
+
+    /// Fresh inference variables, one per type parameter of a declaration.
+    fn fresh_args(&mut self, count: usize) -> Vec<Type> {
+        (0..count).map(|_| self.unifier.fresh()).collect()
     }
 
     /// Require two types to be equal, reporting the failure at `span`.
@@ -661,7 +958,7 @@ impl<'a> FnLowering<'a> {
                 let (value, found) = self.expr(*value)?;
                 let declared = match ty {
                     Some(written) => {
-                        let declared = resolve_type(self.ast, self.defs, *written)?;
+                        let declared = self.written_type(*written)?;
                         self.expect_type(
                             &declared,
                             &found,
@@ -748,7 +1045,7 @@ impl<'a> FnLowering<'a> {
         let (value, scrutinee_ty) = self.expr(scrutinee)?;
         let resolved = self.unifier.resolve(&scrutinee_ty);
 
-        let Type::Named(def_id, _) = resolved else {
+        let Type::Named(def_id, type_args) = resolved else {
             return Err(Diagnostic::new(
                 format!(
                     "`{}` cannot be matched (M1 matches enums)",
@@ -837,7 +1134,10 @@ impl<'a> FnLowering<'a> {
             self.scopes.push(Vec::new());
             let mut slots: Vec<Option<Slot>> = Vec::new();
             if let Some(index) = variant_index {
-                let payload = variants[index as usize].1.clone();
+                // A binding's type comes from the scrutinee's own type
+                // arguments: matching `Option[int]` binds an `int`.
+                let payload: Vec<Type> =
+                    variants[index as usize].1.iter().map(|t| t.substitute(&type_args)).collect();
                 for (binding, ty) in bindings.iter().zip(payload.into_iter()) {
                     match binding {
                         Some(name) => {
@@ -877,7 +1177,7 @@ impl<'a> FnLowering<'a> {
             ));
         }
 
-        Ok(Stmt::Match { scrutinee: value, def: def_id, arms: lowered })
+        Ok(Stmt::Match { scrutinee: value, def: def_id, args: type_args, arms: lowered })
     }
 
     /// A condition is a `bool`. M0 tested "non-zero"; M1 has a type for the
@@ -925,8 +1225,13 @@ impl<'a> FnLowering<'a> {
                 };
                 // Copied out before checking any field value, because
                 // checking borrows `self` and the table lives beside it.
-                let (def_id, declared): (DefId, Vec<(Symbol, Type)>) =
-                    (def.def, fields_decl.clone());
+                let (def_id, generic_count) = (def.def, def.generics.len());
+                let fields_decl = fields_decl.clone();
+                // A generic struct's arguments are inferred from the values
+                // given for its fields, or left for the context to settle.
+                let type_args = self.fresh_args(generic_count);
+                let declared: Vec<(Symbol, Type)> =
+                    fields_decl.iter().map(|(n, t)| (*n, t.substitute(&type_args))).collect();
 
                 let mut values: Vec<Option<Expr>> = vec![None; declared.len()];
                 for (field, value) in fields {
@@ -966,14 +1271,14 @@ impl<'a> FnLowering<'a> {
                         def: def_id,
                         fields: values.into_iter().map(|v| v.expect("checked above")).collect(),
                     },
-                    Type::Named(def_id, Vec::new()),
+                    Type::Named(def_id, type_args),
                 )
             }
             AstExpr::Field { base, name } => {
                 let base_span = self.ast.expr_span(*base);
                 let (lowered, base_ty) = self.expr(*base)?;
                 let resolved = self.unifier.resolve(&base_ty);
-                let Type::Named(def_id, _) = resolved else {
+                let Type::Named(def_id, type_args) = resolved else {
                     return Err(Diagnostic::new(
                         format!("`{}` has no fields", self.unifier.display(&resolved)),
                         base_span,
@@ -1000,8 +1305,16 @@ impl<'a> FnLowering<'a> {
                         span,
                     ));
                 };
-                let ty = fields[index].1.clone();
-                (Expr::Field { base: Box::new(lowered), def: def_id, index: index as u32 }, ty)
+                let ty = fields[index].1.substitute(&type_args);
+                (
+                    Expr::Field {
+                        base: Box::new(lowered),
+                        def: def_id,
+                        args: type_args,
+                        index: index as u32,
+                    },
+                    ty,
+                )
             }
             AstExpr::Variant { enum_name, variant, args } => {
                 let enum_text = self.ast.name_of(*enum_name);
@@ -1021,7 +1334,13 @@ impl<'a> FnLowering<'a> {
                         span,
                     ));
                 };
-                let (def_id, payload_types) = (def.def, variants[index].1.clone());
+                let (def_id, generic_count) = (def.def, def.generics.len());
+                let declared_payload = variants[index].1.clone();
+                // Inferred from the payload values, or left for the context:
+                // `Option::None` learns its `T` from where it is used.
+                let type_args = self.fresh_args(generic_count);
+                let payload_types: Vec<Type> =
+                    declared_payload.iter().map(|t| t.substitute(&type_args)).collect();
 
                 if args.len() != payload_types.len() {
                     return Err(Diagnostic::new(
@@ -1045,8 +1364,13 @@ impl<'a> FnLowering<'a> {
                 }
 
                 (
-                    Expr::Enum { def: def_id, variant: index as u32, payload },
-                    Type::Named(def_id, Vec::new()),
+                    Expr::Enum {
+                        def: def_id,
+                        args: type_args.clone(),
+                        variant: index as u32,
+                        payload,
+                    },
+                    Type::Named(def_id, type_args),
                 )
             }
             AstExpr::Unary { op, operand } => {
@@ -1113,9 +1437,12 @@ impl<'a> FnLowering<'a> {
                     ));
                 }
 
-                let (callee_ref, params, ret) = if let Some(builtin) = Builtin::from_name(text) {
-                    let (params, ret) = builtin.signature();
-                    (Callee::Builtin(builtin), params, ret)
+                // A generic callee is instantiated with fresh variables, which
+                // the argument types then solve. The signature is all a caller
+                // is ever checked against, generic or not.
+                let mut instantiate: Option<(usize, Vec<Type>)> = None;
+                let (params, ret) = if let Some(builtin) = Builtin::from_name(text) {
+                    builtin.signature()
                 } else {
                     let index = self.signatures.iter().position(|s| s.name == *callee).ok_or_else(
                         || {
@@ -1125,12 +1452,13 @@ impl<'a> FnLowering<'a> {
                             )
                         },
                     )?;
+                    let fresh = self.fresh_args(self.signatures[index].generics.len());
                     let signature = &self.signatures[index];
-                    (
-                        Callee::Fn(FuncId(index as u32)),
-                        signature.params.clone(),
-                        signature.ret.clone(),
-                    )
+                    let params: Vec<Type> =
+                        signature.params.iter().map(|t| t.substitute(&fresh)).collect();
+                    let ret = signature.ret.substitute(&fresh);
+                    instantiate = Some((index, fresh));
+                    (params, ret)
                 };
 
                 if args.len() != params.len() {
@@ -1153,6 +1481,33 @@ impl<'a> FnLowering<'a> {
                     self.expect_type(expected, &found, arg_span)?;
                     lowered.push(value);
                 }
+                let callee_ref = match instantiate {
+                    None => Callee::Builtin(
+                        Builtin::from_name(text).expect("only a builtin skips instantiation"),
+                    ),
+                    Some((index, fresh)) => {
+                        // Every type argument must be settled by the arguments.
+                        // Letting the surrounding context settle one would mean
+                        // deciding which copy to emit after the call was already
+                        // lowered.
+                        let mut settled = Vec::with_capacity(fresh.len());
+                        for (position, var) in fresh.iter().enumerate() {
+                            let resolved = self.unifier.resolve(var);
+                            if resolved.is_var() {
+                                let parameter =
+                                    self.ast.name_of(self.signatures[index].generics[position]);
+                                return Err(Diagnostic::new(
+                                    format!(
+                                        "cannot tell what `{parameter}` is in this call to `{text}`; it is not determined by the arguments"
+                                    ),
+                                    span,
+                                ));
+                            }
+                            settled.push(resolved);
+                        }
+                        Callee::Fn(self.mono.request(index, settled))
+                    }
+                };
                 (Expr::Call { callee: callee_ref, args: lowered }, ret)
             }
         })
@@ -1661,6 +2016,147 @@ mod tests {
         assert!(
             error("enum E { A(int) } fn f(e: E) -> int { return e.x; }")
                 .contains("read by matching on it")
+        );
+    }
+
+    // ---- generics --------------------------------------------------------
+
+    fn names(src: &str) -> Vec<String> {
+        let mut names: Vec<String> =
+            lower_src(src).expect("should check").funcs.into_iter().map(|f| f.name).collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn a_generic_function_is_copied_once_per_instantiation() {
+        let names = names(
+            "fn id[T](x: T) -> T { return x; }              fn main() -> int { if id(true) { return id(1); } return id(2); }",
+        );
+        // One copy per type, not per call: `id(1)` and `id(2)` share theirs.
+        assert_eq!(names, ["id$bool", "id$int", "main"]);
+    }
+
+    #[test]
+    fn a_generic_function_nobody_calls_is_emitted_nowhere() {
+        let names = names("fn unused[T](x: T) -> T { return x; } fn main() -> int { return 0; }");
+        assert_eq!(names, ["main"]);
+    }
+
+    #[test]
+    fn a_generic_body_is_checked_even_when_it_is_never_called() {
+        // The point of checking rigidly: an error in a generic function does
+        // not wait for someone to instantiate it.
+        assert!(
+            error("fn unused[T](x: T) -> int { return true; } fn main() -> int { return 0; }")
+                .contains("expected `int`, found `bool`")
+        );
+    }
+
+    #[test]
+    fn a_type_parameter_is_rigid_inside_the_body() {
+        // `T` is not `int`, however every instantiation so far might be.
+        let message =
+            error("fn bad[T](x: T) -> T { return x + 1; } fn main() -> int { return 0; }");
+        assert!(message.contains("expected `T`"), "{message}");
+    }
+
+    #[test]
+    fn type_arguments_are_inferred_from_the_arguments() {
+        assert!(
+            lower_src("fn id[T](x: T) -> T { return x; } fn main() -> int { return id(1); }")
+                .is_ok()
+        );
+        assert!(
+            error(
+                "fn same[T](a: T, b: T) -> T { return a; }                  fn main() -> int { return same(1, true); }"
+            )
+            .contains("expected `int`, found `bool`")
+        );
+    }
+
+    #[test]
+    fn a_type_argument_the_arguments_do_not_settle_is_refused() {
+        let message = error(
+            "enum Opt[T] { None, Some(T) }              fn make[T]() -> Opt[T] { return Opt::None; }              fn main() -> int { let x = make(); return 0; }",
+        );
+        assert!(message.contains("cannot tell what `T` is"), "{message}");
+    }
+
+    #[test]
+    fn a_generic_struct_substitutes_its_arguments_into_field_types() {
+        assert!(
+            lower_src(
+                "struct Pair[A, B] { first: A, second: B }                  fn main() -> int { let p = Pair { first: 1, second: true };                  if p.second { return p.first; } return 0; }"
+            )
+            .is_ok()
+        );
+        assert!(
+            error(
+                "struct Pair[A, B] { first: A, second: B }                  fn main() -> int { let p = Pair { first: 1, second: true }; return p.second; }"
+            )
+            .contains("expected `int`, found `bool`")
+        );
+    }
+
+    #[test]
+    fn a_generic_enum_substitutes_its_arguments_into_payloads() {
+        assert!(
+            lower_src(
+                "enum Opt[T] { None, Some(T) }                  fn f(o: Opt[int]) -> int { match o { Opt::None => { return 0; } Opt::Some(v) => { return v; } } }"
+            )
+            .is_ok()
+        );
+        // The binding is an `int` here, so returning it as a `bool` is wrong.
+        assert!(
+            error(
+                "enum Opt[T] { None, Some(T) }                  fn f(o: Opt[int]) -> bool { match o { Opt::None => { return true; } Opt::Some(v) => { return v; } } }"
+            )
+            .contains("expected `bool`, found `int`")
+        );
+    }
+
+    #[test]
+    fn a_nullary_variant_takes_its_type_from_the_context() {
+        // Nothing in `Opt::None` says what `T` is; the annotation does.
+        assert!(
+            lower_src(
+                "enum Opt[T] { None, Some(T) }                  fn main() -> int { let x: Opt[int] = Opt::None; return 0; }"
+            )
+            .is_ok()
+        );
+        assert!(
+            error(
+                "enum Opt[T] { None, Some(T) } fn main() -> int { let x = Opt::None; return 0; }"
+            )
+            .contains("cannot tell what type")
+        );
+    }
+
+    #[test]
+    fn type_argument_counts_are_checked() {
+        assert!(
+            error(
+                "struct Pair[A, B] { first: A, second: B }                  fn f(p: Pair[int]) -> int { return p.first; }"
+            )
+            .contains("takes 2 type arguments, but 1 was given")
+        );
+        assert!(
+            error("fn f(x: int[bool]) -> int { return 0; }").contains("takes no type arguments")
+        );
+        assert!(
+            error("fn f[T](x: T[int]) -> int { return 0; }")
+                .contains("type parameter `T` takes no type arguments")
+        );
+    }
+
+    #[test]
+    fn type_parameter_names_are_checked() {
+        assert!(error("fn f[T, T](x: T) -> T { return x; }").contains("declared twice"));
+        assert!(error("fn f[int](x: int) -> int { return x; }").contains("built-in type"));
+        assert!(
+            error("struct S[A, A] { x: A } fn main() -> int { return 0; }")
+                .contains("declared twice")
         );
     }
 

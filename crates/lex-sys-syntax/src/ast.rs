@@ -207,6 +207,7 @@ pub struct Param {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct FnDecl {
     pub name: Symbol,
+    pub generics: Vec<Symbol>,
     pub params: Vec<Param>,
     pub ret: TypeId,
     pub body: Block,
@@ -237,6 +238,9 @@ pub struct FieldDecl {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct StructDecl {
     pub name: Symbol,
+    /// Type parameters, in declaration order. `Type::Param(i)` refers to the
+    /// `i`th of these.
+    pub generics: Vec<Symbol>,
     pub fields: Vec<FieldDecl>,
 }
 
@@ -250,6 +254,7 @@ pub struct VariantDecl {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct EnumDecl {
     pub name: Symbol,
+    pub generics: Vec<Symbol>,
     pub variants: Vec<VariantDecl>,
 }
 

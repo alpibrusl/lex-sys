@@ -93,6 +93,7 @@ impl<'a> Parser<'a> {
     fn fn_decl(&mut self) -> Result<ItemId, Diagnostic> {
         let start = self.expect(TokenKind::Fn)?.span;
         let name = self.ident()?;
+        let generics = self.generic_params()?;
 
         self.expect(TokenKind::LParen)?;
         let mut params = Vec::new();
@@ -112,12 +113,15 @@ impl<'a> Parser<'a> {
         let ret = self.type_expr()?;
 
         let (body, end) = self.block()?;
-        Ok(self.ast.push_item(Item::Fn(FnDecl { name, params, ret, body }), start.to(end)))
+        Ok(self
+            .ast
+            .push_item(Item::Fn(FnDecl { name, generics, params, ret, body }), start.to(end)))
     }
 
     fn struct_decl(&mut self) -> Result<ItemId, Diagnostic> {
         let start = self.expect(TokenKind::Struct)?.span;
         let name = self.ident()?;
+        let generics = self.generic_params()?;
         self.expect(TokenKind::LBrace)?;
 
         let mut fields = Vec::new();
@@ -131,12 +135,13 @@ impl<'a> Parser<'a> {
             }
         }
         let end = self.expect(TokenKind::RBrace)?.span;
-        Ok(self.ast.push_item(Item::Struct(StructDecl { name, fields }), start.to(end)))
+        Ok(self.ast.push_item(Item::Struct(StructDecl { name, generics, fields }), start.to(end)))
     }
 
     fn enum_decl(&mut self) -> Result<ItemId, Diagnostic> {
         let start = self.expect(TokenKind::Enum)?.span;
         let name = self.ident()?;
+        let generics = self.generic_params()?;
         self.expect(TokenKind::LBrace)?;
 
         let mut variants = Vec::new();
@@ -158,7 +163,22 @@ impl<'a> Parser<'a> {
             }
         }
         let end = self.expect(TokenKind::RBrace)?.span;
-        Ok(self.ast.push_item(Item::Enum(EnumDecl { name, variants }), start.to(end)))
+        Ok(self.ast.push_item(Item::Enum(EnumDecl { name, generics, variants }), start.to(end)))
+    }
+
+    /// `[A, B]` after a declaration's name, or nothing.
+    fn generic_params(&mut self) -> Result<Vec<Symbol>, Diagnostic> {
+        let mut generics = Vec::new();
+        if self.eat(TokenKind::LBracket) {
+            while self.peek().kind != TokenKind::RBracket {
+                generics.push(self.ident()?);
+                if !self.eat(TokenKind::Comma) {
+                    break;
+                }
+            }
+            self.expect(TokenKind::RBracket)?;
+        }
+        Ok(generics)
     }
 
     fn ident(&mut self) -> Result<Symbol, Diagnostic> {
