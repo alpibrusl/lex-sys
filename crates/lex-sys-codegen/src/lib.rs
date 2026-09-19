@@ -11,16 +11,103 @@
 use std::fmt;
 
 use cranelift_codegen::ir::condcodes::IntCC;
-use cranelift_codegen::ir::{AbiParam, InstBuilder, Value, types};
+use cranelift_codegen::ir::{
+    AbiParam, InstBuilder, MemFlags, StackSlotData, StackSlotKind, Value, types,
+};
 use cranelift_codegen::settings::{self, Configurable};
 use cranelift_codegen::{Context, isa};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_module::{FuncId, Linkage, Module, default_libcall_names};
 use cranelift_object::{ObjectBuilder, ObjectModule};
 use lex_sys_ir::{
-    BinOp, Builtin, Callee, Expr, Func, FuncId as IrFuncId, Program, Stmt, terminates,
+    Arm, BinOp, Builtin, Callee, Expr, Func, FuncId as IrFuncId, Program, Stmt, TypeInfo,
+    terminates,
 };
+use lex_sys_types::{DefId, Type};
 use target_lexicon::Triple;
+
+/// The machine types a lex-sys type is held in, in field order.
+///
+/// A struct is **scalarised**: it is not a block of memory with a layout, it
+/// is its leaf fields, each in its own register or stack argument. M1 has no
+/// references and no recursive structs, so every value is a finite tree of
+/// scalars and this always terminates.
+///
+/// That also means M1 makes no layout decisions at all. Deterministic layout
+/// is a commitment (#1) and `docs/defined-behaviour.md` is where it gets
+/// decided; choosing one here to make the backend easier would be choosing it
+/// by accident.
+///
+/// `bool` is an `i8` because that is what Cranelift's `icmp` produces, so a
+/// comparison *is* a `bool` with nothing to convert. M0 widened every
+/// comparison to `i64` and called it an `int`; the type system now says what
+/// was always true about the value.
+fn leaves_into(ty: &Type, program: &Program, out: &mut Vec<types::Type>) {
+    match ty {
+        Type::Int => out.push(types::I64),
+        Type::Bool => out.push(types::I8),
+        // A generic type's members are written in terms of its parameters, so
+        // they are substituted here rather than monomorphised: `Pair[int,
+        // bool]` and `Pair[bool, int]` are two leaf layouts of one
+        // declaration. Only *functions* are copied per instantiation.
+        Type::Named(def, args) => match program.type_info(*def) {
+            TypeInfo::Struct { fields, .. } => {
+                for (_, field) in fields {
+                    leaves_into(&field.substitute(args), program, out);
+                }
+            }
+            // An enum is a tag followed by *every* variant's payload, each in
+            // its own leaves. That is wasteful and deliberately so: overlaying
+            // the payloads is a layout decision, and M1 owns no layout
+            // decisions (#1, `docs/defined-behaviour.md` in M3). The tag is an
+            // `i64` for the same reason — picking the narrowest integer that
+            // fits would be choosing a representation.
+            TypeInfo::Enum { variants, .. } => {
+                out.push(types::I64);
+                for (_, payload) in variants {
+                    for ty in payload {
+                        leaves_into(&ty.substitute(args), program, out);
+                    }
+                }
+            }
+        },
+        other => {
+            unreachable!("`{other:?}` reached the backend; the checker should have refused it")
+        }
+    }
+}
+
+fn leaves(ty: &Type, program: &Program) -> Vec<types::Type> {
+    let mut out = Vec::new();
+    leaves_into(ty, program, &mut out);
+    out
+}
+
+fn leaf_count(ty: &Type, program: &Program) -> u32 {
+    leaves(ty, program).len() as u32
+}
+
+/// How many leaves a return value may have before it travels through memory.
+///
+/// Two is what x86-64's SystemV ABI gives back in registers, and Cranelift
+/// refuses outright above it. Rather than let the limit differ per target —
+/// aarch64 would allow eight — the same rule applies everywhere, so a program
+/// that compiles on one target compiles on the other.
+const MAX_RETURN_LEAVES: usize = 2;
+
+/// Does a value of this type come back through memory rather than in
+/// registers?
+fn returns_indirectly(ty: &Type, program: &Program) -> bool {
+    leaf_count(ty, program) as usize > MAX_RETURN_LEAVES
+}
+
+/// Byte offset of a leaf in an indirect return buffer.
+///
+/// One slot of pointer width per leaf: this is a private arrangement between a
+/// lex-sys function and its lex-sys caller, not a layout the language
+/// promises. `docs/defined-behaviour.md` still owns that question in M3, and
+/// nothing here is observable to a program.
+const RETURN_SLOT_STRIDE: i32 = 8;
 
 /// Every lex-sys function is emitted under this prefix, so a program may define
 /// a function called `write` or `exit` without colliding with libc.
@@ -109,6 +196,10 @@ impl<'a> Emitter<'a> {
     /// resolve.
     fn emit(&mut self, entry: &str) -> Result<(), CodegenError> {
         let call_conv = self.module.isa().default_call_conv();
+        let pointer = self.module.isa().pointer_type();
+        // Bound once: the body emitter borrows the module mutably, so the
+        // program has to be reached through a separate binding.
+        let program = self.program;
 
         // Declare every lex-sys function first: calls are resolved against
         // declarations, so definition order in the file never matters.
@@ -116,10 +207,20 @@ impl<'a> Emitter<'a> {
         for func in &self.program.funcs {
             let mut sig = self.module.make_signature();
             sig.call_conv = call_conv;
-            for _ in 0..func.n_params {
-                sig.params.push(AbiParam::new(types::I64));
+            for slot in &func.slots[..func.n_params as usize] {
+                for leaf in leaves(slot, self.program) {
+                    sig.params.push(AbiParam::new(leaf));
+                }
             }
-            sig.returns.push(AbiParam::new(types::I64));
+            if returns_indirectly(&func.ret, self.program) {
+                // The caller allocates the buffer and passes its address
+                // first; nothing comes back in registers.
+                sig.params.insert(0, AbiParam::new(pointer));
+            } else {
+                for leaf in leaves(&func.ret, self.program) {
+                    sig.returns.push(AbiParam::new(leaf));
+                }
+            }
             let id = self
                 .module
                 .declare_function(&format!("{PREFIX}{}", func.name), Linkage::Local, &sig)
@@ -149,7 +250,7 @@ impl<'a> Emitter<'a> {
             {
                 let builder = FunctionBuilder::new(&mut ctx.func, &mut fb_ctx);
                 let mut body =
-                    BodyEmitter { builder, module: &mut self.module, declared: &declared, putchar };
+                    BodyEmitter::new(builder, &mut self.module, &declared, putchar, func, program);
                 body.emit_func(func);
                 body.builder.finalize();
             }
@@ -208,36 +309,157 @@ struct BodyEmitter<'a, 'f> {
     module: &'a mut ObjectModule,
     declared: &'a [FuncId],
     putchar: FuncId,
+    func: &'a Func,
+    program: &'a Program,
+    /// The buffer this function writes its result into, when its return type
+    /// is too wide for registers.
+    return_pointer: Option<Value>,
+    pointer: types::Type,
+    /// Where each slot's leaves begin among the function's variables.
+    slot_base: Vec<u32>,
+    /// Slot leaves occupy the variables below this; temporaries the backend
+    /// needs for its own purposes are numbered from here.
+    next_var: u32,
 }
 
 impl<'a, 'f> BodyEmitter<'a, 'f> {
+    fn new(
+        builder: FunctionBuilder<'f>,
+        module: &'a mut ObjectModule,
+        declared: &'a [FuncId],
+        putchar: FuncId,
+        func: &'a Func,
+        program: &'a Program,
+    ) -> Self {
+        let mut slot_base = Vec::with_capacity(func.slots.len());
+        let mut next_var = 0;
+        for slot in &func.slots {
+            slot_base.push(next_var);
+            next_var += leaf_count(slot, program);
+        }
+        let pointer = module.isa().pointer_type();
+        Self {
+            builder,
+            module,
+            declared,
+            putchar,
+            func,
+            program,
+            return_pointer: None,
+            pointer,
+            slot_base,
+            next_var,
+        }
+    }
+
+    /// Write leaf values into an indirect return buffer.
+    fn store_leaves(&mut self, address: Value, values: &[Value]) {
+        for (index, value) in values.iter().enumerate() {
+            let offset = index as i32 * RETURN_SLOT_STRIDE;
+            self.builder.ins().store(MemFlags::trusted(), *value, address, offset);
+        }
+    }
+
+    /// Read leaf values back out of one.
+    fn load_leaves(&mut self, address: Value, kinds: &[types::Type]) -> Vec<Value> {
+        kinds
+            .iter()
+            .enumerate()
+            .map(|(index, kind)| {
+                let offset = index as i32 * RETURN_SLOT_STRIDE;
+                self.builder.ins().load(*kind, MemFlags::trusted(), address, offset)
+            })
+            .collect()
+    }
+
+    /// Reserve a buffer big enough for a value of this type.
+    fn return_buffer(&mut self, ty: &Type) -> Value {
+        let size = leaf_count(ty, self.program) * RETURN_SLOT_STRIDE as u32;
+        let slot = self.builder.create_sized_stack_slot(StackSlotData::new(
+            StackSlotKind::ExplicitSlot,
+            size,
+            3,
+        ));
+        let pointer = self.pointer;
+        self.builder.ins().stack_addr(pointer, slot, 0)
+    }
+
+    /// A fresh variable the backend owns, numbered above every slot leaf.
+    fn temporary(&mut self, ty: types::Type) -> Variable {
+        let var = Variable::from_u32(self.next_var);
+        self.next_var += 1;
+        self.builder.declare_var(var, ty);
+        var
+    }
+
     fn emit_func(&mut self, func: &Func) {
         let entry = self.builder.create_block();
         self.builder.append_block_params_for_function_params(entry);
         self.builder.switch_to_block(entry);
         self.builder.seal_block(entry);
 
-        // Every slot is a Cranelift variable; the SSA builder turns them back
-        // into values. Parameters take their incoming values, everything else
-        // starts at zero so no path can observe an undefined slot.
-        for slot in 0..func.n_slots {
-            self.builder.declare_var(Variable::from_u32(slot), types::I64);
+        // Every leaf of every slot is a Cranelift variable; the SSA builder
+        // turns them back into values. Parameters take their incoming values,
+        // everything else starts at zero so no path can observe an undefined
+        // slot.
+        for (index, ty) in func.slots.iter().enumerate() {
+            let base = self.slot_base[index];
+            for (offset, leaf) in leaves(ty, self.program).into_iter().enumerate() {
+                self.builder.declare_var(Variable::from_u32(base + offset as u32), leaf);
+            }
         }
-        for slot in 0..func.n_params {
-            let value = self.builder.block_params(entry)[slot as usize];
-            self.builder.def_var(Variable::from_u32(slot), value);
+
+        // When the result travels through memory the address arrives first,
+        // so every parameter leaf sits one position later.
+        let indirect = returns_indirectly(&func.ret, self.program);
+        if indirect {
+            self.return_pointer = Some(self.builder.block_params(entry)[0]);
         }
-        for slot in func.n_params..func.n_slots {
-            let zero = self.builder.ins().iconst(types::I64, 0);
-            self.builder.def_var(Variable::from_u32(slot), zero);
+        let shift = usize::from(indirect);
+
+        let param_leaves: u32 = func.slots[..func.n_params as usize]
+            .iter()
+            .map(|ty| leaf_count(ty, self.program))
+            .sum();
+        for index in 0..param_leaves {
+            let value = self.builder.block_params(entry)[index as usize + shift];
+            self.builder.def_var(Variable::from_u32(index), value);
+        }
+        for (index, ty) in func.slots.iter().enumerate().skip(func.n_params as usize) {
+            let base = self.slot_base[index];
+            for (offset, leaf) in leaves(ty, self.program).into_iter().enumerate() {
+                let zero = self.builder.ins().iconst(leaf, 0);
+                self.builder.def_var(Variable::from_u32(base + offset as u32), zero);
+            }
         }
 
         let terminated = self.stmts(&func.body);
         if !terminated {
             // Unreachable in a well-formed program: lowering proved every path
             // returns. Emitted so the block is filled whatever happens.
-            let zero = self.builder.ins().iconst(types::I64, 0);
-            self.builder.ins().return_(&[zero]);
+            self.return_zero();
+        }
+    }
+
+    /// Return a zero of the function's return type, however many leaves it has.
+    fn return_zero(&mut self) {
+        let zeros: Vec<Value> = leaves(&self.func.ret, self.program)
+            .into_iter()
+            .map(|leaf| self.builder.ins().iconst(leaf, 0))
+            .collect();
+        self.emit_return(zeros);
+    }
+
+    /// Hand back a result, in registers or through the caller's buffer.
+    fn emit_return(&mut self, values: Vec<Value>) {
+        match self.return_pointer {
+            Some(address) => {
+                self.store_leaves(address, &values);
+                self.builder.ins().return_(&[]);
+            }
+            None => {
+                self.builder.ins().return_(&values);
+            }
         }
     }
 
@@ -246,15 +468,18 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
         for stmt in stmts {
             match stmt {
                 Stmt::Store { slot, value } => {
-                    let value = self.expr(value);
-                    self.builder.def_var(Variable::from_u32(slot.0), value);
+                    let values = self.expr(value);
+                    let base = self.slot_base[slot.0 as usize];
+                    for (offset, value) in values.into_iter().enumerate() {
+                        self.builder.def_var(Variable::from_u32(base + offset as u32), value);
+                    }
                 }
                 Stmt::Eval(expr) => {
                     self.expr(expr);
                 }
                 Stmt::Return(expr) => {
-                    let value = self.expr(expr);
-                    self.builder.ins().return_(&[value]);
+                    let values = self.expr(expr);
+                    self.emit_return(values);
                     return true;
                 }
                 Stmt::If { cond, then_body, else_body } => {
@@ -263,19 +488,25 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
                     }
                 }
                 Stmt::While { cond, body } => self.while_stmt(cond, body),
+                Stmt::Match { scrutinee, def, args, arms } => {
+                    if self.match_stmt(scrutinee, *def, args, arms) {
+                        return true;
+                    }
+                }
             }
         }
         false
     }
 
     fn if_stmt(&mut self, cond: &Expr, then_body: &[Stmt], else_body: &[Stmt]) -> bool {
-        let cond = self.expr(cond);
+        let cond = self.scalar(cond);
         let then_block = self.builder.create_block();
         let else_block = self.builder.create_block();
         let merge = self.builder.create_block();
 
-        // `brif` tests the condition for non-zero. M0 has no `bool`; M1's type
-        // checker is what turns this convention into a type.
+        // The condition is an `i8` holding 0 or 1, which is what `brif` tests.
+        // M0 tested any integer for non-zero; the checker now guarantees a
+        // `bool` got here.
         self.builder.ins().brif(cond, then_block, &[], else_block, &[]);
 
         self.builder.switch_to_block(then_block);
@@ -295,9 +526,8 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
         self.builder.seal_block(merge);
         if both_returned {
             // Nothing branches here. Fill it anyway: an empty block is not a
-            // legal function, and this costs one instruction the linker drops.
-            let zero = self.builder.ins().iconst(types::I64, 0);
-            self.builder.ins().return_(&[zero]);
+            // legal function, and this costs instructions the linker drops.
+            self.return_zero();
         }
         both_returned
     }
@@ -310,7 +540,7 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
         self.builder.ins().jump(header, &[]);
         // The header stays unsealed until the back edge is emitted.
         self.builder.switch_to_block(header);
-        let cond = self.expr(cond);
+        let cond = self.scalar(cond);
         self.builder.ins().brif(cond, body_block, &[], exit, &[]);
 
         self.builder.switch_to_block(body_block);
@@ -324,39 +554,262 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
         self.builder.seal_block(exit);
     }
 
-    fn expr(&mut self, expr: &Expr) -> Value {
+    /// Where a variant's payload starts among an enum's leaves, and how many
+    /// leaves each payload position occupies.
+    fn variant_layout(&self, def: DefId, args: &[Type], variant: u32) -> (u32, Vec<u32>) {
+        let TypeInfo::Enum { variants, .. } = self.program.type_info(def) else {
+            unreachable!("a variant of a struct should have been refused");
+        };
+        let width = |ty: &Type| leaf_count(&ty.substitute(args), self.program);
+        // One for the tag, then every earlier variant's payload.
+        let mut offset = 1;
+        for (_, payload) in &variants[..variant as usize] {
+            offset += payload.iter().map(&width).sum::<u32>();
+        }
+        let widths = variants[variant as usize].1.iter().map(&width).collect();
+        (offset, widths)
+    }
+
+    /// Lower a `match` to a chain of tag tests.
+    ///
+    /// A jump table would be faster and is the obvious later move; a chain is
+    /// what M1 needs and is easier to be sure of. Returns whether every arm
+    /// returned, which makes the whole `match` a terminator.
+    fn match_stmt(&mut self, scrutinee: &Expr, def: DefId, args: &[Type], arms: &[Arm]) -> bool {
+        let values = self.expr(scrutinee);
+        let tag = values[0];
+        let merge = self.builder.create_block();
+
+        let mut all_returned = true;
+        // Whether the fall-through chain still has an open block. A wildcard
+        // arm closes it, because nothing can follow one.
+        let mut open = true;
+
+        for arm in arms {
+            if !open {
+                break;
+            }
+            match arm.variant {
+                Some(variant) => {
+                    let body_block = self.builder.create_block();
+                    let next = self.builder.create_block();
+                    let matched =
+                        self.builder.ins().icmp_imm(IntCC::Equal, tag, i64::from(variant));
+                    self.builder.ins().brif(matched, body_block, &[], next, &[]);
+
+                    self.builder.switch_to_block(body_block);
+                    self.builder.seal_block(body_block);
+                    self.bind_payload(def, args, variant, arm, &values);
+                    let returned = self.stmts(&arm.body);
+                    if !returned {
+                        self.builder.ins().jump(merge, &[]);
+                    }
+                    all_returned &= returned;
+
+                    self.builder.switch_to_block(next);
+                    self.builder.seal_block(next);
+                }
+                None => {
+                    // The wildcard binds nothing and needs no test: it runs
+                    // right here, in the block the chain fell through to.
+                    let returned = self.stmts(&arm.body);
+                    if !returned {
+                        self.builder.ins().jump(merge, &[]);
+                    }
+                    all_returned &= returned;
+                    open = false;
+                }
+            }
+        }
+
+        if open {
+            // The checker proved the arms exhaustive, so this is unreachable.
+            // It still needs filling: an unterminated block is not a legal
+            // function.
+            self.builder.ins().jump(merge, &[]);
+        }
+
+        self.builder.switch_to_block(merge);
+        self.builder.seal_block(merge);
+        if all_returned {
+            self.return_zero();
+        }
+        all_returned
+    }
+
+    /// Copy a matched variant's payload into the slots its pattern bound.
+    fn bind_payload(
+        &mut self,
+        def: DefId,
+        args: &[Type],
+        variant: u32,
+        arm: &Arm,
+        values: &[Value],
+    ) {
+        let (offset, widths) = self.variant_layout(def, args, variant);
+        let mut at = offset as usize;
+        for (binding, width) in arm.bindings.iter().zip(widths) {
+            if let Some(slot) = binding {
+                let base = self.slot_base[slot.0 as usize];
+                for index in 0..width {
+                    let value = values[at + index as usize];
+                    self.builder.def_var(Variable::from_u32(base + index), value);
+                }
+            }
+            // A `_` binding still occupies its payload position; there is
+            // simply nowhere to put the value.
+            at += width as usize;
+        }
+    }
+
+    /// An expression whose type has exactly one leaf.
+    fn scalar(&mut self, expr: &Expr) -> Value {
+        let values = self.expr(expr);
+        debug_assert_eq!(values.len(), 1, "expected a scalar, got {} leaves", values.len());
+        values[0]
+    }
+
+    /// Emit an expression as its leaf values, in field order.
+    ///
+    /// A scalar yields one value and a struct yields one per leaf field, which
+    /// is why this returns a vector rather than a `Value`: there is no single
+    /// register a struct lives in, because it does not live in memory either.
+    fn expr(&mut self, expr: &Expr) -> Vec<Value> {
         match expr {
-            Expr::Const(v) => self.builder.ins().iconst(types::I64, *v),
-            Expr::Load(slot) => self.builder.use_var(Variable::from_u32(slot.0)),
+            Expr::Int(v) => vec![self.builder.ins().iconst(types::I64, *v)],
+            Expr::Bool(v) => vec![self.builder.ins().iconst(types::I8, i64::from(*v))],
+            Expr::Load(slot) => {
+                let base = self.slot_base[slot.0 as usize];
+                let count = leaf_count(&self.func.slots[slot.0 as usize], self.program);
+                (0..count)
+                    .map(|offset| self.builder.use_var(Variable::from_u32(base + offset)))
+                    .collect()
+            }
+            Expr::Struct { fields, .. } => {
+                fields.iter().flat_map(|field| self.expr(field)).collect()
+            }
+            Expr::Field { base, def, args, index } => {
+                let values = self.expr(base);
+                let TypeInfo::Struct { fields, .. } = self.program.type_info(*def) else {
+                    unreachable!("a field access on an enum should have been refused");
+                };
+                let start: u32 = fields[..*index as usize]
+                    .iter()
+                    .map(|(_, ty)| leaf_count(&ty.substitute(args), self.program))
+                    .sum();
+                let len = leaf_count(&fields[*index as usize].1.substitute(args), self.program);
+                values[start as usize..(start + len) as usize].to_vec()
+            }
+            Expr::Enum { def, args, variant, payload } => {
+                let whole = Type::Named(*def, args.clone());
+                let (offset, widths) = self.variant_layout(*def, args, *variant);
+                let total = leaf_count(&whole, self.program);
+                let payload: Vec<Vec<Value>> = payload.iter().map(|e| self.expr(e)).collect();
+                let all = leaves(&whole, self.program);
+
+                // The tag, then every variant's leaves. This variant's are the
+                // values just computed; the rest are zeroed, because a value
+                // that is not this variant is not readable without matching on
+                // the tag first.
+                let mut out = Vec::with_capacity(total as usize);
+                out.push(self.builder.ins().iconst(types::I64, i64::from(*variant)));
+                for index in 1..total {
+                    out.push(self.builder.ins().iconst(all[index as usize], 0));
+                }
+                let mut at = offset as usize;
+                for (values, width) in payload.into_iter().zip(widths) {
+                    debug_assert_eq!(values.len(), width as usize);
+                    for value in values {
+                        out[at] = value;
+                        at += 1;
+                    }
+                }
+                out
+            }
             Expr::Neg(inner) => {
-                let v = self.expr(inner);
-                self.builder.ins().ineg(v)
+                let v = self.scalar(inner);
+                vec![self.builder.ins().ineg(v)]
+            }
+            Expr::Not(inner) => {
+                // A `bool` is 0 or 1, so flipping the low bit is the negation.
+                let v = self.scalar(inner);
+                vec![self.builder.ins().bxor_imm(v, 1)]
+            }
+            Expr::Bin { op, lhs, rhs } if op.is_short_circuit() => {
+                vec![self.short_circuit(*op, lhs, rhs)]
             }
             Expr::Bin { op, lhs, rhs } => {
-                let a = self.expr(lhs);
-                let b = self.expr(rhs);
-                self.binary(*op, a, b)
+                let a = self.scalar(lhs);
+                let b = self.scalar(rhs);
+                vec![self.binary(*op, a, b)]
             }
             Expr::Call { callee, args } => {
-                let args: Vec<Value> = args.iter().map(|a| self.expr(a)).collect();
+                let args: Vec<Value> = args.iter().flat_map(|a| self.expr(a)).collect();
                 match callee {
                     Callee::Fn(id) => {
+                        let callee = &self.program.funcs[id.0 as usize];
+                        let ret = callee.ret.clone();
                         let f = self
                             .module
                             .declare_func_in_func(self.declared[id.0 as usize], self.builder.func);
-                        let call = self.builder.ins().call(f, &args);
-                        self.builder.inst_results(call)[0]
+
+                        if !returns_indirectly(&ret, self.program) {
+                            let call = self.builder.ins().call(f, &args);
+                            return self.builder.inst_results(call).to_vec();
+                        }
+
+                        // Too wide for registers: hand the callee somewhere to
+                        // put it, then read it back.
+                        let buffer = self.return_buffer(&ret);
+                        let mut with_buffer = Vec::with_capacity(args.len() + 1);
+                        with_buffer.push(buffer);
+                        with_buffer.extend(args);
+                        self.builder.ins().call(f, &with_buffer);
+                        let kinds = leaves(&ret, self.program);
+                        self.load_leaves(buffer, &kinds)
                     }
                     Callee::Builtin(Builtin::PutChar) => {
                         let f = self.module.declare_func_in_func(self.putchar, self.builder.func);
                         let arg = self.builder.ins().ireduce(types::I32, args[0]);
                         let call = self.builder.ins().call(f, &[arg]);
                         let result = self.builder.inst_results(call)[0];
-                        self.builder.ins().sextend(types::I64, result)
+                        vec![self.builder.ins().sextend(types::I64, result)]
                     }
                 }
             }
         }
+    }
+
+    /// `&&` and `||`, which are control flow rather than instructions: the
+    /// right operand must not be evaluated when the left already decides the
+    /// answer.
+    ///
+    /// The result travels in a variable rather than a block parameter, so this
+    /// reuses the same SSA construction the slots already use.
+    fn short_circuit(&mut self, op: BinOp, lhs: &Expr, rhs: &Expr) -> Value {
+        let result = self.temporary(types::I8);
+
+        let rhs_block = self.builder.create_block();
+        let merge = self.builder.create_block();
+
+        let a = self.scalar(lhs);
+        // Short-circuiting means the answer is the left operand itself.
+        self.builder.def_var(result, a);
+        match op {
+            BinOp::And => self.builder.ins().brif(a, rhs_block, &[], merge, &[]),
+            BinOp::Or => self.builder.ins().brif(a, merge, &[], rhs_block, &[]),
+            other => unreachable!("`{other:?}` does not short-circuit"),
+        };
+
+        self.builder.switch_to_block(rhs_block);
+        self.builder.seal_block(rhs_block);
+        let b = self.scalar(rhs);
+        self.builder.def_var(result, b);
+        self.builder.ins().jump(merge, &[]);
+
+        self.builder.switch_to_block(merge);
+        self.builder.seal_block(merge);
+        self.builder.use_var(result)
     }
 
     fn binary(&mut self, op: BinOp, a: Value, b: Value) -> Value {
@@ -375,10 +828,11 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
             BinOp::Le => IntCC::SignedLessThanOrEqual,
             BinOp::Gt => IntCC::SignedGreaterThan,
             BinOp::Ge => IntCC::SignedGreaterThanOrEqual,
+            other => unreachable!("`{other:?}` is not an instruction"),
         };
-        let flag = self.builder.ins().icmp(cc, a, b);
-        // A comparison is an `int` that is 0 or 1 until M1 gives it a `bool`.
-        self.builder.ins().uextend(types::I64, flag)
+        // `icmp` yields an `i8` holding 0 or 1, which is exactly a `bool`.
+        // M0 widened this to `i64`; nothing needs widening now.
+        self.builder.ins().icmp(cc, a, b)
     }
 }
 

@@ -155,6 +155,36 @@ fn the_example_hello_world_prints_and_exits_zero() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// M1's acceptance criterion from the epic: a real program using ADTs,
+/// generics and pattern matching, type-checked and run.
+#[test]
+fn the_acceptance_program_type_checks_and_runs() {
+    let dir = scratch("rational");
+    let exe = dir.join("rational");
+    let source = repo_root().join("examples").join("rational.ls");
+
+    let build = Command::new(BIN)
+        .args(["build".as_ref(), source.as_os_str(), "-o".as_ref(), exe.as_os_str()])
+        .output()
+        .expect("the compiler runs");
+    assert!(
+        build.status.success(),
+        "rational.ls should compile:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+
+    let run = Command::new(&exe).output().expect("rational runs");
+    assert_eq!(
+        String::from_utf8_lossy(&run.stdout),
+        // normalisation; the four operations; the two failures; the generic
+        // helpers at two instantiations; the three orderings; H(6).
+        "3/4 -1/3\n5/6 1/6 1/6 3/2\nD Z\nYN 7 T\n<=>\n49/20\n"
+    );
+    assert_eq!(run.status.code(), Some(0));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn run_builds_and_executes_in_one_step() {
     let source = repo_root().join("examples").join("hello.ls");

@@ -277,6 +277,7 @@ dependencies = [
  "lex-sys-codegen",
  "lex-sys-ir",
  "lex-sys-syntax",
+ "lex-sys-types",
 ]
 
 [[package]]
@@ -290,6 +291,7 @@ dependencies = [
  "cranelift-object",
  "lex-sys-ir",
  "lex-sys-syntax",
+ "lex-sys-types",
  "object",
  "target-lexicon",
 ]
@@ -299,10 +301,15 @@ name = "lex-sys-ir"
 version = "0.0.0"
 dependencies = [
  "lex-sys-syntax",
+ "lex-sys-types",
 ]
 
 [[package]]
 name = "lex-sys-syntax"
+version = "0.0.0"
+
+[[package]]
+name = "lex-sys-types"
 version = "0.0.0"
 
 [[package]]
