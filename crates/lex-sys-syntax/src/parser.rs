@@ -78,10 +78,12 @@ impl<'a> Parser<'a> {
             match self.peek().kind {
                 TokenKind::Fn => self.fn_decl()?,
                 TokenKind::Struct => self.struct_decl()?,
+                TokenKind::Enum => self.enum_decl()?,
                 other => {
-                    return Err(
-                        self.err(format!("expected `fn` or `struct`, found {}", other.describe()))
-                    );
+                    return Err(self.err(format!(
+                        "expected `fn`, `struct` or `enum`, found {}",
+                        other.describe()
+                    )));
                 }
             };
         }
@@ -130,6 +132,33 @@ impl<'a> Parser<'a> {
         }
         let end = self.expect(TokenKind::RBrace)?.span;
         Ok(self.ast.push_item(Item::Struct(StructDecl { name, fields }), start.to(end)))
+    }
+
+    fn enum_decl(&mut self) -> Result<ItemId, Diagnostic> {
+        let start = self.expect(TokenKind::Enum)?.span;
+        let name = self.ident()?;
+        self.expect(TokenKind::LBrace)?;
+
+        let mut variants = Vec::new();
+        while self.peek().kind != TokenKind::RBrace {
+            let name = self.ident()?;
+            let mut payload = Vec::new();
+            if self.eat(TokenKind::LParen) {
+                while self.peek().kind != TokenKind::RParen {
+                    payload.push(self.type_expr()?);
+                    if !self.eat(TokenKind::Comma) {
+                        break;
+                    }
+                }
+                self.expect(TokenKind::RParen)?;
+            }
+            variants.push(VariantDecl { name, payload });
+            if !self.eat(TokenKind::Comma) {
+                break;
+            }
+        }
+        let end = self.expect(TokenKind::RBrace)?.span;
+        Ok(self.ast.push_item(Item::Enum(EnumDecl { name, variants }), start.to(end)))
     }
 
     fn ident(&mut self) -> Result<Symbol, Diagnostic> {
@@ -181,6 +210,7 @@ impl<'a> Parser<'a> {
             TokenKind::Return => self.return_stmt(),
             TokenKind::If => self.if_stmt(),
             TokenKind::While => self.while_stmt(),
+            TokenKind::Match => self.match_stmt(),
             // `x = e;` — an assignment, not an expression: M0 has no
             // assignment expressions, so this is decided by lookahead.
             TokenKind::Ident if self.peek_at(1).kind == TokenKind::Eq => self.assign_stmt(),
@@ -249,6 +279,54 @@ impl<'a> Parser<'a> {
             }
         }
         Ok(self.ast.push_stmt(Stmt::If { cond, then_block, else_block }, kw.span.to(end)))
+    }
+
+    fn match_stmt(&mut self) -> Result<StmtId, Diagnostic> {
+        let kw = self.bump();
+        // The scrutinee sits where an `if` condition would, so it has the same
+        // struct-literal ambiguity and the same answer.
+        let scrutinee = self.condition()?;
+        self.expect(TokenKind::LBrace)?;
+
+        let mut arms = Vec::new();
+        while self.peek().kind != TokenKind::RBrace {
+            if self.peek().kind == TokenKind::Eof {
+                return Err(self.err("expected `}`, found end of file"));
+            }
+            let pattern = self.pattern()?;
+            self.expect(TokenKind::FatArrow)?;
+            let (body, _) = self.block()?;
+            arms.push(MatchArm { pattern, body });
+            // Arms are brace-delimited, so a separating comma is optional.
+            self.eat(TokenKind::Comma);
+        }
+        let end = self.expect(TokenKind::RBrace)?.span;
+        Ok(self.ast.push_stmt(Stmt::Match { scrutinee, arms }, kw.span.to(end)))
+    }
+
+    fn pattern(&mut self) -> Result<Pattern, Diagnostic> {
+        if self.eat(TokenKind::Underscore) {
+            return Ok(Pattern::Wildcard);
+        }
+        let enum_name = self.ident()?;
+        self.expect(TokenKind::ColonColon)?;
+        let variant = self.ident()?;
+
+        let mut bindings = Vec::new();
+        if self.eat(TokenKind::LParen) {
+            while self.peek().kind != TokenKind::RParen {
+                if self.eat(TokenKind::Underscore) {
+                    bindings.push(None);
+                } else {
+                    bindings.push(Some(self.ident()?));
+                }
+                if !self.eat(TokenKind::Comma) {
+                    break;
+                }
+            }
+            self.expect(TokenKind::RParen)?;
+        }
+        Ok(Pattern::Variant { enum_name, variant, bindings })
     }
 
     fn while_stmt(&mut self) -> Result<StmtId, Diagnostic> {
@@ -369,6 +447,29 @@ impl<'a> Parser<'a> {
             TokenKind::Ident => {
                 let name = self.ident()?;
                 match self.peek().kind {
+                    TokenKind::ColonColon => {
+                        self.bump();
+                        let variant = self.ident()?;
+                        let mut args = Vec::new();
+                        let mut end = self.tokens[self.pos - 1].span;
+                        if self.eat(TokenKind::LParen) {
+                            args = self.bracketed(|p| {
+                                let mut args = Vec::new();
+                                while p.peek().kind != TokenKind::RParen {
+                                    args.push(p.expr()?);
+                                    if !p.eat(TokenKind::Comma) {
+                                        break;
+                                    }
+                                }
+                                Ok(args)
+                            })?;
+                            end = self.expect(TokenKind::RParen)?.span;
+                        }
+                        Ok(self.ast.push_expr(
+                            Expr::Variant { enum_name: name, variant, args },
+                            tok.span.to(end),
+                        ))
+                    }
                     TokenKind::LParen => {
                         self.bump();
                         let args = self.bracketed(|p| {
@@ -444,7 +545,7 @@ mod tests {
             .iter()
             .find_map(|item| match item {
                 Item::Fn(decl) => Some(decl.clone()),
-                Item::Struct(_) => None,
+                Item::Struct(_) | Item::Enum(_) => None,
             })
             .expect("a function");
         (ast, decl)

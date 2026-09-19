@@ -134,6 +134,16 @@ pub enum Expr {
         base: ExprId,
         name: Symbol,
     },
+    /// `Shape::Circle(3)`, or `Shape::Empty` with no arguments.
+    ///
+    /// Variants are always written qualified. Unqualified would mean two enums
+    /// could not share a variant name, and `None` is exactly the name two
+    /// enums want.
+    Variant {
+        enum_name: Symbol,
+        variant: Symbol,
+        args: Vec<ExprId>,
+    },
     Unary {
         op: UnOp,
         operand: ExprId,
@@ -181,6 +191,10 @@ pub enum Stmt {
         cond: ExprId,
         body: Block,
     },
+    Match {
+        scrutinee: ExprId,
+        arms: Vec<MatchArm>,
+    },
     Return(ExprId),
 }
 
@@ -198,6 +212,22 @@ pub struct FnDecl {
     pub body: Block,
 }
 
+/// What an arm matches. M1 has variant patterns and a wildcard; literal and
+/// nested patterns are later work.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Pattern {
+    /// `_` — matches anything and binds nothing.
+    Wildcard,
+    /// `Shape::Rect(w, h)`. Each binding is a name, or `None` for `_`.
+    Variant { enum_name: Symbol, variant: Symbol, bindings: Vec<Option<Symbol>> },
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct MatchArm {
+    pub pattern: Pattern,
+    pub body: Block,
+}
+
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct FieldDecl {
     pub name: Symbol,
@@ -211,9 +241,23 @@ pub struct StructDecl {
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
+pub struct VariantDecl {
+    pub name: Symbol,
+    /// Positional payload types; empty for a variant that carries nothing.
+    pub payload: Vec<TypeId>,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct EnumDecl {
+    pub name: Symbol,
+    pub variants: Vec<VariantDecl>,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Item {
     Fn(FnDecl),
     Struct(StructDecl),
+    Enum(EnumDecl),
 }
 
 /// A parsed compilation unit: three arenas, three span side tables, one

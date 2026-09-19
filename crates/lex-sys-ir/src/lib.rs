@@ -137,6 +137,12 @@ pub enum Expr {
         def: DefId,
         index: u32,
     },
+    /// An enum value: which variant, and its payload.
+    Enum {
+        def: DefId,
+        variant: u32,
+        payload: Vec<Expr>,
+    },
     Neg(Box<Expr>),
     Not(Box<Expr>),
     Bin {
@@ -169,7 +175,23 @@ pub enum Stmt {
         cond: Expr,
         body: Vec<Stmt>,
     },
+    Match {
+        scrutinee: Expr,
+        def: DefId,
+        arms: Vec<Arm>,
+    },
     Return(Expr),
+}
+
+/// One arm of a `match`, with its pattern already resolved to a variant index
+/// and its bindings to slots.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Arm {
+    /// `None` is the wildcard arm.
+    pub variant: Option<u32>,
+    /// One per payload position; `None` where the pattern wrote `_`.
+    pub bindings: Vec<Option<Slot>>,
+    pub body: Vec<Stmt>,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -189,19 +211,27 @@ impl Func {
     }
 }
 
-/// A declared struct, as the backend needs it: names for diagnostics and
-/// field types in declaration order.
+/// A declared type, as the backend needs it: names for diagnostics and member
+/// types in declaration order.
 #[derive(Clone, PartialEq, Eq, Debug)]
-pub struct StructInfo {
-    pub name: String,
-    pub fields: Vec<(String, Type)>,
+pub enum TypeInfo {
+    Struct { name: String, fields: Vec<(String, Type)> },
+    Enum { name: String, variants: Vec<(String, Vec<Type>)> },
+}
+
+impl TypeInfo {
+    pub fn name(&self) -> &str {
+        match self {
+            TypeInfo::Struct { name, .. } | TypeInfo::Enum { name, .. } => name,
+        }
+    }
 }
 
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct Program {
     pub funcs: Vec<Func>,
     /// Indexed by [`DefId`].
-    pub structs: Vec<StructInfo>,
+    pub types: Vec<TypeInfo>,
 }
 
 impl Program {
@@ -209,8 +239,8 @@ impl Program {
         &self.funcs[id.0 as usize]
     }
 
-    pub fn struct_info(&self, def: DefId) -> &StructInfo {
-        &self.structs[def.0 as usize]
+    pub fn type_info(&self, def: DefId) -> &TypeInfo {
+        &self.types[def.0 as usize]
     }
 
     pub fn find(&self, name: &str) -> Option<FuncId> {
@@ -231,6 +261,9 @@ pub fn terminates(body: &[Stmt]) -> bool {
         Some(Stmt::If { then_body, else_body, .. }) => {
             !else_body.is_empty() && terminates(then_body) && terminates(else_body)
         }
+        // A `match` reaching here is exhaustive -- the checker refuses any
+        // other kind -- so if every arm returns, so does the match.
+        Some(Stmt::Match { arms, .. }) => arms.iter().all(|arm| terminates(&arm.body)),
         _ => false,
     }
 }
@@ -243,47 +276,69 @@ struct Signature {
     ret: Type,
 }
 
-/// A declared struct, as the checker needs it: interned names, so a field
+/// A declared type, as the checker needs it: interned names, so a member
 /// lookup is an integer comparison.
-struct StructDef {
+enum DefKind {
+    Struct(Vec<(Symbol, Type)>),
+    Enum(Vec<(Symbol, Vec<Type>)>),
+}
+
+struct TypeDef {
     name: Symbol,
     def: DefId,
-    fields: Vec<(Symbol, Type)>,
+    kind: DefKind,
     span: Span,
 }
 
-/// Can `from` reach `target` by following field types?
+impl TypeDef {
+    /// Every type this one holds directly, for the size check.
+    fn members(&self) -> Box<dyn Iterator<Item = &Type> + '_> {
+        match &self.kind {
+            DefKind::Struct(fields) => Box::new(fields.iter().map(|(_, ty)| ty)),
+            DefKind::Enum(variants) => Box::new(variants.iter().flat_map(|(_, p)| p.iter())),
+        }
+    }
+}
+
+/// Can `from` reach `target` by following member types?
 ///
-/// M1 has no references, so a struct that contains itself — directly or
-/// through others — has no finite size. There is no representation to pick and
-/// no depth to stop at, so it is refused rather than approximated.
-fn reaches(structs: &[StructDef], from: usize, target: usize, seen: &mut [bool]) -> bool {
+/// M1 has no references, so a type that contains itself — directly or through
+/// others — has no finite size. There is no representation to pick and no
+/// depth to stop at, so it is refused rather than approximated. That covers
+/// `enum List { Nil, Cons(int, List) }` as much as a self-referential struct:
+/// the classic linked list needs an indirection the language does not have
+/// yet.
+fn reaches(defs: &[TypeDef], from: usize, target: usize, seen: &mut [bool]) -> bool {
     if seen[from] {
         return false;
     }
     seen[from] = true;
-    structs[from].fields.iter().any(|(_, ty)| match ty {
+    defs[from].members().any(|ty| match ty {
         Type::Named(def, _) => {
             let next = def.0 as usize;
-            next == target || reaches(structs, next, target, seen)
+            next == target || reaches(defs, next, target, seen)
         }
         _ => false,
     })
 }
 
-/// Collect every struct declaration, in three passes.
+/// Collect every type declaration, in three passes.
 ///
-/// Names first, so a field may mention a struct declared later in the file;
-/// then field types, which need those names; then the size check, which needs
-/// every field type. Each pass needs the previous one complete, which is why
+/// Names first, so a member may mention a type declared later in the file;
+/// then member types, which need those names; then the size check, which needs
+/// every member type. Each pass needs the previous one complete, which is why
 /// they are passes and not one loop.
-fn collect_structs(ast: &Ast, unifier: &mut Unifier) -> Result<Vec<StructDef>, Diagnostic> {
-    let mut structs: Vec<StructDef> = Vec::new();
+fn collect_types(ast: &Ast, unifier: &mut Unifier) -> Result<Vec<TypeDef>, Diagnostic> {
+    let mut defs: Vec<TypeDef> = Vec::new();
 
     for (index, item) in ast.items.iter().enumerate() {
-        let Item::Struct(decl) = item else { continue };
+        let (name_sym, noun) = match item {
+            Item::Struct(decl) => (decl.name, "struct"),
+            Item::Enum(decl) => (decl.name, "enum"),
+            Item::Fn(_) => continue,
+        };
         let span = ast.item_span(ast::ItemId(index as u32));
-        let name = ast.name_of(decl.name);
+        let name = ast.name_of(name_sym);
 
         if matches!(name, "int" | "bool") {
             return Err(Diagnostic::new(
@@ -291,58 +346,99 @@ fn collect_structs(ast: &Ast, unifier: &mut Unifier) -> Result<Vec<StructDef>, D
                 span,
             ));
         }
-        if structs.iter().any(|s| s.name == decl.name) {
-            return Err(Diagnostic::new(format!("struct `{name}` is declared twice"), span));
+        if let Some(previous) = defs.iter().find(|d| d.name == name_sym) {
+            let _ = previous;
+            return Err(Diagnostic::new(format!("type `{name}` is declared twice"), span));
         }
 
         // Ids are handed out in declaration order, so `DefId(i)` indexes
-        // `structs[i]` and the backend can use the same numbering.
+        // `defs[i]` and the backend can use the same numbering.
         let def = unifier.declare(name);
-        structs.push(StructDef { name: decl.name, def, fields: Vec::new(), span });
+        let kind = match noun {
+            "struct" => DefKind::Struct(Vec::new()),
+            _ => DefKind::Enum(Vec::new()),
+        };
+        defs.push(TypeDef { name: name_sym, def, kind, span });
     }
 
     for item in ast.items.iter() {
-        let Item::Struct(decl) = item else { continue };
-        let position = structs.iter().position(|s| s.name == decl.name).expect("declared above");
-        let span = structs[position].span;
-
-        let mut fields: Vec<(Symbol, Type)> = Vec::new();
-        for field in &decl.fields {
-            if fields.iter().any(|(n, _)| *n == field.name) {
-                return Err(Diagnostic::new(
-                    format!(
-                        "field `{}` is declared twice in `{}`",
-                        ast.name_of(field.name),
-                        ast.name_of(decl.name)
-                    ),
-                    span,
-                ));
+        match item {
+            Item::Struct(decl) => {
+                let position = defs.iter().position(|d| d.name == decl.name).expect("declared");
+                let span = defs[position].span;
+                let mut fields: Vec<(Symbol, Type)> = Vec::new();
+                for field in &decl.fields {
+                    if fields.iter().any(|(n, _)| *n == field.name) {
+                        return Err(Diagnostic::new(
+                            format!(
+                                "field `{}` is declared twice in `{}`",
+                                ast.name_of(field.name),
+                                ast.name_of(decl.name)
+                            ),
+                            span,
+                        ));
+                    }
+                    fields.push((field.name, resolve_type(ast, &defs, field.ty)?));
+                }
+                defs[position].kind = DefKind::Struct(fields);
             }
-            fields.push((field.name, resolve_type(ast, &structs, field.ty)?));
+            Item::Enum(decl) => {
+                let position = defs.iter().position(|d| d.name == decl.name).expect("declared");
+                let span = defs[position].span;
+                if decl.variants.is_empty() {
+                    return Err(Diagnostic::new(
+                        format!(
+                            "enum `{}` has no variants, so no value of it can ever exist",
+                            ast.name_of(decl.name)
+                        ),
+                        span,
+                    ));
+                }
+                let mut variants: Vec<(Symbol, Vec<Type>)> = Vec::new();
+                for variant in &decl.variants {
+                    if variants.iter().any(|(n, _)| *n == variant.name) {
+                        return Err(Diagnostic::new(
+                            format!(
+                                "variant `{}` is declared twice in `{}`",
+                                ast.name_of(variant.name),
+                                ast.name_of(decl.name)
+                            ),
+                            span,
+                        ));
+                    }
+                    let payload = variant
+                        .payload
+                        .iter()
+                        .map(|ty| resolve_type(ast, &defs, *ty))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    variants.push((variant.name, payload));
+                }
+                defs[position].kind = DefKind::Enum(variants);
+            }
+            Item::Fn(_) => {}
         }
-        structs[position].fields = fields;
     }
 
-    for index in 0..structs.len() {
-        let mut seen = vec![false; structs.len()];
-        if reaches(&structs, index, index, &mut seen) {
+    for index in 0..defs.len() {
+        let mut seen = vec![false; defs.len()];
+        if reaches(&defs, index, index, &mut seen) {
             return Err(Diagnostic::new(
                 format!(
-                    "struct `{}` contains itself, so it has no finite size (M1 has no references)",
-                    ast.name_of(structs[index].name)
+                    "type `{}` contains itself, so it has no finite size (M1 has no references)",
+                    ast.name_of(defs[index].name)
                 ),
-                structs[index].span,
+                defs[index].span,
             ));
         }
     }
 
-    Ok(structs)
+    Ok(defs)
 }
 
 /// Resolve and check an AST, producing IR a backend can lower without failing.
 pub fn lower(ast: &Ast) -> Result<Program, Diagnostic> {
     let mut unifier = Unifier::new();
-    let structs = collect_structs(ast, &mut unifier)?;
+    let defs = collect_types(ast, &mut unifier)?;
 
     // Pass 1: every function is visible to every other, so collect signatures
     // before checking any body. Definition order in the file is irrelevant,
@@ -373,24 +469,32 @@ pub fn lower(ast: &Ast) -> Result<Program, Diagnostic> {
                 ));
             }
             seen.push(param.name);
-            params.push(resolve_type(ast, &structs, param.ty)?);
+            params.push(resolve_type(ast, &defs, param.ty)?);
         }
 
-        let ret = resolve_type(ast, &structs, decl.ret)?;
+        let ret = resolve_type(ast, &defs, decl.ret)?;
         signatures.push(Signature { name: decl.name, params, ret });
     }
 
     let mut program = Program {
         funcs: Vec::new(),
-        structs: structs
+        types: defs
             .iter()
-            .map(|s| StructInfo {
-                name: ast.name_of(s.name).to_owned(),
-                fields: s
-                    .fields
-                    .iter()
-                    .map(|(n, t)| (ast.name_of(*n).to_owned(), t.clone()))
-                    .collect(),
+            .map(|d| match &d.kind {
+                DefKind::Struct(fields) => TypeInfo::Struct {
+                    name: ast.name_of(d.name).to_owned(),
+                    fields: fields
+                        .iter()
+                        .map(|(n, t)| (ast.name_of(*n).to_owned(), t.clone()))
+                        .collect(),
+                },
+                DefKind::Enum(variants) => TypeInfo::Enum {
+                    name: ast.name_of(d.name).to_owned(),
+                    variants: variants
+                        .iter()
+                        .map(|(n, p)| (ast.name_of(*n).to_owned(), p.clone()))
+                        .collect(),
+                },
             })
             .collect(),
     };
@@ -403,7 +507,7 @@ pub fn lower(ast: &Ast) -> Result<Program, Diagnostic> {
         let mut f = FnLowering {
             ast,
             signatures: &signatures,
-            structs: &structs,
+            defs: &defs,
             unifier: &mut unifier,
             scopes: vec![Vec::new()],
             slots: Vec::new(),
@@ -445,7 +549,7 @@ pub fn lower(ast: &Ast) -> Result<Program, Diagnostic> {
 /// M1 has two primitive types and no declared ones yet, so this is short. It
 /// is a function rather than a match at each use site because unknown-type
 /// errors must read the same wherever a type is written.
-fn resolve_type(ast: &Ast, structs: &[StructDef], id: TypeId) -> Result<Type, Diagnostic> {
+fn resolve_type(ast: &Ast, defs: &[TypeDef], id: TypeId) -> Result<Type, Diagnostic> {
     let written = ast.ty(id);
     let name = ast.name_of(written.name);
     let span = ast.type_span(id);
@@ -453,7 +557,7 @@ fn resolve_type(ast: &Ast, structs: &[StructDef], id: TypeId) -> Result<Type, Di
     let ty = match name {
         "int" => Type::Int,
         "bool" => Type::Bool,
-        other => match structs.iter().find(|s| s.name == written.name) {
+        other => match defs.iter().find(|d| d.name == written.name) {
             Some(def) => Type::Named(def.def, Vec::new()),
             None => {
                 return Err(Diagnostic::new(format!("unknown type `{other}`"), span));
@@ -480,7 +584,7 @@ struct Binding {
 struct FnLowering<'a> {
     ast: &'a Ast,
     signatures: &'a [Signature],
-    structs: &'a [StructDef],
+    defs: &'a [TypeDef],
     unifier: &'a mut Unifier,
     scopes: Vec<Vec<Binding>>,
     slots: Vec<Type>,
@@ -557,7 +661,7 @@ impl<'a> FnLowering<'a> {
                 let (value, found) = self.expr(*value)?;
                 let declared = match ty {
                     Some(written) => {
-                        let declared = resolve_type(self.ast, self.structs, *written)?;
+                        let declared = resolve_type(self.ast, self.defs, *written)?;
                         self.expect_type(
                             &declared,
                             &found,
@@ -617,6 +721,7 @@ impl<'a> FnLowering<'a> {
                 let body = self.block(body)?;
                 Stmt::While { cond, body }
             }
+            AstStmt::Match { scrutinee, arms } => self.match_stmt(*scrutinee, arms, span)?,
             AstStmt::Return(e) => {
                 let (value, found) = self.expr(*e)?;
                 let ret = self.ret.clone();
@@ -624,6 +729,155 @@ impl<'a> FnLowering<'a> {
                 Stmt::Return(value)
             }
         })
+    }
+
+    /// Check a `match`: the scrutinee is an enum, every arm names a variant of
+    /// it, no variant is matched twice, and between them the arms cover
+    /// everything.
+    ///
+    /// Exhaustiveness is the point. A `match` that silently did nothing for an
+    /// unlisted variant would be a hole in the type system exactly where the
+    /// type system is supposed to pay for itself.
+    fn match_stmt(
+        &mut self,
+        scrutinee: ExprId,
+        arms: &[ast::MatchArm],
+        span: Span,
+    ) -> Result<Stmt, Diagnostic> {
+        let scrutinee_span = self.ast.expr_span(scrutinee);
+        let (value, scrutinee_ty) = self.expr(scrutinee)?;
+        let resolved = self.unifier.resolve(&scrutinee_ty);
+
+        let Type::Named(def_id, _) = resolved else {
+            return Err(Diagnostic::new(
+                format!(
+                    "`{}` cannot be matched (M1 matches enums)",
+                    self.unifier.display(&resolved)
+                ),
+                scrutinee_span,
+            ));
+        };
+        let def = self.defs.iter().find(|d| d.def == def_id).expect("a declared type");
+        let enum_name = self.ast.name_of(def.name).to_owned();
+        let DefKind::Enum(variants) = &def.kind else {
+            return Err(Diagnostic::new(
+                format!("`{enum_name}` is a struct, not an enum; there is nothing to match on"),
+                scrutinee_span,
+            ));
+        };
+        let variants = variants.clone();
+
+        let mut covered = vec![false; variants.len()];
+        let mut wildcard = false;
+        let mut lowered: Vec<Arm> = Vec::new();
+
+        for arm in arms {
+            if wildcard {
+                return Err(Diagnostic::new(
+                    "this arm is unreachable: `_` above it already matches everything",
+                    span,
+                ));
+            }
+
+            let (variant_index, bindings) = match &arm.pattern {
+                ast::Pattern::Wildcard => {
+                    if covered.iter().all(|c| *c) {
+                        return Err(Diagnostic::new(
+                            format!(
+                                "this `_` is unreachable: every variant of `{enum_name}` is already matched"
+                            ),
+                            span,
+                        ));
+                    }
+                    wildcard = true;
+                    (None, Vec::new())
+                }
+                ast::Pattern::Variant { enum_name: written, variant, bindings } => {
+                    let written_text = self.ast.name_of(*written);
+                    if *written != def.name {
+                        return Err(Diagnostic::new(
+                            format!(
+                                "expected a variant of `{enum_name}`, found one of `{written_text}`"
+                            ),
+                            span,
+                        ));
+                    }
+                    let variant_text = self.ast.name_of(*variant);
+                    let Some(index) = variants.iter().position(|(n, _)| n == variant) else {
+                        return Err(Diagnostic::new(
+                            format!("`{enum_name}` has no variant `{variant_text}`"),
+                            span,
+                        ));
+                    };
+                    if covered[index] {
+                        return Err(Diagnostic::new(
+                            format!("`{enum_name}::{variant_text}` is matched twice"),
+                            span,
+                        ));
+                    }
+                    let payload = &variants[index].1;
+                    if bindings.len() != payload.len() {
+                        return Err(Diagnostic::new(
+                            format!(
+                                "`{enum_name}::{variant_text}` carries {} value{}, but the pattern binds {}",
+                                payload.len(),
+                                if payload.len() == 1 { "" } else { "s" },
+                                bindings.len()
+                            ),
+                            span,
+                        ));
+                    }
+                    covered[index] = true;
+                    (Some(index as u32), bindings.clone())
+                }
+            };
+
+            // Each arm's bindings live in their own scope, so two arms may
+            // bind the same name to different types.
+            self.scopes.push(Vec::new());
+            let mut slots: Vec<Option<Slot>> = Vec::new();
+            if let Some(index) = variant_index {
+                let payload = variants[index as usize].1.clone();
+                for (binding, ty) in bindings.iter().zip(payload.into_iter()) {
+                    match binding {
+                        Some(name) => {
+                            if self.declared_in_current_scope(*name) {
+                                self.scopes.pop();
+                                return Err(Diagnostic::new(
+                                    format!(
+                                        "`{}` is bound twice in this pattern",
+                                        self.ast.name_of(*name)
+                                    ),
+                                    span,
+                                ));
+                            }
+                            slots.push(Some(self.declare(*name, ty, false)));
+                        }
+                        // `_` still occupies a payload position; it just has
+                        // no name, so the backend drops the value.
+                        None => slots.push(None),
+                    }
+                }
+            }
+            let body = self.stmts(&arm.body.stmts);
+            self.scopes.pop();
+            lowered.push(Arm { variant: variant_index, bindings: slots, body: body? });
+        }
+
+        if !wildcard && !covered.iter().all(|c| *c) {
+            let missing: Vec<String> = covered
+                .iter()
+                .enumerate()
+                .filter(|(_, seen)| !**seen)
+                .map(|(i, _)| format!("`{enum_name}::{}`", self.ast.name_of(variants[i].0)))
+                .collect();
+            return Err(Diagnostic::new(
+                format!("this `match` does not cover {}", missing.join(", ")),
+                span,
+            ));
+        }
+
+        Ok(Stmt::Match { scrutinee: value, def: def_id, arms: lowered })
     }
 
     /// A condition is a `bool`. M0 tested "non-zero"; M1 has a type for the
@@ -660,12 +914,19 @@ impl<'a> FnLowering<'a> {
             }
             AstExpr::StructLit { name, fields } => {
                 let text = self.ast.name_of(*name);
-                let Some(def) = self.structs.iter().find(|s| s.name == *name) else {
+                let Some(def) = self.defs.iter().find(|d| d.name == *name) else {
                     return Err(Diagnostic::new(format!("`{text}` is not a struct"), span));
+                };
+                let DefKind::Struct(fields_decl) = &def.kind else {
+                    return Err(Diagnostic::new(
+                        format!("`{text}` is an enum, not a struct"),
+                        span,
+                    ));
                 };
                 // Copied out before checking any field value, because
                 // checking borrows `self` and the table lives beside it.
-                let (def_id, declared) = (def.def, def.fields.clone());
+                let (def_id, declared): (DefId, Vec<(Symbol, Type)>) =
+                    (def.def, fields_decl.clone());
 
                 let mut values: Vec<Option<Expr>> = vec![None; declared.len()];
                 for (field, value) in fields {
@@ -719,19 +980,74 @@ impl<'a> FnLowering<'a> {
                     ));
                 };
                 let def = self
-                    .structs
+                    .defs
                     .iter()
-                    .find(|s| s.def == def_id)
-                    .expect("a named type is a declared struct");
+                    .find(|d| d.def == def_id)
+                    .expect("a named type is a declared type");
                 let field_text = self.ast.name_of(*name);
-                let Some(index) = def.fields.iter().position(|(n, _)| n == name) else {
+                let DefKind::Struct(fields) = &def.kind else {
+                    return Err(Diagnostic::new(
+                        format!(
+                            "`{}` is an enum; its payload is read by matching on it, not with `.`",
+                            self.ast.name_of(def.name)
+                        ),
+                        base_span,
+                    ));
+                };
+                let Some(index) = fields.iter().position(|(n, _)| n == name) else {
                     return Err(Diagnostic::new(
                         format!("`{}` has no field `{field_text}`", self.ast.name_of(def.name)),
                         span,
                     ));
                 };
-                let ty = def.fields[index].1.clone();
+                let ty = fields[index].1.clone();
                 (Expr::Field { base: Box::new(lowered), def: def_id, index: index as u32 }, ty)
+            }
+            AstExpr::Variant { enum_name, variant, args } => {
+                let enum_text = self.ast.name_of(*enum_name);
+                let variant_text = self.ast.name_of(*variant);
+                let Some(def) = self.defs.iter().find(|d| d.name == *enum_name) else {
+                    return Err(Diagnostic::new(format!("`{enum_text}` is not an enum"), span));
+                };
+                let DefKind::Enum(variants) = &def.kind else {
+                    return Err(Diagnostic::new(
+                        format!("`{enum_text}` is a struct, not an enum"),
+                        span,
+                    ));
+                };
+                let Some(index) = variants.iter().position(|(n, _)| n == variant) else {
+                    return Err(Diagnostic::new(
+                        format!("`{enum_text}` has no variant `{variant_text}`"),
+                        span,
+                    ));
+                };
+                let (def_id, payload_types) = (def.def, variants[index].1.clone());
+
+                if args.len() != payload_types.len() {
+                    return Err(Diagnostic::new(
+                        format!(
+                            "`{enum_text}::{variant_text}` carries {} value{}, but {} {} given",
+                            payload_types.len(),
+                            if payload_types.len() == 1 { "" } else { "s" },
+                            args.len(),
+                            if args.len() == 1 { "was" } else { "were" }
+                        ),
+                        span,
+                    ));
+                }
+
+                let mut payload = Vec::with_capacity(args.len());
+                for (&arg, expected) in args.iter().zip(payload_types.iter()) {
+                    let arg_span = self.ast.expr_span(arg);
+                    let (value, found) = self.expr(arg)?;
+                    self.expect_type(expected, &found, arg_span)?;
+                    payload.push(value);
+                }
+
+                (
+                    Expr::Enum { def: def_id, variant: index as u32, payload },
+                    Type::Named(def_id, Vec::new()),
+                )
             }
             AstExpr::Unary { op, operand } => {
                 let operand_span = self.ast.expr_span(*operand);
@@ -1195,6 +1511,156 @@ mod tests {
         assert!(
             error("struct P { x: int } fn f(a: P, b: P) -> bool { return a == b; }")
                 .contains("cannot be compared")
+        );
+    }
+
+    // ---- enums and match -------------------------------------------------
+
+    const SHAPE: &str = "enum Shape { Empty, Circle(int), Rect(int, int) } ";
+
+    #[test]
+    fn a_variant_becomes_an_index_and_a_payload() {
+        let f = main_fn(&format!("{SHAPE}fn f() -> Shape {{ return Shape::Rect(2, 3); }}"));
+        let Stmt::Return(Expr::Enum { variant, payload, .. }) = &f.body[0] else { panic!() };
+        assert_eq!(*variant, 2);
+        assert_eq!(payload, &vec![Expr::Int(2), Expr::Int(3)]);
+    }
+
+    #[test]
+    fn a_match_must_cover_every_variant() {
+        let message = error(&format!(
+            "{SHAPE}fn f(s: Shape) -> int {{ match s {{ Shape::Empty => {{ return 0; }} }} }}"
+        ));
+        assert!(message.contains("does not cover"), "{message}");
+        assert!(message.contains("`Shape::Circle`"), "{message}");
+        assert!(message.contains("`Shape::Rect`"), "{message}");
+    }
+
+    #[test]
+    fn a_wildcard_covers_the_rest() {
+        assert!(
+            lower_src(&format!(
+                "{SHAPE}fn f(s: Shape) -> int {{ match s {{ Shape::Empty => {{ return 0; }} _ => {{ return 1; }} }} }}"
+            ))
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_wildcard_that_covers_nothing_is_refused() {
+        // Every variant is already matched, so the `_` can never run. Saying
+        // so is worth more than silently allowing dead code.
+        let message = error(&format!(
+            "{SHAPE}fn f(s: Shape) -> int {{ match s {{              Shape::Empty => {{ return 0; }} Shape::Circle(r) => {{ return r; }}              Shape::Rect(w, h) => {{ return w * h; }} _ => {{ return 9; }} }} }}"
+        ));
+        assert!(message.contains("already matched"), "{message}");
+    }
+
+    #[test]
+    fn arms_after_a_wildcard_are_refused() {
+        let message = error(&format!(
+            "{SHAPE}fn f(s: Shape) -> int {{ match s {{ _ => {{ return 0; }} Shape::Empty => {{ return 1; }} }} }}"
+        ));
+        assert!(message.contains("unreachable"), "{message}");
+    }
+
+    #[test]
+    fn a_variant_may_not_be_matched_twice() {
+        let message = error(&format!(
+            "{SHAPE}fn f(s: Shape) -> int {{ match s {{              Shape::Empty => {{ return 0; }} Shape::Empty => {{ return 1; }} _ => {{ return 2; }} }} }}"
+        ));
+        assert!(message.contains("matched twice"), "{message}");
+    }
+
+    #[test]
+    fn payload_arity_is_checked_when_building_and_when_matching() {
+        assert!(
+            error(&format!("{SHAPE}fn f() -> Shape {{ return Shape::Rect(1); }}"))
+                .contains("carries 2 values, but 1 was given")
+        );
+        let message = error(&format!(
+            "{SHAPE}fn f(s: Shape) -> int {{ match s {{ Shape::Rect(w) => {{ return w; }} _ => {{ return 0; }} }} }}"
+        ));
+        assert!(message.contains("the pattern binds 1"), "{message}");
+    }
+
+    #[test]
+    fn a_binding_takes_the_payload_type() {
+        // `r` is an `int`, so returning it from an `int` function is fine and
+        // returning it from a `bool` one is not.
+        assert!(
+            lower_src(&format!(
+                "{SHAPE}fn f(s: Shape) -> int {{ match s {{ Shape::Circle(r) => {{ return r; }} _ => {{ return 0; }} }} }}"
+            ))
+            .is_ok()
+        );
+        assert!(
+            error(&format!(
+                "{SHAPE}fn f(s: Shape) -> bool {{ match s {{ Shape::Circle(r) => {{ return r; }} _ => {{ return true; }} }} }}"
+            ))
+            .contains("expected `bool`, found `int`")
+        );
+    }
+
+    #[test]
+    fn two_arms_may_bind_the_same_name_at_different_types() {
+        assert!(
+            lower_src(
+                "enum E { A(int), B(bool) }                  fn f(e: E) -> int { match e { E::A(v) => { return v; } E::B(v) => { if v { return 1; } return 0; } } }"
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn an_exhaustive_match_where_every_arm_returns_is_a_terminator() {
+        // No trailing `return` needed: the match itself covers every path.
+        assert!(
+            lower_src(&format!(
+                "{SHAPE}fn f(s: Shape) -> int {{ match s {{                  Shape::Empty => {{ return 0; }} Shape::Circle(r) => {{ return r; }}                  Shape::Rect(w, h) => {{ return w * h; }} }} }}"
+            ))
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn only_enums_are_matched() {
+        assert!(
+            error("fn f() -> int { match 1 { _ => { return 0; } } }")
+                .contains("`int` cannot be matched")
+        );
+        assert!(
+            error("struct P { x: int } fn f(p: P) -> int { match p { _ => { return 0; } } }")
+                .contains("is a struct, not an enum")
+        );
+    }
+
+    #[test]
+    fn an_enum_that_contains_itself_is_refused() {
+        assert!(
+            error("enum List { Nil, Cons(int, List) } fn f() -> int { return 0; }")
+                .contains("contains itself")
+        );
+    }
+
+    #[test]
+    fn an_enum_needs_at_least_one_variant() {
+        assert!(error("enum Void { } fn f() -> int { return 0; }").contains("has no variants"));
+    }
+
+    #[test]
+    fn structs_and_enums_are_not_interchangeable() {
+        assert!(
+            error("struct P { x: int } fn f() -> int { let p = P::x(1); return 0; }")
+                .contains("is a struct, not an enum")
+        );
+        assert!(
+            error("enum E { A } fn f() -> int { let e = E { x: 1 }; return 0; }")
+                .contains("is an enum, not a struct")
+        );
+        assert!(
+            error("enum E { A(int) } fn f(e: E) -> int { return e.x; }")
+                .contains("read by matching on it")
         );
     }
 

@@ -18,9 +18,10 @@ use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_module::{FuncId, Linkage, Module, default_libcall_names};
 use cranelift_object::{ObjectBuilder, ObjectModule};
 use lex_sys_ir::{
-    BinOp, Builtin, Callee, Expr, Func, FuncId as IrFuncId, Program, Stmt, terminates,
+    Arm, BinOp, Builtin, Callee, Expr, Func, FuncId as IrFuncId, Program, Stmt, TypeInfo,
+    terminates,
 };
-use lex_sys_types::Type;
+use lex_sys_types::{DefId, Type};
 use target_lexicon::Triple;
 
 /// The machine types a lex-sys type is held in, in field order.
@@ -43,11 +44,27 @@ fn leaves_into(ty: &Type, program: &Program, out: &mut Vec<types::Type>) {
     match ty {
         Type::Int => out.push(types::I64),
         Type::Bool => out.push(types::I8),
-        Type::Named(def, _) => {
-            for (_, field) in &program.struct_info(*def).fields {
-                leaves_into(field, program, out);
+        Type::Named(def, _) => match program.type_info(*def) {
+            TypeInfo::Struct { fields, .. } => {
+                for (_, field) in fields {
+                    leaves_into(field, program, out);
+                }
             }
-        }
+            // An enum is a tag followed by *every* variant's payload, each in
+            // its own leaves. That is wasteful and deliberately so: overlaying
+            // the payloads is a layout decision, and M1 owns no layout
+            // decisions (#1, `docs/defined-behaviour.md` in M3). The tag is an
+            // `i64` for the same reason — picking the narrowest integer that
+            // fits would be choosing a representation.
+            TypeInfo::Enum { variants, .. } => {
+                out.push(types::I64);
+                for (_, payload) in variants {
+                    for ty in payload {
+                        leaves_into(ty, program, out);
+                    }
+                }
+            }
+        },
         other => {
             unreachable!("`{other:?}` reached the backend; the checker should have refused it")
         }
@@ -367,6 +384,11 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
                     }
                 }
                 Stmt::While { cond, body } => self.while_stmt(cond, body),
+                Stmt::Match { scrutinee, def, arms } => {
+                    if self.match_stmt(scrutinee, *def, arms) {
+                        return true;
+                    }
+                }
             }
         }
         false
@@ -428,6 +450,107 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
         self.builder.seal_block(exit);
     }
 
+    /// Where a variant's payload starts among an enum's leaves, and how many
+    /// leaves each payload position occupies.
+    fn variant_layout(&self, def: DefId, variant: u32) -> (u32, Vec<u32>) {
+        let TypeInfo::Enum { variants, .. } = self.program.type_info(def) else {
+            unreachable!("a variant of a struct should have been refused");
+        };
+        // One for the tag, then every earlier variant's payload.
+        let mut offset = 1;
+        for (_, payload) in &variants[..variant as usize] {
+            offset += payload.iter().map(|ty| leaf_count(ty, self.program)).sum::<u32>();
+        }
+        let widths =
+            variants[variant as usize].1.iter().map(|ty| leaf_count(ty, self.program)).collect();
+        (offset, widths)
+    }
+
+    /// Lower a `match` to a chain of tag tests.
+    ///
+    /// A jump table would be faster and is the obvious later move; a chain is
+    /// what M1 needs and is easier to be sure of. Returns whether every arm
+    /// returned, which makes the whole `match` a terminator.
+    fn match_stmt(&mut self, scrutinee: &Expr, def: DefId, arms: &[Arm]) -> bool {
+        let values = self.expr(scrutinee);
+        let tag = values[0];
+        let merge = self.builder.create_block();
+
+        let mut all_returned = true;
+        // Whether the fall-through chain still has an open block. A wildcard
+        // arm closes it, because nothing can follow one.
+        let mut open = true;
+
+        for arm in arms {
+            if !open {
+                break;
+            }
+            match arm.variant {
+                Some(variant) => {
+                    let body_block = self.builder.create_block();
+                    let next = self.builder.create_block();
+                    let matched =
+                        self.builder.ins().icmp_imm(IntCC::Equal, tag, i64::from(variant));
+                    self.builder.ins().brif(matched, body_block, &[], next, &[]);
+
+                    self.builder.switch_to_block(body_block);
+                    self.builder.seal_block(body_block);
+                    self.bind_payload(def, variant, arm, &values);
+                    let returned = self.stmts(&arm.body);
+                    if !returned {
+                        self.builder.ins().jump(merge, &[]);
+                    }
+                    all_returned &= returned;
+
+                    self.builder.switch_to_block(next);
+                    self.builder.seal_block(next);
+                }
+                None => {
+                    // The wildcard binds nothing and needs no test: it runs
+                    // right here, in the block the chain fell through to.
+                    let returned = self.stmts(&arm.body);
+                    if !returned {
+                        self.builder.ins().jump(merge, &[]);
+                    }
+                    all_returned &= returned;
+                    open = false;
+                }
+            }
+        }
+
+        if open {
+            // The checker proved the arms exhaustive, so this is unreachable.
+            // It still needs filling: an unterminated block is not a legal
+            // function.
+            self.builder.ins().jump(merge, &[]);
+        }
+
+        self.builder.switch_to_block(merge);
+        self.builder.seal_block(merge);
+        if all_returned {
+            self.return_zero();
+        }
+        all_returned
+    }
+
+    /// Copy a matched variant's payload into the slots its pattern bound.
+    fn bind_payload(&mut self, def: DefId, variant: u32, arm: &Arm, values: &[Value]) {
+        let (offset, widths) = self.variant_layout(def, variant);
+        let mut at = offset as usize;
+        for (binding, width) in arm.bindings.iter().zip(widths) {
+            if let Some(slot) = binding {
+                let base = self.slot_base[slot.0 as usize];
+                for index in 0..width {
+                    let value = values[at + index as usize];
+                    self.builder.def_var(Variable::from_u32(base + index), value);
+                }
+            }
+            // A `_` binding still occupies its payload position; there is
+            // simply nowhere to put the value.
+            at += width as usize;
+        }
+    }
+
     /// An expression whose type has exactly one leaf.
     fn scalar(&mut self, expr: &Expr) -> Value {
         let values = self.expr(expr);
@@ -456,13 +579,40 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
             }
             Expr::Field { base, def, index } => {
                 let values = self.expr(base);
-                let info = self.program.struct_info(*def);
-                let start: u32 = info.fields[..*index as usize]
+                let TypeInfo::Struct { fields, .. } = self.program.type_info(*def) else {
+                    unreachable!("a field access on an enum should have been refused");
+                };
+                let start: u32 = fields[..*index as usize]
                     .iter()
                     .map(|(_, ty)| leaf_count(ty, self.program))
                     .sum();
-                let len = leaf_count(&info.fields[*index as usize].1, self.program);
+                let len = leaf_count(&fields[*index as usize].1, self.program);
                 values[start as usize..(start + len) as usize].to_vec()
+            }
+            Expr::Enum { def, variant, payload } => {
+                let (offset, widths) = self.variant_layout(*def, *variant);
+                let total = leaf_count(&Type::Named(*def, Vec::new()), self.program);
+                let payload: Vec<Vec<Value>> = payload.iter().map(|e| self.expr(e)).collect();
+                let all = leaves(&Type::Named(*def, Vec::new()), self.program);
+
+                // The tag, then every variant's leaves. This variant's are the
+                // values just computed; the rest are zeroed, because a value
+                // that is not this variant is not readable without matching on
+                // the tag first.
+                let mut out = Vec::with_capacity(total as usize);
+                out.push(self.builder.ins().iconst(types::I64, i64::from(*variant)));
+                for index in 1..total {
+                    out.push(self.builder.ins().iconst(all[index as usize], 0));
+                }
+                let mut at = offset as usize;
+                for (values, width) in payload.into_iter().zip(widths) {
+                    debug_assert_eq!(values.len(), width as usize);
+                    for value in values {
+                        out[at] = value;
+                        at += 1;
+                    }
+                }
+                out
             }
             Expr::Neg(inner) => {
                 let v = self.scalar(inner);

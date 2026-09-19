@@ -1,4 +1,4 @@
-//~ ERROR struct `Point` is declared twice
+//~ ERROR type `Point` is declared twice
 
 struct Point { x: int }
 struct Point { y: int }
