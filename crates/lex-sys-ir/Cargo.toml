@@ -1,0 +1,10 @@
+[package]
+name = "lex-sys-ir"
+description = "Resolved intermediate representation for lex-sys, and lowering from the AST"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+lex-sys-syntax.workspace = true

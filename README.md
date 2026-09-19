@@ -4,8 +4,10 @@ A **systems dialect carrying Lex's philosophy**: native compilation, no GC, line
 ownership and capability-typed effects unified into one resource system, fully
 defined behaviour, and a canonical content-addressable AST designed in from day one.
 
-> **Status: design stage.** Nothing is implemented. This repo currently holds the
-> design work and the epic tracking it. Do not expect a compiler here yet.
+> **Status: M0.** A bootstrap compiler exists and emits real native
+> executables — a lexer, a parser, a canonical-shaped AST, a resolved IR and a
+> Cranelift backend. There is no type system, no linearity and no effects yet:
+> those are M1 and M2. Do not mistake this for a usable language.
 
 ## What this is
 
@@ -70,6 +72,29 @@ principally integer-overflow semantics — worth a low single-digit percent.
 
 Any larger gap early on is implementation maturity, not language design.
 
+## Try it
+
+```sh
+cargo run -p lex-sys -- build examples/hello.ls -o hello && ./hello
+# Hello, world!
+```
+
+The M0 language is one type (`int`), functions and calls, arithmetic,
+comparison, `if`/`else`, `while`, and `let`/`var` bindings — that is all of it.
+`examples/hello.ls` prints its greeting by unpacking two 64-bit words a byte at
+a time, because there are no strings yet, and that is honest about where the
+milestone ends.
+
+```sh
+cargo test              # unit tests plus the accept/reject conformance suite
+cargo clippy --all-targets -- -D warnings
+cargo fmt --all --check
+```
+
+`docs/bootstrap.md` records what M0 had to settle: the bootstrap host language
+(Rust), the file extension (`.ls`), which parts are scaffolding, and what
+replaces each of them.
+
 ## Roadmap
 
 Tracked in the epic: **[#1](https://github.com/alpibrusl/lex-sys/issues/1)** — milestones
@@ -80,6 +105,7 @@ First actions:
 - [#2](https://github.com/alpibrusl/lex-sys/issues/2) — write `docs/linearity-and-effects.md`
   (**blocking gate for M2**; the decision set that determines three months vs three years)
 - [#3](https://github.com/alpibrusl/lex-sys/issues/3) — M0: native hello world via Cranelift
+  (**done** — `lex-sys build hello.ls && ./hello` on linux-x86_64 and darwin-aarch64)
 
 Beyond M3 the first real target is **`lex-os`** — production systems work, no rewrite
 risk. Self-hosting the lex-lang toolchain stays a *spike before a plan*: port

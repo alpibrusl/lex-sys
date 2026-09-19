@@ -1,0 +1,16 @@
+[package]
+name = "lex-sys-codegen"
+description = "Cranelift lowering and native object emission for lex-sys"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+cranelift-codegen = "0.121.2"
+cranelift-frontend = "0.121.2"
+cranelift-module = "0.121.2"
+cranelift-native = "0.121.2"
+cranelift-object = "0.121.2"
+lex-sys-ir.workspace = true
+target-lexicon = "0.13.5"

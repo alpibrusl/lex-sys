@@ -1,0 +1,19 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/lex-sys-syntax",
+    "crates/lex-sys-ir",
+    "crates/lex-sys-codegen",
+    "crates/lex-sys",
+]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.85"
+publish = false
+
+[workspace.dependencies]
+lex-sys-syntax = { path = "crates/lex-sys-syntax" }
+lex-sys-ir = { path = "crates/lex-sys-ir" }
+lex-sys-codegen = { path = "crates/lex-sys-codegen" }
