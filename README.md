@@ -168,4 +168,5 @@ over the existing ~136k-op corpus, then decide.
 
 ## Licence
 
-To be decided (the org default is EUPL-1.2).
+[EUPL-1.2](LICENSE), matching the rest of the ecosystem. See `LICENSE` for the
+notice and where to obtain the full text in any of the 23 EU languages.
