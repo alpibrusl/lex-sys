@@ -132,57 +132,57 @@ fn refused_programs_are_refused_with_the_stated_reason() {
     }
 }
 
+/// Every example must build, run, and print what its header says.
+///
+/// A walker rather than one test per example, so an example added later is
+/// covered without anyone remembering to cover it — and so an example that
+/// stops matching the language fails CI instead of quietly rotting.
 #[test]
-fn the_example_hello_world_prints_and_exits_zero() {
-    let dir = scratch("hello");
-    let exe = dir.join("hello");
-    let source = repo_root().join("examples").join("hello.ls");
+fn every_example_runs_and_prints_what_it_says() {
+    let dir = repo_root().join("examples");
+    let mut paths: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .unwrap_or_else(|e| panic!("cannot read `{}`: {e}", dir.display()))
+        .map(|entry| entry.expect("a readable directory entry").path())
+        .filter(|p| p.extension().is_some_and(|e| e == "ls"))
+        .collect();
+    paths.sort();
+    assert!(!paths.is_empty(), "no examples in `{}`", dir.display());
 
-    let build = Command::new(BIN)
-        .args(["build".as_ref(), source.as_os_str(), "-o".as_ref(), exe.as_os_str()])
-        .output()
-        .expect("the compiler runs");
-    assert!(
-        build.status.success(),
-        "hello.ls should compile:\n{}",
-        String::from_utf8_lossy(&build.stderr)
-    );
+    for path in paths {
+        let source = std::fs::read_to_string(&path).expect("a readable example");
+        let name = path.file_stem().unwrap().to_string_lossy().into_owned();
+        assert!(
+            !directives(&source, "STDOUT").is_empty(),
+            "`{name}` declares no expected output; every example states what it prints"
+        );
 
-    let run = Command::new(&exe).output().expect("hello runs");
-    assert_eq!(String::from_utf8_lossy(&run.stdout), "Hello, world!\n");
-    assert_eq!(run.status.code(), Some(0));
+        let scratch = scratch(&format!("example-{name}"));
+        let exe = scratch.join(&name);
+        let build = Command::new(BIN)
+            .args(["build".as_ref(), path.as_os_str(), "-o".as_ref(), exe.as_os_str()])
+            .output()
+            .expect("the compiler runs");
+        assert!(
+            build.status.success(),
+            "`{name}` should compile, but the compiler said:\n{}",
+            String::from_utf8_lossy(&build.stderr)
+        );
 
-    let _ = std::fs::remove_dir_all(&dir);
-}
+        let run = Command::new(&exe).output().expect("the compiled example runs");
+        let mut expected = directives(&source, "STDOUT").join("\n");
+        expected.push('\n');
+        assert_eq!(
+            String::from_utf8_lossy(&run.stdout),
+            expected,
+            "`{name}` printed the wrong thing"
+        );
 
-/// M1's acceptance criterion from the epic: a real program using ADTs,
-/// generics and pattern matching, type-checked and run.
-#[test]
-fn the_acceptance_program_type_checks_and_runs() {
-    let dir = scratch("rational");
-    let exe = dir.join("rational");
-    let source = repo_root().join("examples").join("rational.ls");
+        let expected_status: i32 =
+            directive(&source, "EXIT").map_or(0, |s| s.trim().parse().expect("a numeric EXIT"));
+        assert_eq!(run.status.code(), Some(expected_status), "`{name}` exited wrongly");
 
-    let build = Command::new(BIN)
-        .args(["build".as_ref(), source.as_os_str(), "-o".as_ref(), exe.as_os_str()])
-        .output()
-        .expect("the compiler runs");
-    assert!(
-        build.status.success(),
-        "rational.ls should compile:\n{}",
-        String::from_utf8_lossy(&build.stderr)
-    );
-
-    let run = Command::new(&exe).output().expect("rational runs");
-    assert_eq!(
-        String::from_utf8_lossy(&run.stdout),
-        // normalisation; the four operations; the two failures; the generic
-        // helpers at two instantiations; the three orderings; H(6).
-        "3/4 -1/3\n5/6 1/6 1/6 3/2\nD Z\nYN 7 T\n<=>\n49/20\n"
-    );
-    assert_eq!(run.status.code(), Some(0));
-
-    let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
 }
 
 #[test]

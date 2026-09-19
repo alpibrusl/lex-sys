@@ -4,17 +4,16 @@ A **systems dialect carrying Lex's philosophy**: native compilation, no GC, line
 ownership and capability-typed effects unified into one resource system, fully
 defined behaviour, and a canonical content-addressable AST designed in from day one.
 
-> **Status: M0 complete.** A bootstrap compiler takes a `.ls` file to a real
-> native executable — lexer, parser, canonical-shaped AST, resolved IR,
-> Cranelift backend — and CI proves it on **linux-x86_64 and darwin-aarch64**,
-> which is M0's acceptance criterion verbatim. The M2 design gate,
-> [`docs/linearity-and-effects.md`](docs/linearity-and-effects.md), is written
-> and awaiting review.
+> **Status: M1 complete, M3 started.** A bootstrap compiler takes a `.ls` file
+> to a real native executable, and CI proves it on **linux-x86_64 and
+> darwin-aarch64**. The language has a type system: `int` and `bool`, structs,
+> enums with exhaustive pattern matching, and monomorphised generics. Every
+> declaration has a content hash (`lex-sys ids`).
 >
-> There is **no type system, no linearity and no effects yet** — those are M1
-> and M2. The whole language today is `int`, functions, arithmetic,
-> comparison, `if`/`else`, `while` and `let`/`var`. Do not mistake it for a
-> usable one.
+> There is **no linearity and no effects yet** — that is M2, and it is gated
+> on [`docs/linearity-and-effects.md`](docs/linearity-and-effects.md) being
+> settled. There are also no strings, no slices, no allocation and no FFI:
+> those are M3. Do not mistake this for a usable language yet.
 
 ## What this is
 
@@ -82,15 +81,31 @@ Any larger gap early on is implementation maturity, not language design.
 ## Try it
 
 ```sh
-cargo run -p lex-sys -- build examples/hello.ls -o hello && ./hello
-# Hello, world!
+cargo run -p lex-sys -- run examples/tour.ls
+# M0: 7 5 3 1
+# M1 bool: 1010010
+# M1 struct: (3, 4) -> 25
+# M1 enum: 0 12 20
+# M1 generic: 5 3 z
 ```
 
-The M0 language is one type (`int`), functions and calls, arithmetic,
-comparison, `if`/`else`, `while`, and `let`/`var` bindings — that is all of it.
-`examples/hello.ls` prints its greeting by unpacking two 64-bit words a byte at
-a time, because there are no strings yet, and that is honest about where the
-milestone ends.
+`examples/tour.ls` is the shortest honest answer to "what can this language
+do": one section per feature, in the order the milestones added them.
+`examples/rational.ls` is a real 250-line program — exact rational arithmetic
+with a generic `Result[T]` threaded through every fallible operation.
+
+**What exists:** `int` and `bool`, functions and calls, arithmetic and
+comparison, `&&`/`||` with short-circuiting, `if`/`else`, `while`, `let`/`var`
+bindings, structs, enums with exhaustive `match`, and generics over both.
+
+**What does not, yet:** strings, slices, allocation, references, FFI — and the
+linearity and capability-typed effects that are the whole point (M2). That is
+why `examples/hello.ls` still packs its greeting into two 64-bit words and
+unpacks it a byte at a time.
+
+Every example declares what it prints in its own header, and a test walks
+`examples/` and checks them, so an example that stops matching the language
+fails CI rather than quietly rotting.
 
 The compiler's whole surface:
 
@@ -105,7 +120,7 @@ Exit codes are semantic: `0` success, `1` the program was refused with a
 located diagnostic, `2` the command line was wrong, `3` the environment failed.
 
 ```sh
-cargo test                                 # 53 tests: units + the conformance suite
+cargo test                                 # units, examples, and the conformance suite
 cargo clippy --all-targets -- -D warnings
 cargo fmt --all --check
 ```
@@ -114,8 +129,10 @@ cargo fmt --all --check
 
 ```
 crates/lex-sys-syntax    lexer, canonical-shaped AST, parser
-crates/lex-sys-ir        resolution and every check the compiler makes; the M0 IR
+crates/lex-sys-types     the type vocabulary: representation and unification
+crates/lex-sys-ir        resolution, type checking, monomorphisation; the IR
 crates/lex-sys-codegen   Cranelift lowering, native object emission
+crates/lex-sys-id        canonical encoding and content hashes
 crates/lex-sys           the CLI
 examples/                programs meant to be read
 tests/accept             fixtures that must compile and run
@@ -154,7 +171,7 @@ M0–M3 with acceptance criteria, sequencing, risks and open decisions.
 | Milestone | What | Status |
 |---|---|---|
 | **M0** — native hello world ([#3](https://github.com/alpibrusl/lex-sys/issues/3)) | Lexer, parser, AST, IR, Cranelift backend, a real executable | **done** — green on both targets |
-| **M1** — typed core | Bidirectional checker, structs, ADTs with exhaustiveness, monomorphised generics. No linearity, no effects — deliberately | next |
+| **M1** — typed core | Type checker, `bool`, structs, ADTs with exhaustiveness, monomorphised generics. No linearity, no effects — deliberately | **done** |
 | **M2** — the actual thesis ([#2](https://github.com/alpibrusl/lex-sys/issues/2)) | Linear ownership, effect rows and capability-passing as **one** system | **gated** on `docs/linearity-and-effects.md`, written and awaiting review |
 | **M3** — minimal but real | Slices and strings, arenas, libc FFI, settled overflow semantics, canonical printer, per-unit identity | started — per-unit identity landed |
 
