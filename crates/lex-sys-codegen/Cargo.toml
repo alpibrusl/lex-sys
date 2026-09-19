@@ -14,3 +14,8 @@ cranelift-native = "0.121.2"
 cranelift-object = "0.121.2"
 lex-sys-ir.workspace = true
 target-lexicon = "0.13.5"
+
+[dev-dependencies]
+# Matches the version cranelift-object already pulls in, so the tree holds one copy.
+object = "0.36"
+lex-sys-syntax.workspace = true

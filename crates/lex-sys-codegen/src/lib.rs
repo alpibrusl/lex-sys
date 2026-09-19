@@ -20,7 +20,7 @@ use cranelift_object::{ObjectBuilder, ObjectModule};
 use lex_sys_ir::{
     BinOp, Builtin, Callee, Expr, Func, FuncId as IrFuncId, Program, Stmt, terminates,
 };
-use target_lexicon::{BinaryFormat, Triple};
+use target_lexicon::Triple;
 
 /// Every lex-sys function is emitted under this prefix, so a program may define
 /// a function called `write` or `exit` without colliding with libc.
@@ -49,14 +49,26 @@ pub fn host_triple() -> Triple {
     Triple::host()
 }
 
-/// Compile a program to the bytes of a native object file.
+/// Compile a program to the bytes of a native object file for the host.
 ///
 /// `entry` names the lex-sys function that becomes the process entry point: a C
 /// `main` is synthesised around it, truncating its `int` result to the `int`
 /// the platform's exit status is.
 pub fn compile_object(program: &Program, entry: &str) -> Result<Vec<u8>, CodegenError> {
-    let triple = host_triple();
+    compile_object_for(program, entry, host_triple())
+}
 
+/// Compile a program to the bytes of an object file for an explicit target.
+///
+/// M0 builds only for the host — there is no cross-compilation story and no
+/// driver flag for one. This exists so the object *format's* conventions can be
+/// tested from any host: symbol mangling differs between ELF and Mach-O, and
+/// getting it wrong is a link failure nobody on Linux will ever see.
+pub fn compile_object_for(
+    program: &Program,
+    entry: &str,
+    triple: Triple,
+) -> Result<Vec<u8>, CodegenError> {
     let mut flags = settings::builder();
     // Position-independent code: both default targets link PIE by default.
     flags.set("is_pic", "true").map_err(|e| CodegenError(e.to_string()))?;
@@ -73,7 +85,7 @@ pub fn compile_object(program: &Program, entry: &str) -> Result<Vec<u8>, Codegen
         .map_err(|e| CodegenError(e.to_string()))?;
     let mut module = ObjectModule::new(builder);
 
-    let mut emitter = Emitter { triple: triple.clone(), module, program };
+    let mut emitter = Emitter { module, program };
     emitter.emit(entry)?;
     module = emitter.module;
 
@@ -81,21 +93,20 @@ pub fn compile_object(program: &Program, entry: &str) -> Result<Vec<u8>, Codegen
 }
 
 struct Emitter<'a> {
-    triple: Triple,
     module: ObjectModule,
     program: &'a Program,
 }
 
 impl<'a> Emitter<'a> {
-    /// A C-visible name, as the platform's linker spells it.
-    fn c_symbol(&self, name: &str) -> String {
-        if self.triple.binary_format == BinaryFormat::Macho {
-            format!("_{name}")
-        } else {
-            name.to_owned()
-        }
-    }
-
+    /// Declare and define every function, then the C entry point.
+    ///
+    /// Symbols are declared under their plain C names throughout. The
+    /// platform's own convention is applied underneath us: `object` picks a
+    /// `Mangling` from the binary format when the object is created, and
+    /// Mach-O's adds the leading underscore to every text and data symbol. So
+    /// `main` becomes `_main` on darwin and stays `main` on ELF, and adding one
+    /// here as well produced `__main` and a link the darwin linker could not
+    /// resolve.
     fn emit(&mut self, entry: &str) -> Result<(), CodegenError> {
         let call_conv = self.module.isa().default_call_conv();
 
@@ -111,11 +122,7 @@ impl<'a> Emitter<'a> {
             sig.returns.push(AbiParam::new(types::I64));
             let id = self
                 .module
-                .declare_function(
-                    &self.c_symbol(&format!("{PREFIX}{}", func.name)),
-                    Linkage::Local,
-                    &sig,
-                )
+                .declare_function(&format!("{PREFIX}{}", func.name), Linkage::Local, &sig)
                 .map_err(|e| CodegenError(e.to_string()))?;
             declared.push(id);
         }
@@ -128,11 +135,7 @@ impl<'a> Emitter<'a> {
         putchar_sig.returns.push(AbiParam::new(types::I32));
         let putchar = self
             .module
-            .declare_function(
-                &self.c_symbol(Builtin::PutChar.symbol()),
-                Linkage::Import,
-                &putchar_sig,
-            )
+            .declare_function(Builtin::PutChar.symbol(), Linkage::Import, &putchar_sig)
             .map_err(|e| CodegenError(e.to_string()))?;
 
         let mut ctx = Context::new();
@@ -177,7 +180,7 @@ impl<'a> Emitter<'a> {
         sig.returns.push(AbiParam::new(types::I32));
         let main = self
             .module
-            .declare_function(&self.c_symbol("main"), Linkage::Export, &sig)
+            .declare_function("main", Linkage::Export, &sig)
             .map_err(|e| CodegenError(e.to_string()))?;
 
         ctx.clear();
@@ -376,5 +379,90 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
         let flag = self.builder.ins().icmp(cc, a, b);
         // A comparison is an `int` that is 0 or 1 until M1 gives it a `bool`.
         self.builder.ins().uextend(types::I64, flag)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lex_sys_ir::lower;
+    use lex_sys_syntax::parse;
+    use object::{Object, ObjectSymbol, SymbolKind};
+
+    const SOURCE: &str = "fn shout() -> int { return putchar(33); } \
+                          fn main() -> int { return shout(); }";
+
+    /// Compile for a target and read back the object's symbol table.
+    ///
+    /// Cranelift compiles in only the host's backend, so the *architecture*
+    /// here has to be this host's — but the *binary format* need not be, which
+    /// is what makes the Mach-O conventions testable from Linux.
+    fn symbols(triple: &str) -> Vec<(String, bool)> {
+        let ast = parse(SOURCE).expect("should parse");
+        let program = lower(&ast).expect("should lower");
+        let bytes = compile_object_for(&program, "main", triple.parse().expect("a valid triple"))
+            .expect("should compile");
+        let file = object::File::parse(&*bytes).expect("a readable object file");
+        // Text symbols are the functions; an undefined import reads back as
+        // `Unknown`, and section and file symbols are neither.
+        let mut names: Vec<(String, bool)> = file
+            .symbols()
+            .filter(|s| matches!(s.kind(), SymbolKind::Text | SymbolKind::Unknown))
+            .filter_map(|s| s.name().ok().map(|n| (n.to_owned(), s.is_global())))
+            .filter(|(name, _)| !name.is_empty())
+            .collect();
+        names.sort();
+        names
+    }
+
+    fn names(triple: &str) -> Vec<String> {
+        symbols(triple).into_iter().map(|(n, _)| n).collect()
+    }
+
+    /// A symbol is spelled as it was declared, plus whatever the platform adds
+    /// — and nothing more.
+    ///
+    /// `object` picks a `Mangling` from the binary format when the object is
+    /// created and applies the Mach-O leading underscore itself, without being
+    /// asked. Prefixing here as well produced `__main`, and the darwin linker,
+    /// looking for `_main`, could not resolve it. Linux never sees this, which
+    /// is exactly why the assertion covers both formats from any host.
+    #[test]
+    fn symbols_are_spelled_for_their_platform_and_prefixed_once() {
+        for (triple, prefix) in [("x86_64-unknown-linux-gnu", ""), ("x86_64-apple-darwin", "_")] {
+            let names = names(triple);
+            for base in ["main", "lexs_main", "lexs_shout", "putchar"] {
+                let expected = format!("{prefix}{base}");
+                assert!(
+                    names.contains(&expected),
+                    "{triple} should define `{expected}`, got {names:?}"
+                );
+            }
+            assert!(
+                !names.iter().any(|n| n.starts_with("__")),
+                "{triple}: a doubly-prefixed symbol is an unresolvable link: {names:?}"
+            );
+        }
+    }
+
+    /// `main` is the only symbol the linker may bind from outside. Everything
+    /// the program defines is local and carries the `lexs_` prefix, so a
+    /// lex-sys function called `write` or `exit` cannot collide with libc's.
+    #[test]
+    fn only_the_entry_point_is_global() {
+        for triple in ["x86_64-unknown-linux-gnu", "x86_64-apple-darwin"] {
+            for (name, global) in symbols(triple) {
+                if name.contains("lexs_") {
+                    assert!(!global, "{triple}: `{name}` should be local");
+                }
+            }
+            let globals: Vec<String> = symbols(triple)
+                .into_iter()
+                .filter(|(name, global)| *global && !name.contains("putchar"))
+                .map(|(name, _)| name)
+                .collect();
+            assert_eq!(globals.len(), 1, "{triple}: exactly one exported symbol, got {globals:?}");
+            assert!(globals[0].ends_with("main"), "{triple}: {globals:?}");
+        }
     }
 }
