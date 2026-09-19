@@ -180,6 +180,16 @@ pub enum Stmt {
         name: Symbol,
         value: ExprId,
     },
+    /// `let Point { x, y } = p;`
+    ///
+    /// Taking a value apart is one of the four ways to consume a linear one
+    /// (§4.1): the whole is spent and the parts are produced, each subject to
+    /// the rule in turn. Fields bind under their own names.
+    Destructure {
+        struct_name: Symbol,
+        fields: Vec<Symbol>,
+        value: ExprId,
+    },
     /// `e;` — the value is discarded.
     Expr(ExprId),
     If {
@@ -213,6 +223,18 @@ pub struct FnDecl {
     pub body: Block,
 }
 
+/// A type's declared mode — how many times a value of it may be used.
+///
+/// `docs/linearity-and-effects.md` §3. Absent means inferred: a type is `res`
+/// if any member is, and `val` otherwise.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Mode {
+    /// Unrestricted: copyable, discardable, no obligations.
+    Val,
+    /// Linear: used exactly once, no implicit copy, no implicit discard.
+    Res,
+}
+
 /// What an arm matches. M1 has variant patterns and a wildcard; literal and
 /// nested patterns are later work.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -238,6 +260,8 @@ pub struct FieldDecl {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct StructDecl {
     pub name: Symbol,
+    /// `None` where the declaration did not say; the checker infers it.
+    pub mode: Option<Mode>,
     /// Type parameters, in declaration order. `Type::Param(i)` refers to the
     /// `i`th of these.
     pub generics: Vec<Symbol>,
@@ -254,6 +278,7 @@ pub struct VariantDecl {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct EnumDecl {
     pub name: Symbol,
+    pub mode: Option<Mode>,
     pub generics: Vec<Symbol>,
     pub variants: Vec<VariantDecl>,
 }

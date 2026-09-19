@@ -69,6 +69,10 @@ These are the properties the AST shape was built for, and each has a test:
 - **Neighbours.** A unit hashes alone. Adding, removing or reordering other
   declarations changes nothing.
 - **Local names.** See §5 — this one is a decision rather than a consequence.
+- **A redundant `val`.** A declaration's mode is `val` unless it says
+  otherwise, so writing the word on a type whose members are all `val` asserts
+  exactly what absence already checks — and a `val` that was *not* true is
+  refused before anything hashes it. The two declarations are one type.
 
 ## 3.1 What must change a hash
 
@@ -77,6 +81,8 @@ These are the properties the AST shape was built for, and each has a test:
 - A callee's signature, transitively.
 - Field and variant order in a declaration, because they are positional to the
   backend and observable through construction.
+- A declaration's `res` (`docs/linearity-and-effects.md` §3). A linear type is
+  not the same type as a copyable one, and every caller can tell.
 
 ---
 
@@ -195,3 +201,11 @@ empty.
 - **Cross-version stability.** No claim is made that a hash from this build
   matches one from any other build. The domain tags exist so that claim can be
   made later.
+- **Field order where the declaration decides it.** A struct literal lists its
+  fields in whatever order it likes and the checker reorders them, so
+  `P { x: 1, y: 2 }` and `P { y: 2, x: 1 }` are the same value — and they hash
+  differently. A destructuring pattern has the same gap for the same reason:
+  `let P { x, y } = p` and `let P { y, x } = p` bind the same values. Both
+  could be canonicalised by sorting into declaration order, which is not known
+  where the encoder runs; neither is, and the tests say so rather than
+  asserting the property does not exist.
