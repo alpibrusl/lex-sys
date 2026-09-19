@@ -98,6 +98,7 @@ The compiler's whole surface:
 lex-sys build <file.ls> [-o <output>] [--emit exe|obj]
 lex-sys check <file.ls>     # refuse or say nothing
 lex-sys run   <file.ls>     # build, run, exit with the program's status
+lex-sys ids   <file.ls>     # each declaration's content hash
 ```
 
 Exit codes are semantic: `0` success, `1` the program was refused with a
@@ -136,7 +137,7 @@ carry them exists now, while it is cheap.
 |---|---|---|
 | [`docs/linearity-and-effects.md`](docs/linearity-and-effects.md) | The M2 gate: linear ownership, capability-typed effects, how they unify, and 23 must-reject fixtures written out as the conformance suite | written, awaiting review |
 | [`docs/bootstrap.md`](docs/bootstrap.md) | What M0 settled: bootstrap host (Rust), extension (`.ls`), the M0 surface, what is scaffolding and what replaces it | written |
-| `docs/canonical-ast.md` | Canonicalisation rules and per-unit identity | not written (M3) |
+| [`docs/canonical-ast.md`](docs/canonical-ast.md) | Canonicalisation rules and per-unit identity: what is hashed, and what a hash is allowed to change with | written, implemented |
 | `docs/memory-model.md` | Regions, escape, the escape hatches and their cost | not written (M2) |
 | `docs/defined-behaviour.md` | Every place C and Rust leave behaviour open, and what we define it to | not written (M3) |
 
@@ -155,7 +156,7 @@ M0–M3 with acceptance criteria, sequencing, risks and open decisions.
 | **M0** — native hello world ([#3](https://github.com/alpibrusl/lex-sys/issues/3)) | Lexer, parser, AST, IR, Cranelift backend, a real executable | **done** — green on both targets |
 | **M1** — typed core | Bidirectional checker, structs, ADTs with exhaustiveness, monomorphised generics. No linearity, no effects — deliberately | next |
 | **M2** — the actual thesis ([#2](https://github.com/alpibrusl/lex-sys/issues/2)) | Linear ownership, effect rows and capability-passing as **one** system | **gated** on `docs/linearity-and-effects.md`, written and awaiting review |
-| **M3** — minimal but real | Slices and strings, arenas, libc FFI, settled overflow semantics, canonical printer, per-unit identity | later |
+| **M3** — minimal but real | Slices and strings, arenas, libc FFI, settled overflow semantics, canonical printer, per-unit identity | started — per-unit identity landed |
 
 Deliberately excluded from "minimal": borrow checker, traits, `comptime`, own
 optimiser, incremental compilation, LSP, async. Each is "yes, later" — saying

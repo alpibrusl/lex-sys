@@ -244,6 +244,47 @@ fn emitting_a_bare_object_file_works() {
 }
 
 #[test]
+fn ids_are_stable_across_runs_and_survive_a_body_rewrite() {
+    let source = repo_root().join("examples").join("rational.ls");
+
+    let once = Command::new(BIN).arg("ids").arg(&source).output().expect("the compiler runs");
+    assert!(once.status.success(), "{}", String::from_utf8_lossy(&once.stderr));
+    let again = Command::new(BIN).arg("ids").arg(&source).output().expect("the compiler runs");
+    assert_eq!(once.stdout, again.stdout, "hashing is a function of the program alone");
+
+    let text = String::from_utf8(once.stdout).expect("hashes are ascii");
+    assert!(text.contains("sig  harmonic"), "{text}");
+    assert!(text.contains("type Rational"), "{text}");
+
+    // Rewrite a body without touching any signature: every `sig` line must be
+    // unchanged and at least one `body` line must move.
+    let dir = scratch("ids-rewrite");
+    let rewritten = dir.join("rational.ls");
+    let original = std::fs::read_to_string(&source).expect("a readable example");
+    let patched = original.replace(
+        "fn abs(x: int) -> int {\n    if x < 0 {\n        return 0 - x;\n    }\n    return x;\n}",
+        "fn abs(x: int) -> int {\n    if x >= 0 {\n        return x;\n    }\n    return 0 - x;\n}",
+    );
+    assert_ne!(patched, original, "the body rewrite should have applied");
+    std::fs::write(&rewritten, patched).expect("a writable copy");
+
+    let after = Command::new(BIN).arg("ids").arg(&rewritten).output().expect("the compiler runs");
+    assert!(after.status.success(), "{}", String::from_utf8_lossy(&after.stderr));
+    let after = String::from_utf8(after.stdout).expect("hashes are ascii");
+
+    let sigs = |text: &str| -> Vec<String> {
+        text.lines()
+            .filter(|l| l.starts_with("sig ") || l.starts_with("type "))
+            .map(str::to_owned)
+            .collect()
+    };
+    assert_eq!(sigs(&text), sigs(&after), "a body rewrite must not move any signature");
+    assert_ne!(text, after, "it must move a body");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn a_wrong_command_line_is_a_usage_error_not_a_refusal() {
     let output = Command::new(BIN).arg("frobnicate").output().expect("the compiler runs");
     assert_eq!(output.status.code(), Some(2));
