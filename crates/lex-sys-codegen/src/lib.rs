@@ -392,11 +392,18 @@ mod tests {
     const SOURCE: &str = "fn shout() -> int { return putchar(33); } \
                           fn main() -> int { return shout(); }";
 
-    /// Compile for a target and read back the object's symbol table.
+    /// The two targets to check: this host's architecture, once per binary
+    /// format, paired with the symbol prefix that format calls for.
     ///
-    /// Cranelift compiles in only the host's backend, so the *architecture*
-    /// here has to be this host's — but the *binary format* need not be, which
-    /// is what makes the Mach-O conventions testable from Linux.
+    /// Cranelift compiles in only the host's backend, so the architecture has
+    /// to be this host's — but the *format* need not be, which is what makes
+    /// Mach-O's conventions testable from Linux and ELF's from darwin.
+    fn targets() -> [(String, &'static str); 2] {
+        let arch = host_triple().architecture.to_string();
+        [(format!("{arch}-unknown-linux-gnu"), ""), (format!("{arch}-apple-darwin"), "_")]
+    }
+
+    /// Compile for a target and read back the object's symbol table.
     fn symbols(triple: &str) -> Vec<(String, bool)> {
         let ast = parse(SOURCE).expect("should parse");
         let program = lower(&ast).expect("should lower");
@@ -450,7 +457,8 @@ mod tests {
     /// lex-sys function called `write` or `exit` cannot collide with libc's.
     #[test]
     fn only_the_entry_point_is_global() {
-        for triple in ["x86_64-unknown-linux-gnu", "x86_64-apple-darwin"] {
+        for (triple, _) in targets() {
+            let triple = triple.as_str();
             for (name, global) in symbols(triple) {
                 if name.contains("lexs_") {
                     assert!(!global, "{triple}: `{name}` should be local");
