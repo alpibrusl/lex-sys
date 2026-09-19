@@ -1,0 +1,13 @@
+# Pin the toolchain so "it passes locally" means it passes in CI.
+#
+# This was not academic: a clippy lint that exists in 1.98 and not in 1.94 took
+# CI red on a change whose author had run `cargo clippy -- -D warnings` and seen
+# it pass. A compiler chosen by whatever `stable` happens to be on the day is a
+# reproducibility hole, and this project treats reproducibility as load-bearing
+# (#1).
+#
+# Raising this is a deliberate act: bump it, run the loop, fix what the newer
+# lints find, and commit the two together.
+[toolchain]
+channel = "1.98.1"
+components = ["clippy", "rustfmt"]

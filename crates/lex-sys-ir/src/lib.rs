@@ -1138,7 +1138,7 @@ impl<'a> FnLowering<'a> {
                 // arguments: matching `Option[int]` binds an `int`.
                 let payload: Vec<Type> =
                     variants[index as usize].1.iter().map(|t| t.substitute(&type_args)).collect();
-                for (binding, ty) in bindings.iter().zip(payload.into_iter()) {
+                for (binding, ty) in bindings.iter().zip(payload) {
                     match binding {
                         Some(name) => {
                             if self.declared_in_current_scope(*name) {
