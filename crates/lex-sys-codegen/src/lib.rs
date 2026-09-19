@@ -11,7 +11,9 @@
 use std::fmt;
 
 use cranelift_codegen::ir::condcodes::IntCC;
-use cranelift_codegen::ir::{AbiParam, InstBuilder, Value, types};
+use cranelift_codegen::ir::{
+    AbiParam, InstBuilder, MemFlags, StackSlotData, StackSlotKind, Value, types,
+};
 use cranelift_codegen::settings::{self, Configurable};
 use cranelift_codegen::{Context, isa};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
@@ -84,6 +86,28 @@ fn leaves(ty: &Type, program: &Program) -> Vec<types::Type> {
 fn leaf_count(ty: &Type, program: &Program) -> u32 {
     leaves(ty, program).len() as u32
 }
+
+/// How many leaves a return value may have before it travels through memory.
+///
+/// Two is what x86-64's SystemV ABI gives back in registers, and Cranelift
+/// refuses outright above it. Rather than let the limit differ per target —
+/// aarch64 would allow eight — the same rule applies everywhere, so a program
+/// that compiles on one target compiles on the other.
+const MAX_RETURN_LEAVES: usize = 2;
+
+/// Does a value of this type come back through memory rather than in
+/// registers?
+fn returns_indirectly(ty: &Type, program: &Program) -> bool {
+    leaf_count(ty, program) as usize > MAX_RETURN_LEAVES
+}
+
+/// Byte offset of a leaf in an indirect return buffer.
+///
+/// One slot of pointer width per leaf: this is a private arrangement between a
+/// lex-sys function and its lex-sys caller, not a layout the language
+/// promises. `docs/defined-behaviour.md` still owns that question in M3, and
+/// nothing here is observable to a program.
+const RETURN_SLOT_STRIDE: i32 = 8;
 
 /// Every lex-sys function is emitted under this prefix, so a program may define
 /// a function called `write` or `exit` without colliding with libc.
@@ -172,6 +196,7 @@ impl<'a> Emitter<'a> {
     /// resolve.
     fn emit(&mut self, entry: &str) -> Result<(), CodegenError> {
         let call_conv = self.module.isa().default_call_conv();
+        let pointer = self.module.isa().pointer_type();
         // Bound once: the body emitter borrows the module mutably, so the
         // program has to be reached through a separate binding.
         let program = self.program;
@@ -187,8 +212,14 @@ impl<'a> Emitter<'a> {
                     sig.params.push(AbiParam::new(leaf));
                 }
             }
-            for leaf in leaves(&func.ret, self.program) {
-                sig.returns.push(AbiParam::new(leaf));
+            if returns_indirectly(&func.ret, self.program) {
+                // The caller allocates the buffer and passes its address
+                // first; nothing comes back in registers.
+                sig.params.insert(0, AbiParam::new(pointer));
+            } else {
+                for leaf in leaves(&func.ret, self.program) {
+                    sig.returns.push(AbiParam::new(leaf));
+                }
             }
             let id = self
                 .module
@@ -280,6 +311,10 @@ struct BodyEmitter<'a, 'f> {
     putchar: FuncId,
     func: &'a Func,
     program: &'a Program,
+    /// The buffer this function writes its result into, when its return type
+    /// is too wide for registers.
+    return_pointer: Option<Value>,
+    pointer: types::Type,
     /// Where each slot's leaves begin among the function's variables.
     slot_base: Vec<u32>,
     /// Slot leaves occupy the variables below this; temporaries the backend
@@ -302,7 +337,51 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
             slot_base.push(next_var);
             next_var += leaf_count(slot, program);
         }
-        Self { builder, module, declared, putchar, func, program, slot_base, next_var }
+        let pointer = module.isa().pointer_type();
+        Self {
+            builder,
+            module,
+            declared,
+            putchar,
+            func,
+            program,
+            return_pointer: None,
+            pointer,
+            slot_base,
+            next_var,
+        }
+    }
+
+    /// Write leaf values into an indirect return buffer.
+    fn store_leaves(&mut self, address: Value, values: &[Value]) {
+        for (index, value) in values.iter().enumerate() {
+            let offset = index as i32 * RETURN_SLOT_STRIDE;
+            self.builder.ins().store(MemFlags::trusted(), *value, address, offset);
+        }
+    }
+
+    /// Read leaf values back out of one.
+    fn load_leaves(&mut self, address: Value, kinds: &[types::Type]) -> Vec<Value> {
+        kinds
+            .iter()
+            .enumerate()
+            .map(|(index, kind)| {
+                let offset = index as i32 * RETURN_SLOT_STRIDE;
+                self.builder.ins().load(*kind, MemFlags::trusted(), address, offset)
+            })
+            .collect()
+    }
+
+    /// Reserve a buffer big enough for a value of this type.
+    fn return_buffer(&mut self, ty: &Type) -> Value {
+        let size = leaf_count(ty, self.program) * RETURN_SLOT_STRIDE as u32;
+        let slot = self.builder.create_sized_stack_slot(StackSlotData::new(
+            StackSlotKind::ExplicitSlot,
+            size,
+            3,
+        ));
+        let pointer = self.pointer;
+        self.builder.ins().stack_addr(pointer, slot, 0)
     }
 
     /// A fresh variable the backend owns, numbered above every slot leaf.
@@ -330,12 +409,20 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
             }
         }
 
+        // When the result travels through memory the address arrives first,
+        // so every parameter leaf sits one position later.
+        let indirect = returns_indirectly(&func.ret, self.program);
+        if indirect {
+            self.return_pointer = Some(self.builder.block_params(entry)[0]);
+        }
+        let shift = usize::from(indirect);
+
         let param_leaves: u32 = func.slots[..func.n_params as usize]
             .iter()
             .map(|ty| leaf_count(ty, self.program))
             .sum();
         for index in 0..param_leaves {
-            let value = self.builder.block_params(entry)[index as usize];
+            let value = self.builder.block_params(entry)[index as usize + shift];
             self.builder.def_var(Variable::from_u32(index), value);
         }
         for (index, ty) in func.slots.iter().enumerate().skip(func.n_params as usize) {
@@ -360,7 +447,20 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
             .into_iter()
             .map(|leaf| self.builder.ins().iconst(leaf, 0))
             .collect();
-        self.builder.ins().return_(&zeros);
+        self.emit_return(zeros);
+    }
+
+    /// Hand back a result, in registers or through the caller's buffer.
+    fn emit_return(&mut self, values: Vec<Value>) {
+        match self.return_pointer {
+            Some(address) => {
+                self.store_leaves(address, &values);
+                self.builder.ins().return_(&[]);
+            }
+            None => {
+                self.builder.ins().return_(&values);
+            }
+        }
     }
 
     /// Emit a statement list; returns whether control left via `return`.
@@ -379,7 +479,7 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
                 }
                 Stmt::Return(expr) => {
                     let values = self.expr(expr);
-                    self.builder.ins().return_(&values);
+                    self.emit_return(values);
                     return true;
                 }
                 Stmt::If { cond, then_body, else_body } => {
@@ -647,11 +747,26 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
                 let args: Vec<Value> = args.iter().flat_map(|a| self.expr(a)).collect();
                 match callee {
                     Callee::Fn(id) => {
+                        let callee = &self.program.funcs[id.0 as usize];
+                        let ret = callee.ret.clone();
                         let f = self
                             .module
                             .declare_func_in_func(self.declared[id.0 as usize], self.builder.func);
-                        let call = self.builder.ins().call(f, &args);
-                        self.builder.inst_results(call).to_vec()
+
+                        if !returns_indirectly(&ret, self.program) {
+                            let call = self.builder.ins().call(f, &args);
+                            return self.builder.inst_results(call).to_vec();
+                        }
+
+                        // Too wide for registers: hand the callee somewhere to
+                        // put it, then read it back.
+                        let buffer = self.return_buffer(&ret);
+                        let mut with_buffer = Vec::with_capacity(args.len() + 1);
+                        with_buffer.push(buffer);
+                        with_buffer.extend(args);
+                        self.builder.ins().call(f, &with_buffer);
+                        let kinds = leaves(&ret, self.program);
+                        self.load_leaves(buffer, &kinds)
                     }
                     Callee::Builtin(Builtin::PutChar) => {
                         let f = self.module.declare_func_in_func(self.putchar, self.builder.func);
