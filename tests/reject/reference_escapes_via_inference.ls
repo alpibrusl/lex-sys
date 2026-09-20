@@ -17,7 +17,7 @@ enum Holder[T] {
     Full(T),
 }
 
-fn main() -> int {
+fn main() -> [] int {
     let b = Bytes { len: 1 };
     let hole = Holder::Empty;
     borrow b as &r in {

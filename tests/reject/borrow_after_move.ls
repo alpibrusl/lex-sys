@@ -5,18 +5,18 @@
 
 res struct File { fd: int }
 
-fn close(f: File) -> int {
+fn close(f: File) -> [] int {
     let File { fd } = f;
     return fd;
 }
 
-fn late(f: File) -> int {
+fn late(f: File) -> [] int {
     let fd = close(f);
     borrow f as &r in {
         return fd;
     }
 }
 
-fn main() -> int {
+fn main() -> [] int {
     return 0;
 }

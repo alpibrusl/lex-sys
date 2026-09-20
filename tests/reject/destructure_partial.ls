@@ -10,11 +10,11 @@ struct Pair {
     b: File,
 }
 
-fn first(p: Pair) -> File {
+fn first(p: Pair) -> [] File {
     let Pair { a } = p;
     return a;
 }
 
-fn main() -> int {
+fn main() -> [] int {
     return 0;
 }

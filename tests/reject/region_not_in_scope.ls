@@ -6,10 +6,10 @@
 
 res struct File { fd: int }
 
-fn escape(f: File) -> &r File {
+fn escape(f: File) -> [] &r File {
     return f;
 }
 
-fn main() -> int {
+fn main() -> [] int {
     return 0;
 }

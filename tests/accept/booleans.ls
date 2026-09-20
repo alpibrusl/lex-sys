@@ -3,7 +3,7 @@
 //~ STDOUT 1010010
 //~ EXIT 0
 
-fn digit(b: bool) -> int {
+fn digit(b: bool) -> [] int {
     if b {
         return 49;                   // '1'
     } else {
@@ -11,7 +11,7 @@ fn digit(b: bool) -> int {
     }
 }
 
-fn main() -> int {
+fn main() -> [io] int {
     putchar(digit(2 < 3));
     putchar(digit(3 <= 2));
     putchar(digit(4 == 4));

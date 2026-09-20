@@ -9,24 +9,24 @@ res struct File {
     fd: int,
 }
 
-fn open(fd: int) -> File {
+fn open(fd: int) -> [] File {
     return File { fd: fd };
 }
 
 // Takes ownership and gives it back: the caller still owes one consumption.
-fn touch(f: File) -> File {
+fn touch(f: File) -> [] File {
     let File { fd } = f;
     return File { fd: fd + 2 };
 }
 
 // The terminal consumer. The parts are `int`, which is `val`, so nothing is
 // owed once they are out.
-fn close(f: File) -> int {
+fn close(f: File) -> [] int {
     let File { fd } = f;
     return fd;
 }
 
-fn main() -> int {
+fn main() -> [io] int {
     let straight = open(7);
     putchar(48 + close(straight));
 

@@ -1,5 +1,5 @@
 //~ ERROR `main` returns `int`, the process exit status
 
-fn main() -> bool {
+fn main() -> [] bool {
     return true;
 }

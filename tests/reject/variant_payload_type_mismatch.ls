@@ -2,10 +2,10 @@
 
 enum Shape { Circle(int) }
 
-fn make() -> Shape {
+fn make() -> [] Shape {
     return Shape::Circle(true);
 }
 
-fn main() -> int {
+fn main() -> [] int {
     return 0;
 }

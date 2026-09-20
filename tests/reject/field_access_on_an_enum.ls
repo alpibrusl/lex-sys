@@ -2,7 +2,7 @@
 
 enum Shape { Circle(int) }
 
-fn main() -> int {
+fn main() -> [] int {
     let s = Shape::Circle(1);
     return s.x;
 }

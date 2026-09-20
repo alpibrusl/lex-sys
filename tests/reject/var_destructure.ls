@@ -8,7 +8,7 @@ struct Point {
     y: int,
 }
 
-fn main() -> int {
+fn main() -> [] int {
     var Point { x, y } = Point { x: 1, y: 2 };
     return x + y;
 }

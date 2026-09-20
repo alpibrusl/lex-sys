@@ -2,7 +2,7 @@
 
 enum Shape { Rect(int, int) }
 
-fn main() -> int {
+fn main() -> [] int {
     match Shape::Rect(1, 2) {
         Shape::Rect(w) => { return w; }
     }

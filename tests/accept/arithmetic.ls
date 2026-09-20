@@ -2,7 +2,7 @@
 //~ STDOUT 7531
 //~ EXIT 0
 
-fn main() -> int {
+fn main() -> [io] int {
     putchar(48 + 1 + 2 * 3);         // precedence: 7
     putchar(48 + (10 - 3 - 2));      // left-associative: 5
     putchar(48 + (-6 / 2 + 6));      // truncating division: 3

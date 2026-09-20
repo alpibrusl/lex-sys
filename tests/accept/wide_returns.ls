@@ -12,29 +12,29 @@ struct Nested { left: Three, right: Three, flag: bool }
 
 enum Wide { Small(int), Big(Three) }
 
-fn three(a: int, b: int, c: int) -> Three {
+fn three(a: int, b: int, c: int) -> [] Three {
     return Three { a: a, b: b, c: c };
 }
 
-fn nest(flag: bool) -> Nested {
+fn nest(flag: bool) -> [] Nested {
     return Nested { left: three(1, 2, 3), right: three(4, 5, 6), flag: flag };
 }
 
-fn widen(n: int) -> Wide {
+fn widen(n: int) -> [] Wide {
     if n > 5 {
         return Wide::Big(three(n, n, n));
     }
     return Wide::Small(n);
 }
 
-fn total(w: Wide) -> int {
+fn total(w: Wide) -> [] int {
     match w {
         Wide::Small(n) => { return n; }
         Wide::Big(t) => { return t.a + t.b + t.c; }
     }
 }
 
-fn main() -> int {
+fn main() -> [io] int {
     let t = three(1, 2, 3);
     putchar(48 + t.a);                       // 1
 

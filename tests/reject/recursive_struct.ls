@@ -2,6 +2,6 @@
 
 struct Node { value: int, next: Node }
 
-fn main() -> int {
+fn main() -> [] int {
     return 0;
 }

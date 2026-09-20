@@ -5,12 +5,12 @@
 //~ STDOUT ab
 //~ EXIT 0
 
-fn noisy() -> bool {
+fn noisy() -> [io] bool {
     putchar(88);                     // 'X'
     return true;
 }
 
-fn main() -> int {
+fn main() -> [io] int {
     if false && noisy() {
         putchar(63);                 // '?'
     }

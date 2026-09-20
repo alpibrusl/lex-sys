@@ -14,7 +14,7 @@
 //~ EXIT 0
 
 // Write the low seven bytes of `word`, least significant first.
-fn put_word(word: int) -> int {
+fn put_word(word: int) -> [io] int {
     var rest = word;
     var written = 0;
     while rest > 0 {
@@ -26,15 +26,15 @@ fn put_word(word: int) -> int {
 }
 
 // "Hello, " and "world!\n", little-endian in base 256.
-fn greeting_head() -> int {
+fn greeting_head() -> [] int {
     return 9056056326776136;
 }
 
-fn greeting_tail() -> int {
+fn greeting_tail() -> [] int {
     return 2851464966991735;
 }
 
-fn main() -> int {
+fn main() -> [io] int {
     let written = put_word(greeting_head()) + put_word(greeting_tail());
     if written == 14 {
         return 0;

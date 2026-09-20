@@ -2,7 +2,7 @@
 //~ STDOUT ba
 //~ EXIT 0
 
-fn main() -> int {
+fn main() -> [io] int {
     let x = 97;
     if true {
         let x = 98;

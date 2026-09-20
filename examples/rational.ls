@@ -22,27 +22,27 @@
 
 // ---------------------------------------------------------------- output ---
 
-fn newline() -> int {
+fn newline() -> [io] int {
     return putchar(10);
 }
 
-fn space() -> int {
+fn space() -> [io] int {
     return putchar(32);
 }
 
-fn print_digit(d: int) -> int {
+fn print_digit(d: int) -> [io] int {
     return putchar(48 + d);
 }
 
 // Recursive, so the most significant digit is written first.
-fn print_nat(n: int) -> int {
+fn print_nat(n: int) -> [io] int {
     if n >= 10 {
         print_nat(n / 10);
     }
     return print_digit(n % 10);
 }
 
-fn print_int(n: int) -> int {
+fn print_int(n: int) -> [io] int {
     if n < 0 {
         putchar(45);
         return print_nat(0 - n);
@@ -76,14 +76,14 @@ struct Rational {
 
 // -------------------------------------------------- generic Result helpers ---
 
-fn is_ok[T](r: Result[T]) -> bool {
+fn is_ok[T](r: Result[T]) -> [] bool {
     match r {
         Result::Ok(_) => { return true; }
         Result::Err(_) => { return false; }
     }
 }
 
-fn unwrap_or[T](r: Result[T], fallback: T) -> T {
+fn unwrap_or[T](r: Result[T], fallback: T) -> [] T {
     match r {
         Result::Ok(value) => { return value; }
         Result::Err(_) => { return fallback; }
@@ -92,14 +92,14 @@ fn unwrap_or[T](r: Result[T], fallback: T) -> T {
 
 // ------------------------------------------------------------ arithmetic ---
 
-fn abs(x: int) -> int {
+fn abs(x: int) -> [] int {
     if x < 0 {
         return 0 - x;
     }
     return x;
 }
 
-fn gcd(a: int, b: int) -> int {
+fn gcd(a: int, b: int) -> [] int {
     if b == 0 {
         return abs(a);
     }
@@ -108,7 +108,7 @@ fn gcd(a: int, b: int) -> int {
 
 // The one place a `Rational` is built, so every one that exists is normalised:
 // denominator positive, terms in lowest form.
-fn rational(num: int, den: int) -> Result[Rational] {
+fn rational(num: int, den: int) -> [] Result[Rational] {
     if den == 0 {
         return Result::Err(Error::ZeroDenominator);
     }
@@ -128,26 +128,26 @@ fn rational(num: int, den: int) -> Result[Rational] {
     return Result::Ok(Rational { num: n / divisor, den: d / divisor });
 }
 
-fn add(a: Rational, b: Rational) -> Result[Rational] {
+fn add(a: Rational, b: Rational) -> [] Result[Rational] {
     return rational(a.num * b.den + b.num * a.den, a.den * b.den);
 }
 
-fn sub(a: Rational, b: Rational) -> Result[Rational] {
+fn sub(a: Rational, b: Rational) -> [] Result[Rational] {
     return rational(a.num * b.den - b.num * a.den, a.den * b.den);
 }
 
-fn mul(a: Rational, b: Rational) -> Result[Rational] {
+fn mul(a: Rational, b: Rational) -> [] Result[Rational] {
     return rational(a.num * b.num, a.den * b.den);
 }
 
-fn div(a: Rational, b: Rational) -> Result[Rational] {
+fn div(a: Rational, b: Rational) -> [] Result[Rational] {
     if b.num == 0 {
         return Result::Err(Error::DivideByZero);
     }
     return rational(a.num * b.den, a.den * b.num);
 }
 
-fn compare(a: Rational, b: Rational) -> Ordering {
+fn compare(a: Rational, b: Rational) -> [] Ordering {
     // Denominators are positive by construction, so cross-multiplying keeps
     // the direction of the comparison.
     let left = a.num * b.den;
@@ -163,7 +163,7 @@ fn compare(a: Rational, b: Rational) -> Ordering {
 
 // --------------------------------------------------------------- printing ---
 
-fn print_rational(r: Rational) -> int {
+fn print_rational(r: Rational) -> [io] int {
     print_int(r.num);
     if r.den != 1 {
         putchar(47);
@@ -172,21 +172,21 @@ fn print_rational(r: Rational) -> int {
     return 0;
 }
 
-fn print_error(e: Error) -> int {
+fn print_error(e: Error) -> [io] int {
     match e {
         Error::DivideByZero => { return putchar(68); }
         Error::ZeroDenominator => { return putchar(90); }
     }
 }
 
-fn print_result(r: Result[Rational]) -> int {
+fn print_result(r: Result[Rational]) -> [io] int {
     match r {
         Result::Ok(value) => { return print_rational(value); }
         Result::Err(e) => { return print_error(e); }
     }
 }
 
-fn print_ordering(o: Ordering) -> int {
+fn print_ordering(o: Ordering) -> [io] int {
     match o {
         Ordering::Less => { return putchar(60); }
         Ordering::Equal => { return putchar(61); }
@@ -196,16 +196,16 @@ fn print_ordering(o: Ordering) -> int {
 
 // -------------------------------------------------------------------- demo ---
 
-fn zero() -> Rational {
+fn zero() -> [] Rational {
     return unwrap_or(rational(0, 1), Rational { num: 0, den: 1 });
 }
 
-fn one() -> Rational {
+fn one() -> [] Rational {
     return unwrap_or(rational(1, 1), Rational { num: 0, den: 1 });
 }
 
 // 1/1 + 1/2 + ... + 1/n, computed exactly.
-fn harmonic(n: int) -> Result[Rational] {
+fn harmonic(n: int) -> [] Result[Rational] {
     var total = zero();
     var i = 1;
     while i <= n {
@@ -216,7 +216,7 @@ fn harmonic(n: int) -> Result[Rational] {
     return Result::Ok(total);
 }
 
-fn main() -> int {
+fn main() -> [io] int {
     // Normalisation: 6/8 is 3/4, and a negative denominator moves to the top.
     print_result(rational(6, 8));
     space();

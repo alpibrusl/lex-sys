@@ -1,6 +1,6 @@
 //~ ERROR can finish without returning a value
 
-fn main() -> int {
+fn main() -> [] int {
     if true {
         return 0;
     }

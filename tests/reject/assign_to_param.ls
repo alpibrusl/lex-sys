@@ -1,10 +1,10 @@
 //~ ERROR immutable
 
-fn twice(n: int) -> int {
+fn twice(n: int) -> [] int {
     n = n + n;
     return n;
 }
 
-fn main() -> int {
+fn main() -> [] int {
     return twice(2);
 }

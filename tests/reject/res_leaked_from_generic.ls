@@ -10,14 +10,14 @@
 
 res struct File { fd: int }
 
-fn open(fd: int) -> File {
+fn open(fd: int) -> [] File {
     return File { fd: fd };
 }
 
-fn sink[T](x: T) -> int {
+fn sink[T](x: T) -> [] int {
     return 0;
 }
 
-fn main() -> int {
+fn main() -> [] int {
     return sink(open(5));
 }

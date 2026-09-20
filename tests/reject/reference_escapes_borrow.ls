@@ -6,18 +6,18 @@
 
 res struct File { fd: int }
 
-fn close(f: File) -> int {
+fn close(f: File) -> [] int {
     let File { fd } = f;
     return fd;
 }
 
-fn escape[&q](f: File, fallback: &q File) -> &q File {
+fn escape[&q](f: File, fallback: &q File) -> [] &q File {
     borrow f as &r in {
         return r;
     }
     return fallback;
 }
 
-fn main() -> int {
+fn main() -> [] int {
     return 0;
 }

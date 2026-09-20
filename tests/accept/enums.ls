@@ -13,7 +13,7 @@ enum Shape {
     At(Point, int),
 }
 
-fn area(s: Shape) -> int {
+fn area(s: Shape) -> [] int {
     match s {
         Shape::Empty => { return 0; }
         Shape::Circle(r) => { return 3 * r * r; }
@@ -22,20 +22,20 @@ fn area(s: Shape) -> int {
     }
 }
 
-fn describe(s: Shape) -> int {
+fn describe(s: Shape) -> [] int {
     match s {
         Shape::Circle(_) => { return 99; }
         _ => { return 1; }
     }
 }
 
-fn digits(n: int) -> int {
+fn digits(n: int) -> [io] int {
     putchar(48 + n / 10);
     putchar(48 + n % 10);
     return n;
 }
 
-fn main() -> int {
+fn main() -> [io] int {
     digits(area(Shape::Empty));            // 00
     digits(area(Shape::Circle(2)));        // 12
     digits(area(Shape::Rect(4, 5)));       // 20

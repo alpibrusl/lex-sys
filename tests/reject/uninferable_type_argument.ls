@@ -3,11 +3,11 @@
 
 enum Option[T] { None, Some(T) }
 
-fn make[T]() -> Option[T] {
+fn make[T]() -> [] Option[T] {
     return Option::None;
 }
 
-fn main() -> int {
+fn main() -> [] int {
     let x = make();
     return 0;
 }

@@ -8,26 +8,26 @@ struct Pair[A, B] { first: A, second: B }
 
 enum Option[T] { None, Some(T) }
 
-fn identity[T](x: T) -> T {
+fn identity[T](x: T) -> [] T {
     return x;
 }
 
-fn swap[A, B](p: Pair[A, B]) -> Pair[B, A] {
+fn swap[A, B](p: Pair[A, B]) -> [] Pair[B, A] {
     return Pair { first: p.second, second: p.first };
 }
 
-fn unwrap_or[T](o: Option[T], fallback: T) -> T {
+fn unwrap_or[T](o: Option[T], fallback: T) -> [] T {
     match o {
         Option::None => { return fallback; }
         Option::Some(v) => { return v; }
     }
 }
 
-fn digit(n: int) -> int {
+fn digit(n: int) -> [io] int {
     return putchar(48 + n);
 }
 
-fn main() -> int {
+fn main() -> [io] int {
     digit(identity(7));                                  // 7
     let p = Pair { first: 1, second: true };
     let q = swap(p);                                     // Pair[bool, int]

@@ -12,7 +12,7 @@ struct Point {
 
 // A `val` struct: destructuring it is just a convenience, since nothing was
 // owed in the first place.
-fn sum(p: Point) -> int {
+fn sum(p: Point) -> [] int {
     let Point { x, y } = p;
     return x + y;
 }
@@ -27,13 +27,13 @@ struct Pair {
     right: File,
 }
 
-fn close(f: File) -> int {
+fn close(f: File) -> [] int {
     let File { fd } = f;
     return fd;
 }
 
 // Both parts are live after the `let`, and both are owed.
-fn close_both(p: Pair) -> int {
+fn close_both(p: Pair) -> [] int {
     let Pair { left, right } = p;
     return close(left) * 10 + close(right);
 }
@@ -44,12 +44,12 @@ struct Held[T] {
     value: T,
 }
 
-fn unwrap[T](h: Held[T]) -> T {
+fn unwrap[T](h: Held[T]) -> [] T {
     let Held { value } = h;
     return value;
 }
 
-fn main() -> int {
+fn main() -> [io] int {
     putchar(48 + sum(Point { x: 1, y: 2 }) - 0);
     putchar(48 + unwrap(Held { value: 4 }));
     putchar(48 + close_both(Pair { left: File { fd: 1 }, right: File { fd: 2 } }) / 10);

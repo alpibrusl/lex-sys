@@ -5,11 +5,11 @@
 
 res struct File { fd: int }
 
-fn open(fd: int) -> File {
+fn open(fd: int) -> [] File {
     return File { fd: fd };
 }
 
-fn main() -> int {
+fn main() -> [] int {
     if true {
         let f = open(1);
     }

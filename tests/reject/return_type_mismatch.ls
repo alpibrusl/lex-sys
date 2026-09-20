@@ -1,5 +1,5 @@
 //~ ERROR expected `int`, found `bool`
 
-fn main() -> int {
+fn main() -> [] int {
     return true;
 }

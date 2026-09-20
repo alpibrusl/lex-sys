@@ -8,16 +8,16 @@
 
 res struct File { fd: int }
 
-fn close(f: File) -> int {
+fn close(f: File) -> [] int {
     let File { fd } = f;
     return fd;
 }
 
-fn copy_into[&dst, &src where src <= dst](d: &dst File, s: &src File) -> int {
+fn copy_into[&dst, &src where src <= dst](d: &dst File, s: &src File) -> [] int {
     return 0;
 }
 
-fn unsatisfied(x: File, y: File) -> int {
+fn unsatisfied(x: File, y: File) -> [] int {
     borrow x as &outer in {
         borrow y as &inner in {
             let n = copy_into(inner, outer);
@@ -26,6 +26,6 @@ fn unsatisfied(x: File, y: File) -> int {
     return close(x) + close(y);
 }
 
-fn main() -> int {
+fn main() -> [] int {
     return 0;
 }

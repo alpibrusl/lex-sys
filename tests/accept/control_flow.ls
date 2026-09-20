@@ -2,7 +2,7 @@
 //~ STDOUT 01123A
 //~ EXIT 0
 
-fn fib(n: int) -> int {
+fn fib(n: int) -> [] int {
     if n < 2 {
         return n;
     } else {
@@ -10,7 +10,7 @@ fn fib(n: int) -> int {
     }
 }
 
-fn main() -> int {
+fn main() -> [io] int {
     var i = 0;
     while i < 5 {
         putchar(48 + fib(i));

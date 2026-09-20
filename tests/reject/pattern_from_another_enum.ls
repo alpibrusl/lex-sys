@@ -3,7 +3,7 @@
 enum A { One }
 enum B { Two }
 
-fn main() -> int {
+fn main() -> [] int {
     match A::One {
         B::Two => { return 0; }
     }

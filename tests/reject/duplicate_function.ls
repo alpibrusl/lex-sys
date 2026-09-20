@@ -1,13 +1,13 @@
 //~ ERROR defined twice
 
-fn f() -> int {
+fn f() -> [] int {
     return 1;
 }
 
-fn f() -> int {
+fn f() -> [] int {
     return 2;
 }
 
-fn main() -> int {
+fn main() -> [] int {
     return f();
 }

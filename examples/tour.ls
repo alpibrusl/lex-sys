@@ -12,21 +12,28 @@
 //~ STDOUT M2 linear: 4 7 9 5 6
 //~ STDOUT M2 borrow: 4 8 12
 //~ STDOUT M2 unique: 3 5 5
+//~ STDOUT M2 effects: 42
 //~ EXIT 0
 
 // ---------------------------------------------------------------- output ---
 // There are still no strings, so text is written a byte at a time. M3's
 // slices are what change this.
+//
+// Every signature below declares an effect row between `->` and the return
+// type. `[]` is how a function says it is pure; `[io]` says it reaches the
+// console. The row is *exact* -- declaring an effect you do not perform is
+// as much an error as performing one you did not declare -- and it is
+// transitive, so `main`'s row is the whole program's.
 
-fn newline() -> int {
+fn newline() -> [io] int {
     return putchar(10);
 }
 
-fn space() -> int {
+fn space() -> [io] int {
     return putchar(32);
 }
 
-fn print_nat(n: int) -> int {
+fn print_nat(n: int) -> [io] int {
     if n >= 10 {
         print_nat(n / 10);
     }
@@ -37,12 +44,12 @@ fn print_nat(n: int) -> int {
 // Functions, arithmetic, `if`/`else`, `while`, and `let`/`var` bindings.
 // `let` is immutable; parameters are too.
 
-fn label_m0() -> int {
+fn label_m0() -> [io] int {
     putchar(77); putchar(48); putchar(58);      // "M0:"
     return 0;
 }
 
-fn m0() -> int {
+fn m0() -> [io] int {
     label_m0();
     space(); print_nat(1 + 2 * 3);              // precedence: 7
     space(); print_nat(10 - 3 - 2);             // left-associative: 5
@@ -55,14 +62,14 @@ fn m0() -> int {
 // A comparison has a type. `if` and `while` require it, and there is no
 // conversion in either direction. `&&` and `||` short-circuit.
 
-fn digit(b: bool) -> int {
+fn digit(b: bool) -> [io] int {
     if b {
         return putchar(49);
     }
     return putchar(48);
 }
 
-fn m1_bool() -> int {
+fn m1_bool() -> [io] int {
     putchar(77); putchar(49); space();            // "M1 "   // "M1:"
     putchar(98); putchar(111); putchar(111); putchar(108); putchar(58); space();
     digit(2 < 3);
@@ -83,11 +90,11 @@ struct Vec2 {
     y: int,
 }
 
-fn length_squared(v: Vec2) -> int {
+fn length_squared(v: Vec2) -> [] int {
     return v.x * v.x + v.y * v.y;
 }
 
-fn m1_struct() -> int {
+fn m1_struct() -> [io] int {
     let v = Vec2 { x: 3, y: 4 };
     putchar(77); putchar(49); space();            // "M1 "
     putchar(115); putchar(116); putchar(114); putchar(117); putchar(99);
@@ -108,7 +115,7 @@ enum Shape {
     Rect(int, int),
 }
 
-fn area(s: Shape) -> int {
+fn area(s: Shape) -> [] int {
     match s {
         Shape::Empty => { return 0; }
         Shape::Circle(r) => { return 3 * r * r; }
@@ -116,7 +123,7 @@ fn area(s: Shape) -> int {
     }
 }
 
-fn m1_enum() -> int {
+fn m1_enum() -> [io] int {
     putchar(77); putchar(49); space();            // "M1 "
     putchar(101); putchar(110); putchar(117); putchar(109); putchar(58); space();
     print_nat(area(Shape::Empty));              // 0
@@ -134,14 +141,14 @@ enum Opt[T] {
     Some(T),
 }
 
-fn unwrap_or[T](o: Opt[T], fallback: T) -> T {
+fn unwrap_or[T](o: Opt[T], fallback: T) -> [] T {
     match o {
         Opt::None => { return fallback; }
         Opt::Some(value) => { return value; }
     }
 }
 
-fn m1_generic() -> int {
+fn m1_generic() -> [io] int {
     putchar(77); putchar(49); space();            // "M1 "
     putchar(103); putchar(101); putchar(110); putchar(101); putchar(114);
     putchar(105); putchar(99); putchar(58); space();
@@ -179,20 +186,20 @@ res struct Ticket {
     serial: int,
 }
 
-fn issue(serial: int) -> Ticket {
+fn issue(serial: int) -> [] Ticket {
     return Ticket { serial: serial };
 }
 
 // Takes ownership and hands it back, so the caller still owes one
 // consumption -- ownership moved twice, not shared once.
-fn stamp(t: Ticket) -> Ticket {
+fn stamp(t: Ticket) -> [] Ticket {
     let Ticket { serial } = t;
     return Ticket { serial: serial + 1 };
 }
 
 // The terminal consumer. Destructuring spends the whole and produces the
 // parts; these parts are `int`, which is `val`, so nothing is owed after.
-fn redeem(t: Ticket) -> int {
+fn redeem(t: Ticket) -> [] int {
     let Ticket { serial } = t;
     return serial;
 }
@@ -204,7 +211,7 @@ struct Booking {
     inbound: Ticket,
 }
 
-fn redeem_both(b: Booking) -> int {
+fn redeem_both(b: Booking) -> [] int {
     let Booking { outbound, inbound } = b;
     return redeem(outbound) + redeem(inbound);
 }
@@ -212,14 +219,14 @@ fn redeem_both(b: Booking) -> int {
 // Both paths consume, so they agree about what is live at the merge point.
 // An `if` whose `else` did not consume is refused rather than fixed up with a
 // runtime drop flag -- see `tests/reject/branches_disagree.ls`.
-fn redeem_either(t: Ticket, as_is: bool) -> int {
+fn redeem_either(t: Ticket, as_is: bool) -> [] int {
     if as_is {
         return redeem(t);
     }
     return redeem(stamp(t));
 }
 
-fn m2_linear() -> int {
+fn m2_linear() -> [io] int {
     putchar(77); putchar(50); space();          // "M2 "
     putchar(108); putchar(105); putchar(110); putchar(101); putchar(97);
     putchar(114); putchar(58); space();         // "linear: "
@@ -253,17 +260,17 @@ fn m2_linear() -> int {
 // Region-polymorphic, with the region written (§5.1). At a call site the
 // parameter is instantiated with the caller's region: one name, one
 // assignment, nothing that can fail to terminate.
-fn serial_of[&r](t: &r Ticket) -> int {
+fn serial_of[&r](t: &r Ticket) -> [] int {
     return t.serial;
 }
 
 // `src <= dst` says `dst` outlives `src` (§5.2). Checking it is a walk up the
 // stack of enclosing blocks -- O(depth), no fixpoint, total.
-fn later_of[&dst, &src where src <= dst](a: &dst Ticket, b: &src Ticket) -> int {
+fn later_of[&dst, &src where src <= dst](a: &dst Ticket, b: &src Ticket) -> [] int {
     return serial_of(a) + serial_of(b);
 }
 
-fn m2_borrow() -> int {
+fn m2_borrow() -> [io] int {
     putchar(77); putchar(50); space();          // "M2 "
     putchar(98); putchar(111); putchar(114); putchar(114); putchar(111);
     putchar(119); putchar(58); space();         // "borrow: "
@@ -316,12 +323,12 @@ struct Meter {
     step: int,
 }
 
-fn advance[&r](m: &!r Meter) -> int {
+fn advance[&r](m: &!r Meter) -> [] int {
     m.reading = m.reading + m.step;
     return m.reading;
 }
 
-fn m2_unique() -> int {
+fn m2_unique() -> [io] int {
     putchar(77); putchar(50); space();          // "M2 "
     putchar(117); putchar(110); putchar(105); putchar(113); putchar(117);
     putchar(101); putchar(58); space();         // "unique: "
@@ -340,7 +347,46 @@ fn m2_unique() -> int {
     return newline();
 }
 
-fn main() -> int {
+// -------------------------------------------------------- M2: effects ----
+// An effect row is a canonically ordered *set* of labels -- no duplicates,
+// no row variables. Two operations are needed and only two: union, to work
+// out what a body performs, and subset, to check that against what it
+// declared. Both are linear in a small, statically bounded number of labels.
+//
+// Rows are declared at boundaries and inferred only inside a body, where
+// there is nothing to infer but a fold over the calls. Whole-program effect
+// inference is exactly the non-local analysis the totality commitment
+// forbids, and an inferred row is a contract nobody wrote that everybody
+// depends on.
+//
+// There is no registry of legal labels and none is needed. Every `io` here
+// traces back to `putchar`, the one builtin that performs it; a label with
+// nothing underneath it can never appear in an exact row, so it is refused
+// the moment it is written.
+
+// Pure, and says so. A reader can act on that -- and so can the checker,
+// which is what makes `examples {}` blocks runnable at check time in Lex.
+fn triple(n: int) -> [] int {
+    return n * 3;
+}
+
+// Performs `io`, because `print_nat` does. Nothing else about the body
+// matters to the row.
+fn show(n: int) -> [io] int {
+    return print_nat(n);
+}
+
+fn m2_effects() -> [io] int {
+    putchar(77); putchar(50); space();          // "M2 "
+    putchar(101); putchar(102); putchar(102); putchar(101); putchar(99);
+    putchar(116); putchar(115); putchar(58); space();   // "effects: "
+
+    // A pure call inside an effectful body adds nothing to the row.
+    show(triple(14));
+    return newline();
+}
+
+fn main() -> [io] int {
     m0();
     m1_bool();
     m1_struct();
@@ -349,5 +395,6 @@ fn main() -> int {
     m2_linear();
     m2_borrow();
     m2_unique();
+    m2_effects();
     return 0;
 }

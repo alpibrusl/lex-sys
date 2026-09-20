@@ -9,16 +9,16 @@
 
 res struct File { fd: int }
 
-fn close(f: File) -> int {
+fn close(f: File) -> [] int {
     let File { fd } = f;
     return fd;
 }
 
-fn same[&p](a: &p File, b: &p File) -> int {
+fn same[&p](a: &p File, b: &p File) -> [] int {
     return 0;
 }
 
-fn unrelated(x: File, y: File) -> int {
+fn unrelated(x: File, y: File) -> [] int {
     borrow x as &a in {
         borrow y as &b in {
             let n = same(a, b);
@@ -27,6 +27,6 @@ fn unrelated(x: File, y: File) -> int {
     return close(x) + close(y);
 }
 
-fn main() -> int {
+fn main() -> [] int {
     return 0;
 }

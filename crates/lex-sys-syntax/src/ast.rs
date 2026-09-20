@@ -269,6 +269,15 @@ pub struct FnDecl {
     /// `(inner, outer)` and both name region parameters.
     pub outlives: Vec<(Symbol, Symbol)>,
     pub params: Vec<Param>,
+    /// The effect row, written between `->` and the return type
+    /// (`docs/linearity-and-effects.md` §7). Labels in the order written; the
+    /// checker canonicalises them, because *this* is the AST and the AST
+    /// keeps what was written.
+    ///
+    /// Always present: `[]` is how a signature says pure, and §7.2 requires
+    /// every signature to declare its row. An absent row would be an
+    /// inferred one, which is the thing §7.2 exists to refuse.
+    pub effects: Vec<Symbol>,
     pub ret: TypeId,
     pub body: Block,
 }

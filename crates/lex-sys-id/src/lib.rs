@@ -102,6 +102,10 @@ mod tag {
     /// already checks — and a `val` that was not true never reaches here.
     pub const MODE_VAL: u8 = 0x62;
     pub const MODE_RES: u8 = 0x63;
+    /// An effect row (`docs/linearity-and-effects.md` §7.1). Sorted and
+    /// deduplicated before it is encoded, which is what "a canonical order
+    /// makes an effect row hashable" means in bytes.
+    pub const EFFECTS: u8 = 0x64;
 
     /// The tag for a declared mode. Written out rather than cast from the
     /// enum, so adding a mode cannot silently renumber the others.
@@ -357,6 +361,18 @@ fn hash_signature(ast: &Ast, decl: &FnDecl, type_ids: &HashMap<Symbol, Hash>) ->
         };
         encoder.u32(position(inner));
         encoder.u32(position(outer));
+    }
+    // The row is what a caller depends on as much as the types are: `[]`
+    // means the call is pure and `[io]` means it is not, and a caller's own
+    // row has to contain it. Sorted here rather than trusted, so two
+    // spellings of one set are one signature.
+    encoder.tag(tag::EFFECTS);
+    let mut effects: Vec<&str> = decl.effects.iter().map(|e| ast.name_of(*e)).collect();
+    effects.sort_unstable();
+    effects.dedup();
+    encoder.len(effects.len());
+    for label in effects {
+        encoder.str(label);
     }
     encoder.len(decl.params.len());
     for param in &decl.params {
@@ -707,8 +723,8 @@ mod tests {
 
     #[test]
     fn formatting_and_comments_do_not_reach_the_hash() {
-        let a = "fn f(n: int) -> int { return n + 1; }";
-        let b = "fn   f( n : int )  ->  int {\n    // add one\n    return n + 1;\n}\n";
+        let a = "fn f(n: int) -> [] int { return n + 1; }";
+        let b = "fn   f( n : int )  -> [] int {\n    // add one\n    return n + 1;\n}\n";
         assert_eq!(sig(a, "f"), sig(b, "f"));
         assert_eq!(body(a, "f"), body(b, "f"));
     }
@@ -716,25 +732,25 @@ mod tests {
     #[test]
     fn redundant_parentheses_do_not_reach_the_hash() {
         assert_eq!(
-            body("fn f() -> int { return 1 + 2 * 3; }", "f"),
-            body("fn f() -> int { return (1 + ((2 * 3))); }", "f")
+            body("fn f() -> [] int { return 1 + 2 * 3; }", "f"),
+            body("fn f() -> [] int { return (1 + ((2 * 3))); }", "f")
         );
     }
 
     #[test]
     fn literal_spelling_does_not_reach_the_hash() {
         assert_eq!(
-            body("fn f() -> int { return 1000; }", "f"),
-            body("fn f() -> int { return 1_000; }", "f")
+            body("fn f() -> [] int { return 1000; }", "f"),
+            body("fn f() -> [] int { return 1_000; }", "f")
         );
     }
 
     #[test]
     fn a_unit_does_not_depend_on_its_neighbours() {
         // Same function, different company, different order.
-        let alone = "fn f(n: int) -> int { return n; }";
-        let crowded = "fn before() -> int { return 0; } \
-                       fn f(n: int) -> int { return n; } \
+        let alone = "fn f(n: int) -> [] int { return n; }";
+        let crowded = "fn before() -> [] int { return 0; } \
+                       fn f(n: int) -> [] int { return n; } \
                        struct Unrelated { x: int }";
         assert_eq!(sig(alone, "f"), sig(crowded, "f"));
         assert_eq!(body(alone, "f"), body(crowded, "f"));
@@ -744,8 +760,8 @@ mod tests {
     fn interner_indices_do_not_reach_the_hash() {
         // `zzz` is mentioned first in one file and not at all in the other, so
         // every Symbol index shifts. Hashing the index would move `f`.
-        let a = "fn zzz() -> int { return 0; } fn f(n: int) -> int { return n; }";
-        let b = "fn f(n: int) -> int { return n; }";
+        let a = "fn zzz() -> [] int { return 0; } fn f(n: int) -> [] int { return n; }";
+        let b = "fn f(n: int) -> [] int { return n; }";
         assert_eq!(sig(a, "f"), sig(b, "f"));
         assert_eq!(body(a, "f"), body(b, "f"));
     }
@@ -753,15 +769,15 @@ mod tests {
     #[test]
     fn renaming_a_local_does_not_change_the_body() {
         assert_eq!(
-            body("fn f(n: int) -> int { let doubled = n * 2; return doubled; }", "f"),
-            body("fn f(n: int) -> int { let d = n * 2; return d; }", "f")
+            body("fn f(n: int) -> [] int { let doubled = n * 2; return doubled; }", "f"),
+            body("fn f(n: int) -> [] int { let d = n * 2; return d; }", "f")
         );
     }
 
     #[test]
     fn renaming_a_parameter_changes_neither_identity() {
-        let a = "fn f(value: int) -> int { return value + 1; }";
-        let b = "fn f(other: int) -> int { return other + 1; }";
+        let a = "fn f(value: int) -> [] int { return value + 1; }";
+        let b = "fn f(other: int) -> [] int { return other + 1; }";
         assert_eq!(sig(a, "f"), sig(b, "f"));
         assert_eq!(body(a, "f"), body(b, "f"));
     }
@@ -769,12 +785,12 @@ mod tests {
     #[test]
     fn renaming_a_type_parameter_changes_nothing() {
         assert_eq!(
-            sig("fn f[T](x: T) -> T { return x; }", "f"),
-            sig("fn f[U](x: U) -> U { return x; }", "f")
+            sig("fn f[T](x: T) -> [] T { return x; }", "f"),
+            sig("fn f[U](x: U) -> [] U { return x; }", "f")
         );
         assert_eq!(
-            body("fn f[T](x: T) -> T { return x; }", "f"),
-            body("fn f[U](x: U) -> U { return x; }", "f")
+            body("fn f[T](x: T) -> [] T { return x; }", "f"),
+            body("fn f[U](x: U) -> [] U { return x; }", "f")
         );
     }
 
@@ -783,11 +799,11 @@ mod tests {
         let e = "enum E { A(int) } ";
         assert_eq!(
             body(
-                &format!("{e}fn f(v: E) -> int {{ match v {{ E::A(x) => {{ return x; }} }} }}"),
+                &format!("{e}fn f(v: E) -> [] int {{ match v {{ E::A(x) => {{ return x; }} }} }}"),
                 "f"
             ),
             body(
-                &format!("{e}fn f(v: E) -> int {{ match v {{ E::A(y) => {{ return y; }} }} }}"),
+                &format!("{e}fn f(v: E) -> [] int {{ match v {{ E::A(y) => {{ return y; }} }} }}"),
                 "f"
             )
         );
@@ -798,28 +814,28 @@ mod tests {
     #[test]
     fn a_different_operator_is_a_different_body() {
         assert_ne!(
-            body("fn f(a: int, b: int) -> int { return a + b; }", "f"),
-            body("fn f(a: int, b: int) -> int { return a - b; }", "f")
+            body("fn f(a: int, b: int) -> [] int { return a + b; }", "f"),
+            body("fn f(a: int, b: int) -> [] int { return a - b; }", "f")
         );
     }
 
     #[test]
     fn swapping_two_parameters_changes_the_signature() {
         assert_ne!(
-            sig("fn f(a: int, b: bool) -> int { return a; }", "f"),
-            sig("fn f(a: bool, b: int) -> int { return 0; }", "f")
+            sig("fn f(a: int, b: bool) -> [] int { return a; }", "f"),
+            sig("fn f(a: bool, b: int) -> [] int { return 0; }", "f")
         );
     }
 
     #[test]
     fn a_shadowed_binding_resolves_to_the_inner_one() {
         // Both read the *inner* `x`, so they agree...
-        let inner_a = "fn f() -> int { let x = 1; if true { let x = 2; return x; } return 0; }";
-        let inner_b = "fn f() -> int { let y = 1; if true { let x = 2; return x; } return 0; }";
+        let inner_a = "fn f() -> [] int { let x = 1; if true { let x = 2; return x; } return 0; }";
+        let inner_b = "fn f() -> [] int { let y = 1; if true { let x = 2; return x; } return 0; }";
         assert_eq!(body(inner_a, "f"), body(inner_b, "f"));
 
         // ...and reading the outer one instead is a different program.
-        let outer = "fn f() -> int { let x = 1; if true { let y = 2; return x; } return 0; }";
+        let outer = "fn f() -> [] int { let x = 1; if true { let y = 2; return x; } return 0; }";
         assert_ne!(body(inner_a, "f"), body(outer, "f"));
     }
 
@@ -839,8 +855,8 @@ mod tests {
 
     #[test]
     fn rewriting_a_body_leaves_its_signature_alone() {
-        let slow = "fn double(n: int) -> int { return n + n; }";
-        let fast = "fn double(n: int) -> int { return n * 2; }";
+        let slow = "fn double(n: int) -> [] int { return n + n; }";
+        let fast = "fn double(n: int) -> [] int { return n * 2; }";
         assert_eq!(sig(slow, "double"), sig(fast, "double"));
         assert_ne!(body(slow, "double"), body(fast, "double"));
     }
@@ -849,22 +865,23 @@ mod tests {
     fn a_callers_body_survives_a_callees_rewrite() {
         // The whole point of the split: only a change a caller could observe
         // propagates to the caller.
-        let caller = "fn use_it() -> int { return double(21); } ";
-        let slow = format!("{caller}fn double(n: int) -> int {{ return n + n; }}");
-        let fast = format!("{caller}fn double(n: int) -> int {{ return n * 2; }}");
+        let caller = "fn use_it() -> [] int { return double(21); } ";
+        let slow = format!("{caller}fn double(n: int) -> [] int {{ return n + n; }}");
+        let fast = format!("{caller}fn double(n: int) -> [] int {{ return n * 2; }}");
         assert_eq!(body(&slow, "use_it"), body(&fast, "use_it"));
         assert_ne!(body(&slow, "double"), body(&fast, "double"));
     }
 
     #[test]
     fn a_callers_body_changes_when_the_callee_signature_does() {
-        let caller = "fn use_it() -> int { return f(1); } ";
-        let a = format!("{caller}fn f(n: int) -> int {{ return n; }}");
-        let b = format!("{caller}fn f(n: int) -> int {{ return n; }} struct Unused {{ x: int }}");
+        let caller = "fn use_it() -> [] int { return f(1); } ";
+        let a = format!("{caller}fn f(n: int) -> [] int {{ return n; }}");
+        let b =
+            format!("{caller}fn f(n: int) -> [] int {{ return n; }} struct Unused {{ x: int }}");
         assert_eq!(body(&a, "use_it"), body(&b, "use_it"));
 
         // Changing the callee's *type* is observable to the caller.
-        let changed = format!("{caller}fn f(n: bool) -> int {{ return 0; }}");
+        let changed = format!("{caller}fn f(n: bool) -> [] int {{ return 0; }}");
         assert_ne!(body(&a, "use_it"), body(&changed, "use_it"));
     }
 
@@ -872,8 +889,8 @@ mod tests {
     fn mutual_recursion_terminates() {
         // Neither signature depends on a body, so the graph is acyclic even
         // though the source is not.
-        let src = "fn even(n: int) -> bool { if n == 0 { return true; } return odd(n - 1); } \
-                   fn odd(n: int) -> bool { if n == 0 { return false; } return even(n - 1); }";
+        let src = "fn even(n: int) -> [] bool { if n == 0 { return true; } return odd(n - 1); } \
+                   fn odd(n: int) -> [] bool { if n == 0 { return false; } return even(n - 1); }";
         let identities = ids(src);
         assert_ne!(
             identities.function("even").unwrap().body,
@@ -883,8 +900,8 @@ mod tests {
 
     #[test]
     fn a_signature_follows_the_types_it_mentions() {
-        let a = "struct P { x: int } fn f(p: P) -> int { return p.x; }";
-        let b = "struct P { x: bool } fn f(p: P) -> int { return 0; }";
+        let a = "struct P { x: int } fn f(p: P) -> [] int { return p.x; }";
+        let b = "struct P { x: bool } fn f(p: P) -> [] int { return 0; }";
         assert_ne!(sig(a, "f"), sig(b, "f"));
     }
 
@@ -914,8 +931,8 @@ mod tests {
     #[test]
     fn destructuring_is_its_own_statement() {
         assert_ne!(
-            body("struct P { x: int } fn f(p: P) -> int { let P { x } = p; return x; }", "f"),
-            body("struct P { x: int } fn f(p: P) -> int { let x = p.x; return x; }", "f")
+            body("struct P { x: int } fn f(p: P) -> [] int { let P { x } = p; return x; }", "f"),
+            body("struct P { x: int } fn f(p: P) -> [] int { let x = p.x; return x; }", "f")
         );
     }
 
@@ -928,9 +945,9 @@ mod tests {
         // `docs/canonical-ast.md` §8 records both as open rather than
         // pretending otherwise.
         let written = "struct P { x: int, y: int } \
-                 fn f(p: P) -> int { let P { x, y } = p; return x; }";
+                 fn f(p: P) -> [] int { let P { x, y } = p; return x; }";
         let reordered = "struct P { x: int, y: int } \
-                 fn f(p: P) -> int { let P { y, x } = p; return x; }";
+                 fn f(p: P) -> [] int { let P { y, x } = p; return x; }";
         assert_ne!(body(written, "f"), body(reordered, "f"));
     }
 
@@ -941,32 +958,32 @@ mod tests {
         // The same argument as a type parameter: no caller can tell `r` from
         // `q`, so the two signatures are one.
         assert_eq!(
-            sig("fn len[&r](s: &r int) -> int { return 0; }", "len"),
-            sig("fn len[&q](s: &q int) -> int { return 0; }", "len")
+            sig("fn len[&r](s: &r int) -> [] int { return 0; }", "len"),
+            sig("fn len[&q](s: &q int) -> [] int { return 0; }", "len")
         );
     }
 
     #[test]
     fn a_reference_is_not_its_referent() {
         assert_ne!(
-            sig("fn f(s: &r int) -> int { return 0; }", "f"),
-            sig("fn f(s: int) -> int { return 0; }", "f")
+            sig("fn f(s: &r int) -> [] int { return 0; }", "f"),
+            sig("fn f(s: int) -> [] int { return 0; }", "f")
         );
     }
 
     #[test]
     fn uniqueness_is_part_of_a_signature() {
         assert_ne!(
-            sig("fn f[&r](s: &r int) -> int { return 0; }", "f"),
-            sig("fn f[&r](s: &!r int) -> int { return 0; }", "f")
+            sig("fn f[&r](s: &r int) -> [] int { return 0; }", "f"),
+            sig("fn f[&r](s: &!r int) -> [] int { return 0; }", "f")
         );
     }
 
     #[test]
     fn which_region_a_parameter_names_is_part_of_a_signature() {
         assert_ne!(
-            sig("fn f[&a, &b](x: &a int, y: &b int) -> int { return 0; }", "f"),
-            sig("fn f[&a, &b](x: &a int, y: &a int) -> int { return 0; }", "f")
+            sig("fn f[&a, &b](x: &a int, y: &b int) -> [] int { return 0; }", "f"),
+            sig("fn f[&a, &b](x: &a int, y: &a int) -> [] int { return 0; }", "f")
         );
     }
 
@@ -975,8 +992,8 @@ mod tests {
         // It is an obligation on every caller, so it is exactly the kind of
         // thing `SigId` exists to cover.
         assert_ne!(
-            sig("fn f[&a, &b](x: &a int, y: &b int) -> int { return 0; }", "f"),
-            sig("fn f[&a, &b where b <= a](x: &a int, y: &b int) -> int { return 0; }", "f")
+            sig("fn f[&a, &b](x: &a int, y: &b int) -> [] int { return 0; }", "f"),
+            sig("fn f[&a, &b where b <= a](x: &a int, y: &b int) -> [] int { return 0; }", "f")
         );
     }
 
@@ -984,46 +1001,100 @@ mod tests {
     fn a_borrow_blocks_region_name_does_not_reach_the_body_hash() {
         // Positional inside a body too, like any other binder.
         assert_eq!(
-            body("fn f(x: int) -> int { borrow x as &r in { return 0; } return 1; }", "f"),
-            body("fn f(x: int) -> int { borrow x as &q in { return 0; } return 1; }", "f")
+            body("fn f(x: int) -> [] int { borrow x as &r in { return 0; } return 1; }", "f"),
+            body("fn f(x: int) -> [] int { borrow x as &q in { return 0; } return 1; }", "f")
         );
     }
 
     #[test]
     fn what_is_borrowed_does_reach_the_body_hash() {
         assert_ne!(
-            body("fn f(x: int, y: int) -> int { borrow x as &r in { return 0; } return 1; }", "f"),
-            body("fn f(x: int, y: int) -> int { borrow y as &r in { return 0; } return 1; }", "f")
+            body(
+                "fn f(x: int, y: int) -> [] int { borrow x as &r in { return 0; } return 1; }",
+                "f"
+            ),
+            body(
+                "fn f(x: int, y: int) -> [] int { borrow y as &r in { return 0; } return 1; }",
+                "f"
+            )
         );
     }
 
     #[test]
     fn a_shared_borrow_is_not_a_unique_one() {
         assert_ne!(
-            body("fn f(x: int) -> int { borrow x as &r in { return 0; } return 1; }", "f"),
-            body("fn f(x: int) -> int { borrow mut x as &!r in { return 0; } return 1; }", "f")
+            body("fn f(x: int) -> [] int { borrow x as &r in { return 0; } return 1; }", "f"),
+            body("fn f(x: int) -> [] int { borrow mut x as &!r in { return 0; } return 1; }", "f")
         );
     }
 
     #[test]
     fn an_assignments_place_reaches_the_body_hash() {
         assert_ne!(
-            body("struct P { x: int, y: int } fn f(r: P) -> int { r.x = 1; return 0; }", "f"),
-            body("struct P { x: int, y: int } fn f(r: P) -> int { r.y = 1; return 0; }", "f")
+            body("struct P { x: int, y: int } fn f(r: P) -> [] int { r.x = 1; return 0; }", "f"),
+            body("struct P { x: int, y: int } fn f(r: P) -> [] int { r.y = 1; return 0; }", "f")
         );
     }
 
     #[test]
     fn writing_through_a_reference_is_not_writing_a_local() {
         assert_ne!(
-            body("struct P { x: int } fn f(r: P) -> int { r.x = 1; return 0; }", "f"),
-            body("struct P { x: int } fn f(r: P) -> int { r = P { x: 1 }; return 0; }", "f")
+            body("struct P { x: int } fn f(r: P) -> [] int { r.x = 1; return 0; }", "f"),
+            body("struct P { x: int } fn f(r: P) -> [] int { r = P { x: 1 }; return 0; }", "f")
+        );
+    }
+
+    // ---- effect rows (`docs/linearity-and-effects.md` §7) ---------------
+
+    #[test]
+    fn a_row_is_part_of_a_signature() {
+        // A caller depends on it as much as on the types: `[]` means the call
+        // is pure and `[io]` means the caller's own row has to contain it.
+        assert_ne!(
+            sig("fn f() -> [] int { return 0; }", "f"),
+            sig("fn f() -> [io] int { return putchar(0); }", "f")
+        );
+    }
+
+    #[test]
+    fn a_rows_written_order_does_not_reach_the_hash() {
+        // §7.1: a *set*, canonically ordered. Two spellings of one set are
+        // one signature, which is what makes the row hashable at all.
+        assert_eq!(
+            sig("fn f() -> [fs, io] int { return 0; }", "f"),
+            sig("fn f() -> [io, fs] int { return 0; }", "f")
+        );
+    }
+
+    #[test]
+    fn a_duplicate_label_does_not_reach_the_hash() {
+        assert_eq!(
+            sig("fn f() -> [io] int { return 0; }", "f"),
+            sig("fn f() -> [io, io] int { return 0; }", "f")
+        );
+    }
+
+    #[test]
+    fn a_wider_row_is_a_different_signature() {
+        assert_ne!(
+            sig("fn f() -> [io] int { return 0; }", "f"),
+            sig("fn f() -> [fs, io] int { return 0; }", "f")
+        );
+    }
+
+    #[test]
+    fn a_row_does_not_reach_the_body_hash() {
+        // The row is a contract, so it lives in `SigId`. A body that did not
+        // change has not changed.
+        assert_eq!(
+            body("fn f() -> [] int { return 1 + 1; }", "f"),
+            body("fn f() -> [io] int { return 1 + 1; }", "f")
         );
     }
 
     #[test]
     fn the_domains_keep_the_three_kinds_apart() {
-        let identities = ids("fn f() -> int { return 0; } struct S { x: int }");
+        let identities = ids("fn f() -> [] int { return 0; } struct S { x: int }");
         let f = identities.function("f").unwrap();
         assert_ne!(f.sig, f.body);
         assert_ne!(f.sig, identities.type_decl("S").unwrap().id);
@@ -1031,7 +1102,7 @@ mod tests {
 
     #[test]
     fn hashes_render_as_hex() {
-        let hash = sig("fn f() -> int { return 0; }", "f");
+        let hash = sig("fn f() -> [] int { return 0; }", "f");
         assert_eq!(hash.to_hex().len(), 64);
         assert_eq!(hash.short().len(), 16);
         assert!(hash.to_hex().starts_with(&hash.short()));
@@ -1041,7 +1112,7 @@ mod tests {
     #[test]
     fn hashing_is_a_function_of_the_program_alone() {
         // Twice over the same text, two parses, same bytes out.
-        let src = "fn f(n: int) -> int { return n * n; }";
+        let src = "fn f(n: int) -> [] int { return n * n; }";
         assert_eq!(body(src, "f"), body(src, "f"));
     }
 }

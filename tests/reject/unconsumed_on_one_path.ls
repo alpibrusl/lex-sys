@@ -4,12 +4,12 @@
 
 res struct File { fd: int }
 
-fn close(f: File) -> int {
+fn close(f: File) -> [] int {
     let File { fd } = f;
     return fd;
 }
 
-fn sometimes(f: File, flag: bool) -> int {
+fn sometimes(f: File, flag: bool) -> [] int {
     if flag {
         let fd = close(f);
         return 0;
@@ -18,6 +18,6 @@ fn sometimes(f: File, flag: bool) -> int {
     }
 }
 
-fn main() -> int {
+fn main() -> [] int {
     return 0;
 }

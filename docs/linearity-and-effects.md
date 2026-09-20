@@ -6,15 +6,18 @@
 > now the specification the implementation is measured against; §12 lists what
 > is still open, and nothing there blocks the rest.
 >
-> **Implemented: §3 (modes), §4 (linearity) and §5 (borrowing) in full** —
-> the joins in §4.2, the back-edge rule in §4.3, both borrow modes, the
-> escape occurs-check of §5 rule 4, and the outlives stack of §5.2 with its
-> `where` clauses. Every §11 row for those sections is a fixture that runs.
+> **Implemented: §3 (modes), §4 (linearity), §5 (borrowing) in full, and
+> §7.1–7.3 (effect rows)** — the joins in §4.2, the back-edge rule in §4.3,
+> both borrow modes, the escape occurs-check of §5 rule 4, the outlives stack
+> of §5.2 with its `where` clauses, and rows that are canonical sets,
+> declared at every boundary, exact in both directions and part of `SigId`.
 >
-> **Not implemented: §6 onward** — arenas, effects, capabilities and the
-> escape hatches are still design, and that is the other half of the thesis:
-> ownership works, and nothing yet shows it is the *same* system as
-> effects.
+> **Not implemented: §6, §7.4, §8, §9** — arenas, narrowing, capabilities and
+> the escape hatches. Rows are checked but not yet *grounded in authority*:
+> `putchar` performs `io` because the compiler says so, not because the
+> caller holds an `Io`. §8 is what turns a row from a description into a
+> permission, and until it lands the unification §2 claims is only half
+> shown.
 >
 > Where the concrete syntax below differs from what was implemented, §5.3
 > says so and why. The syntax here was always illustrative (§1); the rules
@@ -608,6 +611,16 @@ fn quiet(io: &!i Io) -> [] int {
 }
 ```
 
+**Every signature writes its row, including `[]`.** An absent row would be an
+inferred one, and "inferred at the boundary" is the thing this section
+refuses — so purity is written down and visible rather than worked out.
+
+The grounding runs the other way from what a reader might expect: a label is
+not *declared* anywhere, it is **performed** by a primitive, and a label
+nothing performs can never appear in an exact row. So `[telepathy]` is
+refused by §7.3 without anyone maintaining a list of legal effect names, and
+adding a new effect means adding something that performs it.
+
 ### 7.3 A declared effect that is not performed is an error
 
 Not a warning. The row is exact or it is decoration, and an inexact row means
@@ -835,13 +848,17 @@ rest are the sections not yet implemented.
 | `reference_escapes_arena.ls` | Nothing mentioning the arena's region escapes it | 6 | |
 | `inner_region_stored_in_outer.ls` | An inner region's reference may not be stored outward | 6 | |
 | `arena_holds_res.ls` | `alloc` takes `val` data only | 6.1 | |
-| `undeclared_effect.ls` | A call's row must be a subset of the declared row | 7.2 | |
-| `effect_declared_not_performed.ls` | An over-wide row is an error | 7.3 | |
+| `undeclared_effect.ls` | A call's row must be a subset of the declared row | 7.2 | ✓ |
+| `effect_declared_not_performed.ls` | An over-wide row is an error | 7.3 | ✓ |
 | `effect_widened.ls` | A capability may be narrowed, never widened | 7.4 | |
 | `no_ambient_capability.ls` | There is no way to obtain a capability but to be given one | 8.2 | |
 | `capability_used_after_release.ls` | A capability is a resource | 8.3 | |
 | `capability_leaked.ls` | A capability must be released | 8.3 | |
 | `ffi_without_capability.ls` | A foreign call requires its `Ffi` capability | 8.4 | |
+
+§7 adds three more: `effect_not_propagated.ls` (a row is transitive),
+`ungrounded_effect_label.ls` (a label nothing performs) and
+`effect_row_required.ls` (the syntax).
 
 §5 adds eight must-reject fixtures beyond the table, for the rules §5.3
 describes and for the syntax: `region_not_in_scope.ls`,
@@ -871,7 +888,7 @@ that rejects everything is not a rule either:
 | `two_shared_borrows.ls` | Shared borrows nest | ✓ |
 | `nested_regions.ls` | An inner region reading an outer one | ✓ |
 | `arena_roundtrip.ls` | Allocate, walk, release in O(1) | |
-| `effect_exact.ls` | A row that is exactly what the body performs | |
+| `effect_exact.ls` | A row that is exactly what the body performs | ✓ |
 | `narrowed_capability.ls` | Attenuation, and a call that fits inside it | |
 | `threaded_io.ls` | `main` splitting `World` and threading `Io` down three frames | |
 

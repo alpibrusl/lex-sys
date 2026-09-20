@@ -17,11 +17,16 @@ defined behaviour, and a canonical content-addressable AST designed in from day 
 > outlives relation is a stack. That is §3, §4 and §5 of the now-settled
 > [`docs/linearity-and-effects.md`](docs/linearity-and-effects.md).
 >
-> **Effects and capabilities are not here yet** — §7 and §8, still design,
-> and they are the other half of the thesis: ownership works, and nothing
-> yet shows it is the *same* system as effects. There are also no strings,
-> no slices, no allocation and no FFI: those are M3. Do not mistake this for
-> a usable language yet.
+> **Effect rows work too.** Every signature declares one between `->` and
+> the return type, `[]` means pure, and the row is *exact* in both
+> directions — §7.1–7.3.
+>
+> **Capabilities are not here yet** (§8), and that is the gap that matters:
+> a row currently *describes* what a function does rather than *permitting*
+> it. `putchar` performs `io` because the compiler says so, not because the
+> caller was handed an `Io`. There are also no strings, no slices, no
+> allocation and no FFI: those are M3. Do not mistake this for a usable
+> language yet.
 
 ## What this is
 
@@ -98,6 +103,7 @@ cargo run -p lex-sys -- run examples/tour.ls
 # M2 linear: 4 7 9 5 6
 # M2 borrow: 4 8 12
 # M2 unique: 3 5 5
+# M2 effects: 42
 ```
 
 `examples/tour.ls` is the shortest honest answer to "what can this language
@@ -108,8 +114,8 @@ with a generic `Result[T]` threaded through every fallible operation.
 **What exists:** `int` and `bool`, functions and calls, arithmetic and
 comparison, `&&`/`||` with short-circuiting, `if`/`else`, `while`, `let`/`var`
 bindings, structs, enums with exhaustive `match`, generics over both,
-`res`/`val` modes with exactly-once linearity and destructuring `let`, and
-shared and unique borrows with lexical regions.
+`res`/`val` modes with exactly-once linearity and destructuring `let`,
+shared and unique borrows with lexical regions, and exact effect rows.
 
 ```
 res struct Ticket { serial: int }
@@ -142,6 +148,21 @@ nothing else may touch the value at all, not even a read, which is what makes
 ```
 fn advance[&r](m: &!r Meter) -> int { m.reading = m.reading + m.step; return m.reading; }
 ```
+
+Every signature declares what it does:
+
+```
+fn triple(n: int) -> [] int { return n * 3; }      // pure, and says so
+fn show(n: int) -> [io] int { return print_nat(n); }
+```
+
+A row is a canonically ordered **set** — `[io, io]` is `[io]`, `[fs, io]` and
+`[io, fs]` are one signature — so it hashes, which is what per-unit identity
+is made of. It is exact in both directions: performing an effect you did not
+declare and declaring one you never perform are both errors, because an
+inexact row means `[]` stops meaning pure. And there is no list of legal
+labels: every `io` traces back to a builtin that performs one, so a label
+with nothing underneath it is refused the moment it is written.
 
 There is **no borrow checker**. A region is a block, so a reference's validity
 is lexical rather than inferred: no non-lexical lifetimes, no variance, no
@@ -204,7 +225,7 @@ carry them exists now, while it is cheap.
 
 | Doc | What | Status |
 |---|---|---|
-| [`docs/linearity-and-effects.md`](docs/linearity-and-effects.md) | The M2 gate: linear ownership, capability-typed effects, how they unify, and 23 must-reject fixtures written out as the conformance suite | settled; §3–5 implemented in full, §6 on still design |
+| [`docs/linearity-and-effects.md`](docs/linearity-and-effects.md) | The M2 gate: linear ownership, capability-typed effects, how they unify, and 23 must-reject fixtures written out as the conformance suite | settled; §3–5 and §7.1–7.3 implemented, §6/§7.4/§8 still design |
 | [`docs/bootstrap.md`](docs/bootstrap.md) | What M0 settled: bootstrap host (Rust), extension (`.ls`), the M0 surface, what is scaffolding and what replaces it | written |
 | [`docs/canonical-ast.md`](docs/canonical-ast.md) | Canonicalisation rules and per-unit identity: what is hashed, and what a hash is allowed to change with | written, implemented |
 | `docs/memory-model.md` | Regions, escape, the escape hatches and their cost | not written (M2) |
@@ -224,7 +245,7 @@ M0–M3 with acceptance criteria, sequencing, risks and open decisions.
 |---|---|---|
 | **M0** — native hello world ([#3](https://github.com/alpibrusl/lex-sys/issues/3)) | Lexer, parser, AST, IR, Cranelift backend, a real executable | **done** — green on both targets |
 | **M1** — typed core | Type checker, `bool`, structs, ADTs with exhaustiveness, monomorphised generics. No linearity, no effects — deliberately | **done** |
-| **M2** — the actual thesis ([#2](https://github.com/alpibrusl/lex-sys/issues/2)) | Linear ownership, effect rows and capability-passing as **one** system | half done — ownership (§3–5) lands in full; effects and capabilities (§7–8) next |
+| **M2** — the actual thesis ([#2](https://github.com/alpibrusl/lex-sys/issues/2)) | Linear ownership, effect rows and capability-passing as **one** system | ownership (§3–5) and effect rows (§7.1–7.3) land; capabilities (§8) are what unify them |
 | **M3** — minimal but real | Slices and strings, arenas, libc FFI, settled overflow semantics, canonical printer, per-unit identity | started — per-unit identity landed |
 
 Deliberately excluded from "minimal": borrow checker, traits, `comptime`, own

@@ -199,8 +199,8 @@ fn division_by_zero_traps_rather_than_being_undefined() {
     let source = dir.join("divzero.ls");
     std::fs::write(
         &source,
-        "fn divide(a: int, b: int) -> int { return a / b; }\n\
-         fn main() -> int { return divide(1, 0); }\n",
+        "fn divide(a: int, b: int) -> [] int { return a / b; }\n\
+         fn main() -> [] int { return divide(1, 0); }\n",
     )
     .expect("a writable fixture");
     let exe = dir.join("divzero");
@@ -262,8 +262,8 @@ fn ids_are_stable_across_runs_and_survive_a_body_rewrite() {
     let rewritten = dir.join("rational.ls");
     let original = std::fs::read_to_string(&source).expect("a readable example");
     let patched = original.replace(
-        "fn abs(x: int) -> int {\n    if x < 0 {\n        return 0 - x;\n    }\n    return x;\n}",
-        "fn abs(x: int) -> int {\n    if x >= 0 {\n        return x;\n    }\n    return 0 - x;\n}",
+        "fn abs(x: int) -> [] int {\n    if x < 0 {\n        return 0 - x;\n    }\n    return x;\n}",
+        "fn abs(x: int) -> [] int {\n    if x >= 0 {\n        return x;\n    }\n    return 0 - x;\n}",
     );
     assert_ne!(patched, original, "the body rewrite should have applied");
     std::fs::write(&rewritten, patched).expect("a writable copy");

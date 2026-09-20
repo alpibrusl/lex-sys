@@ -10,7 +10,7 @@ struct Counter {
     n: int,
 }
 
-fn main() -> int {
+fn main() -> [] int {
     var c = Counter { n: 1 };
     borrow mut c as &!r in {
         let peek = c;
