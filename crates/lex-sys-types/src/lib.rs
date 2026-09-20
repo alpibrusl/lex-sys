@@ -51,6 +51,13 @@ pub enum Region {
     Param(u32),
     /// A region introduced by a `borrow` block, numbered by nesting depth.
     Block(u32),
+    /// The region a string literal's bytes live in (`docs/strings.md` §4).
+    ///
+    /// It outlives everything and nothing outlives it, because the data is
+    /// in the object file rather than in any frame. It is not writable in
+    /// source: the only way to get a reference into it is to write a
+    /// literal, so there is nothing to name.
+    Static,
     /// Unsolved, pending a call site.
     Var(RegionVar),
 }
@@ -58,6 +65,13 @@ pub enum Region {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Type {
     Int,
+    /// An 8-bit unsigned integer — *storage*, not arithmetic
+    /// (`docs/strings.md` §2).
+    ///
+    /// There is no `+` on it. `byte_of` and `int_of` convert, which is what
+    /// keeps `defined-behaviour.md` §8's deferral of unsigned arithmetic
+    /// intact: a type you cannot add to never asks whether adding traps.
+    Byte,
     Bool,
     /// The type of an expression that yields nothing, such as a call used as a
     /// statement. Not writable in source.
@@ -380,6 +394,7 @@ impl Unifier {
     pub fn display(&self, ty: &Type) -> String {
         match self.resolve(ty) {
             Type::Int => "int".to_owned(),
+            Type::Byte => "byte".to_owned(),
             Type::Bool => "bool".to_owned(),
             Type::Unit => "()".to_owned(),
             Type::Param(i) => {
@@ -416,6 +431,7 @@ impl Unifier {
             Region::Block(i) => {
                 self.region_block_names.get(i as usize).cloned().unwrap_or_else(|| format!("r{i}"))
             }
+            Region::Static => "static".to_owned(),
             Region::Var(v) => format!("?r{}", v.0),
         }
     }

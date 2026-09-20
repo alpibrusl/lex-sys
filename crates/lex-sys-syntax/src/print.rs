@@ -337,7 +337,7 @@ impl Printer<'_> {
                 self.ty(*inner)
             ),
             TypeExpr::Slice(inner) => format!("[{}]", self.ty(*inner)),
-            TypeExpr::Lit(text) => format!("\"{text}\""),
+            TypeExpr::Lit(text) => format!("\"{}\"", escape(text)),
         }
     }
 
@@ -394,7 +394,7 @@ impl Printer<'_> {
         match self.ast.expr(id) {
             Expr::Int(value) => value.to_string(),
             Expr::Bool(value) => value.to_string(),
-            Expr::Str(text) => format!("\"{text}\""),
+            Expr::Str(text) => format!("\"{}\"", escape(text)),
             Expr::Name(name) => self.name(*name).to_owned(),
             Expr::StructLit { name, fields } => {
                 let written: Vec<String> = fields
@@ -507,6 +507,28 @@ fn parenthesise(text: String, context: u8, own: u8) -> String {
     if own < context { format!("({text})") } else { text }
 }
 
+/// Put a literal's escapes back.
+///
+/// The AST holds a literal's *bytes*, with escapes already resolved
+/// (`canonical-ast.md` §3 keeps values, not spellings), so printing the
+/// text raw would put a real newline inside quotes — which does not
+/// reparse, because a literal may not span lines. The five escapes §4 of
+/// `docs/strings.md` admits are exactly the five that have to come back.
+fn escape(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\0' => out.push_str("\\0"),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
 fn mode_prefix(mode: Option<Mode>) -> &'static str {
     match mode {
         Some(Mode::Res) => "res ",
@@ -579,6 +601,18 @@ mod tests {
         // outer negation's operand is another negation, and `--(5)` lexes
         // as two minus signs because there is no `--` token.
         assert_eq!(printed_expr("-(-(5))"), "--(5)");
+    }
+
+    #[test]
+    fn a_literals_escapes_come_back() {
+        // The AST holds bytes, not spellings, so printing has to put the
+        // escapes back or the output does not reparse -- a literal may not
+        // span lines, and a raw newline inside quotes is exactly that.
+        assert_eq!(printed_expr("\"a\\nb\""), "\"a\\nb\"");
+        assert_eq!(printed_expr("\"tab\\there\""), "\"tab\\there\"");
+        assert_eq!(printed_expr("\"C:\\\\path\""), "\"C:\\\\path\"");
+        assert_eq!(printed_expr("\"say \\\"hi\\\"\""), "\"say \\\"hi\\\"\"");
+        assert_eq!(printed_expr("\"nul\\0end\""), "\"nul\\0end\"");
     }
 
     #[test]

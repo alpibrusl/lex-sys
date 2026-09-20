@@ -18,6 +18,7 @@
 //~ STDOUT M2 arena: 1 4 9 -> 14
 //~ STDOUT M3 arithmetic: 6 1
 //~ STDOUT M3 slice: 3 1 4 1 5 -> 14
+//~ STDOUT M3 string: hello (5 bytes, e is 101)
 //~ EXIT 0
 
 // ---------------------------------------------------------------- output ---
@@ -640,6 +641,60 @@ fn m3_slice[&i](io: &!i Io) -> [io] int {
     return newline(io);
 }
 
+// -------------------------------------------------------- M3: strings ----
+// The last thing M3 needed, and the one that took a design document before
+// it took code (`docs/strings.md`).
+//
+// A string is a run of bytes and claims **no encoding**. A validated type
+// would have to answer what an *invalid* one is, and every answer costs a
+// fallible constructor everywhere or a lie somewhere; bytes answer it by
+// not asking. Decoding is library work, over exactly this slice type.
+//
+// So `str` is not a type. A string is `&r [byte]` -- an ordinary slice,
+// therefore an ordinary reference -- and regions, the escape check, the
+// unique-to-shared coercion and `val` mode all came for free, the same way
+// they did for slices. A literal lives in `static`, which outlives
+// everything, and is *shared*: two occurrences of `"ok"` may be the same
+// bytes, so nothing may write through one.
+//
+// `byte` is **storage, not arithmetic**: no `+`, and `byte_of` / `int_of`
+// convert. That is what keeps `defined-behaviour.md` §8's deferral of
+// unsigned widths intact -- a type you cannot add to never asks whether
+// adding traps. `byte_of` traps outside 0..255 rather than truncating,
+// because truncation is the silently wrong answer §2.1 already refused.
+// `==` is allowed, because comparing storage is not arithmetic.
+
+fn write_all[&r, &i](io: &!i Io, s: &r [byte]) -> [io] int {
+    var n = 0;
+    while n < len(s) {
+        putchar(io, int_of(s[n]));
+        n = n + 1;
+    }
+    return len(s);
+}
+
+fn m3_string[&i](io: &!i Io) -> [io] int {
+    putchar(io, 77); putchar(io, 51); space(io);          // "M3 "
+    putchar(io, 115); putchar(io, 116); putchar(io, 114); putchar(io, 105);
+    putchar(io, 110); putchar(io, 103); putchar(io, 58); space(io);
+
+    let word = "hello";
+    write_all(io, word);
+
+    // `len` is the *byte* length: this design claims no encoding, so there
+    // are no characters to count.
+    space(io); putchar(io, 40);                           // " ("
+    print_nat(io, len(word));
+    space(io); write_all(io, "bytes,");
+
+    // Indexing yields a `byte`, which has to be widened to be printed --
+    // the conversion is where the range is checked, visibly.
+    space(io); write_all(io, "e is");
+    space(io); print_nat(io, int_of(word[1]));
+    putchar(io, 41);                                      // ")"
+    return newline(io);
+}
+
 fn main(world: World) -> [] int {
     // §8.2: the runtime hands over exactly one `World`, and `split` consumes
     // it. There is no other way to obtain a capability.
@@ -659,6 +714,7 @@ fn main(world: World) -> [] int {
             m2_arena(i);
             m3_arithmetic(i);
             m3_slice(i);
+            m3_string(i);
         }
     }
 

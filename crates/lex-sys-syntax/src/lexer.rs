@@ -164,10 +164,11 @@ pub fn tokenize(text: &str) -> Result<Vec<Token>, Diagnostic> {
 
         let start = i;
 
-        // A string literal. Deliberately austere: no escapes, no newlines.
-        // It names a library or a path at compile time and never becomes a
-        // value, so there is nothing an escape would buy that is not M3's
-        // job to provide properly.
+        // A string literal. Five escapes and no more (`docs/strings.md` §4):
+        // `\u` would be an encoding claim, which §1 declines to make, and
+        // `\x` is the bitwise escape hatch §2 is deferring. A backslash
+        // before anything else is refused where it is written rather than
+        // passed through as itself.
         if b == b'"' {
             i += 1;
             while i < bytes.len() && bytes[i] != b'"' {
@@ -176,6 +177,21 @@ pub fn tokenize(text: &str) -> Result<Vec<Token>, Diagnostic> {
                         "a string literal may not span lines",
                         Span::new(start as u32, i as u32),
                     ));
+                }
+                if bytes[i] == b'\\' {
+                    let Some(escape) = bytes.get(i + 1) else { break };
+                    if !matches!(escape, b'n' | b't' | b'\\' | b'"' | b'0') {
+                        let end = next_char_boundary(text, i + 1);
+                        return Err(Diagnostic::new(
+                            format!(
+                                "`\\{}` is not an escape; a string literal takes `\\n`, `\\t`, `\\\\`, `\\\"` and `\\0`",
+                                &text[i + 1..end]
+                            ),
+                            Span::new(i as u32, end as u32),
+                        ));
+                    }
+                    i += 2;
+                    continue;
                 }
                 i += 1;
             }

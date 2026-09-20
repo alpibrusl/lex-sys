@@ -167,6 +167,10 @@ that one, and each is enforced rather than merely intended.
   unchecked form and no release mode that removes the check: reading past
   the end of an allocation is the undefined behaviour §1 says this language
   does not have.
+* **`byte_of` traps outside 0..255** rather than truncating
+  (`strings.md` §2), and one unsigned comparison covers both ends, so
+  `byte_of(-1)` dies with `byte_of(256)`. `int_of` is always defined and
+  always lands in 0..255, which is why it widens unsigned.
 * **A slice's length is checked where it is made.** `alloc_slice[a](n, v)`
   traps on a negative `n`, and the byte count `n * stride` is a checked
   multiplication like any other (§2.1) — an overflowing length would
@@ -193,7 +197,10 @@ leaves in order, an enum is a tag leaf followed by the widest variant's —
 and where a value has to live in memory, each leaf takes 8 bytes. A
 reference is one leaf, a pointer; a *slice* is two, a pointer and a length,
 because `[T]` is the one referent whose size is not in its type. A slice's
-elements are contiguous, each one leaf-stride apart.
+elements are contiguous, each one *stride* apart — the leaf count times 8,
+except for `byte`, which is packed one per byte (`strings.md` §3). That is
+the only size in the language that is not a multiple of 8, and it is
+confined to `byte` so that a string is something C could read.
 
 This is deterministic, and the same compiler on the same source produces the
 same layout every time. **It is not yet a stability contract.** Nothing
@@ -239,10 +246,9 @@ that adds it, before the code that needs one:
 | Missing | What will need deciding |
 |---|---|
 | Shifts and bitwise operators | Shift amounts ≥ 64, and whether `>>` is arithmetic or logical (it will be arithmetic; `int` is signed) |
-| Unsigned integers and other widths | Conversion rules, and whether unsigned arithmetic also traps (it should) |
+| Unsigned integers and other widths | Conversion rules, and whether unsigned arithmetic also traps (it should). `byte` exists but has no arithmetic at all (`strings.md` §2), which is what lets this stay deferred |
 | Casts and conversions | Narrowing, and whether a lossy one traps or is refused |
 | Floating point | IEEE-754 semantics, NaN ordering, and whether the optimiser may reassociate (it may not) |
-| Strings | Encoding, and what an invalid one is |
 | Concurrency | Everything. There is none, and a memory model is the price of adding any |
 
 ---
@@ -255,6 +261,7 @@ Not by assertion. Every rule above is a fixture:
 |---|---|
 | Overflow traps | `crates/lex-sys/tests/conformance.rs` — builds a program and checks the process died by signal |
 | Indexing past a slice traps | same, for `xs[5]` and `xs[-1]` on a slice of 3 |
+| `byte_of` traps outside a byte | same, for `byte_of(256)` and `byte_of(-1)` |
 | Division by zero traps | same, and it predates this document |
 | Arena exhaustion traps | same |
 | Wrapping does not trap | `tests/accept/wrapping_arithmetic.ls` |

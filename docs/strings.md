@@ -1,11 +1,18 @@
 # Strings
 
-> **Status: design, not built.** This is the gating artifact for M3's last
-> item ([#1](https://github.com/alpibrusl/lex-sys/issues/1)), written before
-> the code the way `linearity-and-effects.md` was written before M2 — the
-> epic's own risk table names design churn as the top risk and "lock the
-> rules on paper first" as the mitigation, and that is the one call M2
-> demonstrably got right. §9 is the must-reject suite, stated in advance.
+> **Status: settled and built.** This was the gating artifact for M3's last
+> item ([#1](https://github.com/alpibrusl/lex-sys/issues/1)), written and
+> reviewed before the code the way `linearity-and-effects.md` was written
+> before M2. §9's must-reject suite was stated in advance and is now
+> enforced, fixture by fixture.
+>
+> **One thing changed on contact.** §4 said the static region had "nothing
+> to name" and so was not writable in source. Writing the first fixture
+> showed that this makes a literal impossible to *return* — `fn greeting()
+> -> [] &static [byte]` has nowhere to put the region — which is a basic
+> thing to want and nothing was buying the restriction. So `static` is
+> writable in a type, and reserved as a binder: it is the one region with a
+> name rather than a binder.
 
 Everything else in M3 is built: arenas, libc FFI, checked arithmetic, slices,
 the canonical printer, per-unit identity. Strings are what is left, and they
@@ -106,6 +113,12 @@ One row in the outlives relation (`Static` outlives all; nothing outlives
 reference into the static region never mentions a block, so it never escapes
 anything.
 
+**`static` is writable in a type and reserved as a binder.** `&static
+[byte]` is how a function says it hands back a literal; `fn f[&static]` and
+`&!static` are both refused, the first because the region is not a
+parameter anyone declares and the second because there is no unique
+reference into read-only data.
+
 String literals are **shared**, never unique: two occurrences of `"ok"` may
 be the same bytes, and a program that could write through one would be
 writing through both. `&static [byte]` it is.
@@ -205,6 +218,13 @@ a rule:
 | `bytes_to_c.ls` | A pointer and a length crossing to a C function that takes both |
 
 `examples/hello.ls` stops packing its greeting into two 64-bit words, which
-is the single clearest signal that this landed: that file has been carrying
-an M0 workaround since the first milestone, and it is the comment at the top
-of it that says so.
+is the single clearest signal that this landed: that file had been carrying
+an M0 workaround since the first milestone, and the comment at the top of it
+said so. It now writes `"Hello, world!\n"`.
+
+`examples/wordcount.ls` is the first program in the repo that is mostly text
+processing rather than demonstration: `wc` over an embedded document, with a
+whole-word search that is two slices compared a byte at a time — which is
+all a string comparison is when a string is bytes. It counts bytes and ASCII
+whitespace and says in its own header that it is not Unicode-aware, because
+§1 claims no encoding.
