@@ -8,7 +8,10 @@ defined behaviour, and a canonical content-addressable AST designed in from day 
 > `.ls` file to a real native executable, and CI proves it on **linux-x86_64
 > and darwin-aarch64**. The language has a type system: `int` and `bool`,
 > structs, enums with exhaustive pattern matching, and monomorphised generics.
-> Every declaration has a content hash (`lex-sys ids`).
+> Every declaration has a content hash (`lex-sys ids`), and `lex-sys print`
+renders a unit back in canonical form — the other direction of the same
+pipeline, checked by a test that round-trips every file in the repository
+and requires every hash to survive.
 >
 > **Ownership works, in full.** A type is `res` or `val`, a `res` value is
 > consumed exactly once on every path, and both borrow modes are in:
@@ -324,6 +327,7 @@ lex-sys build <file.ls> [-o <output>] [--emit exe|obj]
 lex-sys check <file.ls>     # refuse or say nothing
 lex-sys run   <file.ls>     # build, run, exit with the program's status
 lex-sys ids   <file.ls>     # each declaration's content hash
+lex-sys print <file.ls>     # the unit, rendered in canonical form
 ```
 
 Exit codes are semantic: `0` success, `1` the program was refused with a
@@ -383,7 +387,7 @@ M0–M3 with acceptance criteria, sequencing, risks and open decisions.
 | **M0** — native hello world ([#3](https://github.com/alpibrusl/lex-sys/issues/3)) | Lexer, parser, AST, IR, Cranelift backend, a real executable | **done** — green on both targets |
 | **M1** — typed core | Type checker, `bool`, structs, ADTs with exhaustiveness, monomorphised generics. No linearity, no effects — deliberately | **done** |
 | **M2** — the actual thesis ([#2](https://github.com/alpibrusl/lex-sys/issues/2)) | Linear ownership, effect rows and capability-passing as **one** system | **complete** — §3 through §8 of the design document, every must-reject fixture enforced |
-| **M3** — minimal but real | Slices and strings, arenas, libc FFI, settled overflow semantics, canonical printer, per-unit identity | started — per-unit identity, overflow semantics, arenas, libc FFI and slices are in; strings and the canonical printer remain |
+| **M3** — minimal but real | Slices and strings, arenas, libc FFI, settled overflow semantics, canonical printer, per-unit identity | started — per-unit identity, overflow semantics, arenas, libc FFI, slices and the canonical printer are in; strings remain |
 
 Deliberately excluded from "minimal": borrow checker, traits, `comptime`, own
 optimiser, incremental compilation, LSP, async. Each is "yes, later" — saying

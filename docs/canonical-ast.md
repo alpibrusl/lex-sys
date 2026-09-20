@@ -57,6 +57,40 @@ could be a hash of.
 
 ---
 
+## 2a. The printer is the other direction
+
+`lex-sys print <file>` renders a parsed unit back to text. It is the
+AST→text half of the same pipeline: a store that addresses code by hash
+needs a way to show a declaration it fetched, and that rendering has to be
+canonical or the display would depend on who stored it.
+
+Two contracts, both enforced by a test that walks every `.ls` file in the
+repository:
+
+* **Identity-preserving.** Parsing the output gives back the same `SigId`,
+  `BodyId` and `TypeId` for every declaration.
+* **Idempotent.** Printing the output again changes nothing.
+
+The printer is deliberately **not** a formatter. §3 below says comments never
+reach the AST, precisely so that formatting cannot change a hash — which
+means anything built on the AST cannot put them back, and a `fmt` that
+silently deleted every comment in a file would be a bad trade. Rendering a
+stored declaration, where there were no comments to lose, is the job this
+does.
+
+Writing it found two places where the canonical form is decided by the
+*grammar* rather than by the tree, both of which the round-trip test caught
+rather than review:
+
+* a struct literal in an `if`, `while` or `match` head has to keep its
+  parentheses, because its braces would otherwise be taken for the block —
+  and parentheses leave no node behind to remember that;
+* `-` immediately before an integer token is one literal rather than a
+  negation of one (which is how `-9223372036854775808` is writable at all),
+  so a negation *of* a literal has to stay visibly apart from one.
+
+---
+
 ## 3. What must not change a hash
 
 These are the properties the AST shape was built for, and each has a test:

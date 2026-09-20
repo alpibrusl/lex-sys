@@ -8,8 +8,10 @@
 pub mod ast;
 pub mod lexer;
 pub mod parser;
+pub mod print;
 pub mod span;
 
 pub use ast::Ast;
 pub use parser::parse;
+pub use print::print;
 pub use span::{Diagnostic, SourceFile, Span};

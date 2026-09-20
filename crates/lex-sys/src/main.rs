@@ -30,6 +30,7 @@ usage:
     lex-sys check <file.ls>
     lex-sys run   <file.ls>
     lex-sys ids   <file.ls>
+    lex-sys print <file.ls>
     lex-sys --version
 
 options:
@@ -38,6 +39,10 @@ options:
 
 `ids` prints each declaration's content hash: a signature and a body for
 every function, one identity for every type. See docs/canonical-ast.md.
+
+`print` renders the parsed unit in canonical form. It is the AST-to-text
+direction of that same pipeline, not a formatter: comments never reach the
+AST, so they are not in the output.
 ";
 
 const EXIT_REFUSED: u8 = 1;
@@ -99,6 +104,15 @@ fn run(args: &[String]) -> Result<ExitCode, Failure> {
         "check" => {
             let (input, _, _) = parse_args(&args[1..], false)?;
             compile_to_ir(&input)?;
+            Ok(ExitCode::SUCCESS)
+        }
+        "print" => {
+            let (input, _, _) = parse_args(&args[1..], false)?;
+            let text = std::fs::read_to_string(&input)
+                .map_err(|e| environment(format!("cannot read `{}`: {e}", input.display())))?;
+            let file = SourceFile::new(input.display().to_string(), text);
+            let ast = parse(&file.text).map_err(|d| refused(d.render(&file)))?;
+            print!("{}", lex_sys_syntax::print(&ast));
             Ok(ExitCode::SUCCESS)
         }
         "ids" => {
