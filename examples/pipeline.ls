@@ -170,7 +170,9 @@ fn run[&f, &i](libc: &f Ffi("libc"), io: &!i Io, budget: int) -> [io, ffi("libc"
 fn main(world: World) -> [] int {
     // §8.2: the one place authority enters a program. `split` consumes the
     // `World`, and there is no other way to obtain a capability.
-    let Split { io, ffi, fs, heap } = split(world);
+    let Split { io, ffi, fs, heap, args } = split(world);
+    // This program reads no arguments, so that authority ends here.
+    release(args);
     // This program touches no files, so that authority ends here.
     release(heap);
     release(fs);

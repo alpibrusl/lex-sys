@@ -260,7 +260,9 @@ fn run[&h, &i](heap: &!h Heap, io: &!i Io) -> [heap, io] int {
 }
 
 fn main(world: World) -> [] int {
-    let Split { io, ffi, fs, heap } = split(world);
+    let Split { io, ffi, fs, heap, args } = split(world);
+    // This program reads no arguments, so that authority ends here.
+    release(args);
     // No foreign calls and no files: `box` and `unbox` reach libc from the
     // backend, the way the arena and the file operations already do, so a
     // program that allocates needs neither of those capabilities.

@@ -13,7 +13,9 @@ fn stash[&h](heap: &!h Heap, n: int) -> [] Box[int] {
 }
 
 fn main(world: World) -> [] int {
-    let Split { io, ffi, fs, heap } = split(world);
+    let Split { io, ffi, fs, heap, args } = split(world);
+    // This program reads no arguments, so that authority ends here.
+    release(args);
     release(ffi);
     release(fs);
     release(io);

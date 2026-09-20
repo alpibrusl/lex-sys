@@ -22,6 +22,7 @@
 //~ STDOUT M3 file: on disk (7)
 //~ STDOUT M3 heap: 3 1 4 -> 8 (freed)
 //~ STDOUT M3 reading: 8 3 8 (kept)
+//~ STDOUT M3 args: 1 (named)
 //~ EXIT 0
 
 // ---------------------------------------------------------------- output ---
@@ -900,10 +901,55 @@ fn drain_quiet[&h](heap: &!h Heap, list: List) -> [heap] int {
     }
 }
 
+// --------------------------------------------- M3: the command line ----
+// The sixth capability, and the last thing M3's acceptance criterion
+// wanted (`docs/arguments.md`).
+//
+// The interesting question was whether reading argv needs a capability at
+// all. Arguments grant no *power* -- a program learns something, and
+// learning is not authority; `Fs` still governs what it may open. That
+// argument is about containment and it is correct as far as it goes.
+//
+// It does not decide the question, because a row here is about
+// **visibility**: a function whose behaviour depends on the command line
+// should say so in its type. Ambient argv would let a function eight
+// frames down branch on `--force` with nothing in any signature admitting
+// it -- and `putchar` is not more dangerous than `arg`, it is more
+// visible, which is the whole point of an exact row.
+//
+// So `Args` joins the other five. It carries nothing (there is one command
+// line and no part of it to name) and is borrowed *shared*, like `Ffi` and
+// `Fs`: reading changes nothing and two readers are the same as one.
+//
+// `arg(a, 0)` is the program name and `arg_count` is `argc`, exactly as
+// the runtime handed them over -- no translation, because hiding `argv[0]`
+// would be a convenience a program cannot see through. An argument comes
+// back `&static [byte]`: bytes with no encoding claimed and no NUL, shared
+// because a program does not own its own command line, and `static`
+// because argv outlives every region there is.
+
+fn m3_args[&g, &i](args: &g Args, io: &!i Io) -> [args, io] int {
+    write_all(io, "M3 args:"); space(io);
+
+    // Run with no arguments by the example harness, so this is 1: a
+    // program always has at least its own name.
+    let count = arg_count(args);
+    print_nat(io, count);
+
+    space(io); putchar(io, 40);                           // " ("
+    if len(arg(args, 0)) > 0 {
+        write_all(io, "named");
+    } else {
+        write_all(io, "anonymous");
+    }
+    putchar(io, 41);                                      // ")"
+    return newline(io);
+}
+
 fn main(world: World) -> [] int {
     // §8.2: the runtime hands over exactly one `World`, and `split` consumes
     // it. There is no other way to obtain a capability.
-    let Split { io, ffi, fs, heap } = split(world);
+    let Split { io, ffi, fs, heap, args } = split(world);
     // §7.4: attenuation, and the two narrowings in this program. From here
     // the foreign authority in this file reaches libc and no other library,
     // and its filesystem authority reaches `/tmp` and nowhere else. Neither
@@ -916,6 +962,7 @@ fn main(world: World) -> [] int {
     // caller's authority.
     borrow libc as &f in {
         borrow tmp as &t in {
+        borrow args as &g in {
         borrow mut heap as &!p in {
         borrow mut io as &!i in {
             status = run(i);
@@ -928,6 +975,8 @@ fn main(world: World) -> [] int {
             m3_file(t, i);
             m3_heap(p, i);
             m3_reading(p, i);
+            m3_args(g, i);
+        }
         }
         }
         }
@@ -938,6 +987,7 @@ fn main(world: World) -> [] int {
     release(libc);
     release(tmp);
     release(heap);
+    release(args);
     release(io);
     return status;
 }

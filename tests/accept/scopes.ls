@@ -16,7 +16,9 @@ fn run[&i](io: &!i Io) -> [io] int {
 fn main(world: World) -> [] int {
     // §8.2: the runtime hands over exactly one `World`, and `split` consumes
     // it. There is no other way to obtain a capability.
-    let Split { io, ffi, fs, heap } = split(world);
+    let Split { io, ffi, fs, heap, args } = split(world);
+    // This program reads no arguments, so that authority ends here.
+    release(args);
     // This program touches no files, so that authority ends here.
     release(heap);
     release(fs);

@@ -53,7 +53,8 @@ pub const PRELUDE_FFI: usize = 2;
 pub const PRELUDE_FS: usize = 3;
 pub const PRELUDE_HEAP: usize = 4;
 pub const PRELUDE_BOX: usize = 5;
-pub const PRELUDE_SPLIT: usize = 6;
+pub const PRELUDE_ARGS: usize = 6;
+pub const PRELUDE_SPLIT: usize = 7;
 
 /// The library an unnarrowed `Ffi` names: none of them yet.
 ///
@@ -277,6 +278,19 @@ pub enum Builtin {
     /// box that has been freed -- `unbox` consumes, and §5 already refuses a
     /// reference that outlives its borrow.
     Contents,
+    /// `arg_count(a) -> [args] int` — `argc`, exactly as the runtime gave it.
+    ///
+    /// `docs/arguments.md` §3. A builtin rather than an `extern fn` for the
+    /// reason `filesystem.md` §2 gives: an `extern` would be gated by
+    /// `Ffi("libc")`, and then the FFI capability would read the command
+    /// line with `Args` contributing nothing.
+    ArgCount,
+    /// `arg(a, n) -> [args] &static [byte]` — one argument, as bytes.
+    ///
+    /// `arg(a, 0)` is the program name. The region is `static` because
+    /// argv outlives every region in the program (§3.1), and the slice is
+    /// *shared* because a program does not own its own command line.
+    Arg,
     /// `len(s: &r [T]) -> [] int` — how many elements a slice has.
     ///
     /// Checked at the call site rather than through a written signature,
@@ -303,6 +317,8 @@ impl Builtin {
         Builtin::Box,
         Builtin::Unbox,
         Builtin::Contents,
+        Builtin::ArgCount,
+        Builtin::Arg,
     ];
 
     pub fn name(self) -> &'static str {
@@ -322,6 +338,8 @@ impl Builtin {
             Builtin::Box => "box",
             Builtin::Unbox => "unbox",
             Builtin::Contents => "contents",
+            Builtin::ArgCount => "arg_count",
+            Builtin::Arg => "arg",
         }
     }
 
@@ -346,16 +364,24 @@ impl Builtin {
     /// Passing it along made libc print the pointer.
     pub fn erased_args(self) -> usize {
         match self {
-            Builtin::PutChar => 1,
+            // Each of these takes a borrowed capability first. It is
+            // leaf-free, so it contributes no values either way, and
+            // skipping it keeps the argument positions honest.
+            Builtin::PutChar | Builtin::ArgCount | Builtin::Arg => 1,
             _ => 0,
         }
     }
 
     /// How many region parameters the builtin takes, so a call site can
     /// instantiate them the same way it does for a written function (§5.1).
+    ///
+    /// A builtin that forgets to count one here keeps `Region::Param(0)`
+    /// *rigid*, and then no caller's block region can ever unify with it —
+    /// the call works from inside a region-polymorphic function and fails
+    /// from inside a `borrow` block, which is a confusing way to find out.
     pub fn regions(self) -> usize {
         match self {
-            Builtin::PutChar => 1,
+            Builtin::PutChar | Builtin::ArgCount | Builtin::Arg => 1,
             _ => 0,
         }
     }
@@ -390,6 +416,32 @@ impl Builtin {
             // All three depend on the type being boxed, which a fixed
             // signature has no parameter to name (`docs/heap.md` §3).
             Builtin::Box | Builtin::Unbox | Builtin::Contents => (Vec::new(), Type::Unit),
+            // `docs/arguments.md` §3. Written out rather than checked at
+            // the call site, because neither depends on a type the caller
+            // chose: an argument is always `&static [byte]`.
+            Builtin::ArgCount => (
+                vec![Type::Ref {
+                    unique: false,
+                    region: Region::Param(0),
+                    inner: Box::new(named(PRELUDE_ARGS)),
+                }],
+                Type::Int,
+            ),
+            Builtin::Arg => (
+                vec![
+                    Type::Ref {
+                        unique: false,
+                        region: Region::Param(0),
+                        inner: Box::new(named(PRELUDE_ARGS)),
+                    },
+                    Type::Int,
+                ],
+                Type::Ref {
+                    unique: false,
+                    region: Region::Static,
+                    inner: Box::new(Type::Slice(Box::new(Type::Byte))),
+                },
+            ),
             Builtin::ByteOf => (vec![Type::Int], Type::Byte),
             Builtin::IntOf => (vec![Type::Byte], Type::Int),
             // Both are checked at the call site rather than here, because a
@@ -413,6 +465,9 @@ impl Builtin {
             // `docs/heap.md` §2. Both reach the allocator, so both perform
             // `heap`; `contents` is a load and performs nothing.
             Builtin::Box | Builtin::Unbox => Effects::plain(["heap"]),
+            // §2: reading the command line is an effect, because a
+            // function whose behaviour depends on it should say so.
+            Builtin::ArgCount | Builtin::Arg => Effects::plain(["args"]),
             // Moving authority around is not an effect. Splitting a `World`
             // observes nothing outside the program and releasing a
             // capability only ends one; what a capability *authorises* is
@@ -963,7 +1018,7 @@ pub fn leaf_free(ty: &Type) -> bool {
     matches!(ty, Type::Named(def, _)
     if matches!(
         def.0 as usize,
-        PRELUDE_WORLD | PRELUDE_IO | PRELUDE_FFI | PRELUDE_FS | PRELUDE_HEAP
+        PRELUDE_WORLD | PRELUDE_IO | PRELUDE_FFI | PRELUDE_FS | PRELUDE_HEAP | PRELUDE_ARGS
     ))
 }
 
@@ -977,7 +1032,13 @@ pub fn leaf_free(ty: &Type) -> bool {
 fn is_capability(def: DefId) -> bool {
     matches!(
         def.0 as usize,
-        PRELUDE_WORLD | PRELUDE_IO | PRELUDE_FFI | PRELUDE_FS | PRELUDE_HEAP | PRELUDE_SPLIT
+        PRELUDE_WORLD
+            | PRELUDE_IO
+            | PRELUDE_FFI
+            | PRELUDE_FS
+            | PRELUDE_HEAP
+            | PRELUDE_ARGS
+            | PRELUDE_SPLIT
     )
 }
 
@@ -988,7 +1049,10 @@ fn is_capability(def: DefId) -> bool {
 /// authority without naming the function that knows how (§4.1) — and for
 /// `World` and `Io`, which carry no fields, it would do it silently.
 fn released_only(def: DefId) -> bool {
-    matches!(def.0 as usize, PRELUDE_WORLD | PRELUDE_IO | PRELUDE_FFI | PRELUDE_FS | PRELUDE_HEAP)
+    matches!(
+        def.0 as usize,
+        PRELUDE_WORLD | PRELUDE_IO | PRELUDE_FFI | PRELUDE_FS | PRELUDE_HEAP | PRELUDE_ARGS
+    )
 }
 
 /// Is this a type whose only consumer is `unbox` (`docs/heap.md` §3)?
@@ -1045,13 +1109,16 @@ fn discharged_by(defs: &[TypeDef], ty: &Type) -> Effects {
         // `docs/heap.md` §2: one plain label, because a heap has no parts to
         // name and so nothing to narrow.
         PRELUDE_HEAP => Effects::plain(["heap"]),
+        // `docs/arguments.md` §2: one plain label. There is one command
+        // line and no part of it to name, so nothing to narrow.
+        PRELUDE_ARGS => Effects::plain(["args"]),
         // A `World` is the root, so it discharges what every capability it
         // splits into discharges: the console, and the unnarrowed `Ffi`,
         // which covers every library there could be. Owning a `World` and
         // declaring `[]` is not a gap in the row — it is the parameter list
         // saying something stronger.
         PRELUDE_WORLD => {
-            let mut all = Effects::plain(["io", "heap"]);
+            let mut all = Effects::plain(["io", "heap", "args"]);
             for name in ["ffi", "fs_read", "fs_write"] {
                 all.union(&Effects::new([Label {
                     name: name.to_owned(),
@@ -1104,6 +1171,7 @@ fn prelude_types(ast: &Ast, unifier: &mut Unifier) -> Vec<TypeDef> {
     let ffi = symbol("Ffi");
     let fs = symbol("Fs");
     let heap = symbol("Heap");
+    let arguments = symbol("Args");
     let boxed = symbol("Box");
     let split = symbol("Split");
     let library = symbol("L");
@@ -1115,13 +1183,18 @@ fn prelude_types(ast: &Ast, unifier: &mut Unifier) -> Vec<TypeDef> {
     let ffi_field = symbol("ffi");
     let fs_field = symbol("fs");
     let heap_field = symbol("heap");
+    let args_field = symbol("args");
 
     let world_def = unifier.declare("World");
     let io_def = unifier.declare("Io");
     let ffi_def = unifier.declare("Ffi");
     let fs_def = unifier.declare("Fs");
     let heap_def = unifier.declare("Heap");
+    // The order of these calls is what fixes every `PRELUDE_*` constant, so
+    // it matches the order of the definitions below, not the order the
+    // names were added to the language.
     let box_def = unifier.declare("Box");
+    let args_def = unifier.declare("Args");
     let split_def = unifier.declare("Split");
 
     vec![
@@ -1191,7 +1264,20 @@ fn prelude_types(ast: &Ast, unifier: &mut Unifier) -> Vec<TypeDef> {
             kind: DefKind::Struct(Vec::new()),
             span,
         },
-        // `res` by inference, because it holds four.
+        // `docs/arguments.md` §2: the sixth capability, and the third that
+        // carries nothing. Reading argv is an effect because a function
+        // whose behaviour depends on the command line should say so in its
+        // type -- visibility, which is what a row is for, rather than
+        // containment, which argv does not need.
+        TypeDef {
+            name: arguments,
+            def: args_def,
+            generics: Vec::new(),
+            declared_mode: Some(Mode::Res),
+            kind: DefKind::Struct(Vec::new()),
+            span,
+        },
+        // `res` by inference, because it holds five.
         TypeDef {
             name: split,
             def: split_def,
@@ -1207,6 +1293,7 @@ fn prelude_types(ast: &Ast, unifier: &mut Unifier) -> Vec<TypeDef> {
                 (fs_field, Type::Named(fs_def, vec![Type::Lit(FFI_ROOT.to_owned())])),
                 // Nothing to narrow: the heap is the heap.
                 (heap_field, Type::Named(heap_def, Vec::new())),
+                (args_field, Type::Named(args_def, Vec::new())),
             ]),
             span,
         },
@@ -2406,7 +2493,7 @@ impl<'a> FnLowering<'a> {
 
     /// The prelude's type ids, in the order `prelude_types` declared them.
     fn prelude(&self) -> Vec<DefId> {
-        self.defs[..7].iter().map(|d| d.def).collect()
+        self.defs[..8].iter().map(|d| d.def).collect()
     }
 
     /// Does `outer` outlive `inner` (§5.2)?
@@ -5117,7 +5204,7 @@ mod capability_tests {
 
     /// Enough of a program to have authority in it.
     const MAIN: &str = " fn main(world: World) -> [] int { \
-        let Split { io, ffi, fs, heap } = split(world); release(heap); release(fs); release(ffi); release(io); return 0; }";
+        let Split { io, ffi, fs, heap, args } = split(world); release(args); release(heap); release(fs); release(ffi); release(io); return 0; }";
 
     fn refused(src: &str) -> String {
         lower_src(src).expect_err("this should be refused").message
@@ -5149,7 +5236,7 @@ mod capability_tests {
         accepted(&format!("fn f() -> [] int {{ return 0; }}{MAIN}"));
 
         let leaked = refused(
-            "fn main(world: World) -> [] int { let Split { io, ffi, fs, heap } = split(world); release(heap); release(fs); release(ffi); return 0; }",
+            "fn main(world: World) -> [] int { let Split { io, ffi, fs, heap, args } = split(world); release(args); release(heap); release(fs); release(ffi); return 0; }",
         );
         assert!(leaked.contains("still live"), "{leaked}");
 
@@ -5161,7 +5248,7 @@ mod capability_tests {
     fn a_released_capability_cannot_be_used_again() {
         let message = refused(
             "fn greet[&i](io: &!i Io) -> [io] int { return putchar(io, 65); } \
-             fn main(world: World) -> [] int { let Split { io, ffi, fs, heap } = split(world); release(heap); release(fs); release(ffi); \
+             fn main(world: World) -> [] int { let Split { io, ffi, fs, heap, args } = split(world); release(args); release(heap); release(fs); release(ffi); \
              release(io); borrow mut io as &!i in { greet(i); } return 0; }",
         );
         assert!(message.contains("nothing left to borrow"), "{message}");
@@ -5170,7 +5257,7 @@ mod capability_tests {
     #[test]
     fn a_capability_is_destroyed_by_release_not_by_destructuring() {
         let message = refused(
-            "fn main(world: World) -> [] int { let Split { io, ffi, fs, heap } = split(world); release(heap); release(fs); release(ffi); \
+            "fn main(world: World) -> [] int { let Split { io, ffi, fs, heap, args } = split(world); release(args); release(heap); release(fs); release(ffi); \
              let Io { } = io; return 0; }",
         );
         assert!(message.contains("destroyed by `release`"), "{message}");
@@ -5183,7 +5270,7 @@ mod capability_tests {
         // that is visible in the parameter list rather than in the row.
         let program = accepted(
             "fn greet[&i](io: &!i Io) -> [io] int { return putchar(io, 65); } \
-             fn main(world: World) -> [] int { let Split { io, ffi, fs, heap } = split(world); release(heap); release(fs); release(ffi); \
+             fn main(world: World) -> [] int { let Split { io, ffi, fs, heap, args } = split(world); release(args); release(heap); release(fs); release(ffi); \
              borrow mut io as &!i in { greet(i); } release(io); return 0; }",
         );
         let main = program.func(program.find("main").expect("main"));
@@ -5701,14 +5788,14 @@ mod foreign_tests {
     /// A `main` that takes the authority it is given and gives it back, for
     /// the cases whose subject is a declaration rather than a body.
     const MAIN: &str = " fn main(world: World) -> [] int { \
-        let Split { io, ffi, fs, heap } = split(world); release(heap); release(fs); release(ffi); release(io); return 0; }";
+        let Split { io, ffi, fs, heap, args } = split(world); release(args); release(heap); release(fs); release(ffi); release(io); return 0; }";
 
     /// A `main` that narrows to libc, runs `body` inside the borrow, and
     /// gives everything back.
     fn with_libc(body: &str) -> String {
         format!(
             "{LABS} fn main(world: World) -> [] int {{ \
-             let Split {{ io, ffi, fs, heap }} = split(world); release(heap); release(fs); release(io); \
+             let Split {{ io, ffi, fs, heap, args }} = split(world); release(args); release(heap); release(fs); release(io); \
              let libc = narrow(ffi, \"libc\"); var n = 0; \
              borrow libc as &f in {{ {body} }} \
              release(libc); return n; }}"
@@ -5721,7 +5808,7 @@ mod foreign_tests {
         // is the only place a foreign signature is written.
         let message = refused(
             "extern fn labs(n: int) -> [ffi(\"libc\")] int; \
-             fn main(world: World) -> [] int { let Split { io, ffi, fs, heap } = split(world); release(heap); release(fs); \
+             fn main(world: World) -> [] int { let Split { io, ffi, fs, heap, args } = split(world); release(args); release(heap); release(fs); \
              release(ffi); release(io); return labs(0); }",
         );
         assert!(message.contains("holds no capability that authorises it"), "{message}");
@@ -5779,7 +5866,7 @@ mod foreign_tests {
         // §7.4: prefix extension, and `libc` is a prefix of `libcrypto`, so
         // the capability over `libcrypto` is the narrower of the two.
         let message = refused(
-            "fn main(world: World) -> [] int { let Split { io, ffi, fs, heap } = split(world); release(heap); release(fs); \
+            "fn main(world: World) -> [] int { let Split { io, ffi, fs, heap, args } = split(world); release(args); release(heap); release(fs); \
              release(io); let crypto = narrow(ffi, \"libcrypto\"); \
              let wider = narrow(crypto, \"libc\"); release(wider); return 0; }",
         );
@@ -5789,7 +5876,7 @@ mod foreign_tests {
     #[test]
     fn narrowing_to_the_same_thing_is_refused() {
         let message = refused(
-            "fn main(world: World) -> [] int { let Split { io, ffi, fs, heap } = split(world); release(heap); release(fs); \
+            "fn main(world: World) -> [] int { let Split { io, ffi, fs, heap, args } = split(world); release(args); release(heap); release(fs); \
              release(io); let a = narrow(ffi, \"libc\"); let b = narrow(a, \"libc\"); \
              release(b); return 0; }",
         );
@@ -5801,7 +5888,7 @@ mod foreign_tests {
         // The point of the whole section: after narrowing there is no way
         // back to what was narrowed, because it was spent.
         let message = refused(
-            "fn main(world: World) -> [] int { let Split { io, ffi, fs, heap } = split(world); release(heap); release(fs); \
+            "fn main(world: World) -> [] int { let Split { io, ffi, fs, heap, args } = split(world); release(args); release(heap); release(fs); \
              release(io); let libc = narrow(ffi, \"libc\"); release(libc); \
              let libm = narrow(ffi, \"libm\"); release(libm); return 0; }",
         );
@@ -5811,7 +5898,7 @@ mod foreign_tests {
     #[test]
     fn a_borrowed_capability_cannot_be_narrowed() {
         let message = refused(
-            "fn main(world: World) -> [] int { let Split { io, ffi, fs, heap } = split(world); release(heap); release(fs); \
+            "fn main(world: World) -> [] int { let Split { io, ffi, fs, heap, args } = split(world); release(args); release(heap); release(fs); \
              release(io); borrow ffi as &f in { let libc = narrow(f, \"libc\"); release(libc); } \
              release(ffi); return 0; }",
         );
@@ -5834,7 +5921,7 @@ mod foreign_tests {
             "{LABS} \
              fn size[&f](ffi: &f Ffi(\"libc\"), n: int) -> [ffi(\"libc\")] int \
              {{ return labs(ffi, n); }} \
-             fn main(world: World) -> [] int {{ let Split {{ io, ffi, fs, heap }} = split(world); release(heap); release(fs); \
+             fn main(world: World) -> [] int {{ let Split {{ io, ffi, fs, heap, args }} = split(world); release(args); release(heap); release(fs); \
              release(io); let libc = narrow(ffi, \"libc\"); var n = 0; \
              borrow libc as &f in {{ n = size(f, 0 - 7); }} release(libc); return n - 7; }}"
         ));
@@ -6478,7 +6565,7 @@ mod linearity_tests {
         // `narrow`: the type records where it may reach, and two different
         // prefixes are two different types.
         let program = check(
-            "fn main(world: World) -> [] int {              let Split { io, ffi, fs, heap } = split(world); release(heap); release(ffi); release(io);              let tmp = narrow(fs, \"/tmp\"); let app = narrow(tmp, \"/tmp/app\");              return release(app); }",
+            "fn main(world: World) -> [] int {              let Split { io, ffi, fs, heap, args } = split(world); release(args); release(heap); release(ffi); release(io);              let tmp = narrow(fs, \"/tmp\"); let app = narrow(tmp, \"/tmp/app\");              return release(app); }",
         )
         .expect("accepted");
         assert!(program.funcs.iter().any(|f| f.name == "main"));
@@ -6487,7 +6574,7 @@ mod linearity_tests {
     #[test]
     fn a_filesystem_capability_cannot_step_sideways() {
         let message = refused(
-            "fn main(world: World) -> [] int {              let Split { io, ffi, fs, heap } = split(world); release(heap); release(ffi); release(io);              let tmp = narrow(fs, \"/tmp\"); let evil = narrow(tmp, \"/tmpevil\");              return release(evil); }",
+            "fn main(world: World) -> [] int {              let Split { io, ffi, fs, heap, args } = split(world); release(args); release(heap); release(ffi); release(io);              let tmp = narrow(fs, \"/tmp\"); let evil = narrow(tmp, \"/tmpevil\");              return release(evil); }",
         );
         assert!(message.contains("a path prefix extends at a `/`"), "{message}");
     }
@@ -6498,7 +6585,7 @@ mod linearity_tests {
         // that names the filesystem, which is why the operations are
         // builtins rather than `extern fn` gated by `Ffi("libc")`.
         let message = refused(
-            "fn main(world: World) -> [] int {              let Split { io, ffi, fs, heap } = split(world); release(heap); release(ffi); release(fs);              var n = 0; region a { let b = alloc_slice[a](4, byte_of(0));              borrow mut io as &!i in { n = fs_read(i, \"/tmp/x\", b); } }              release(io); return n; }",
+            "fn main(world: World) -> [] int {              let Split { io, ffi, fs, heap, args } = split(world); release(args); release(heap); release(ffi); release(fs);              var n = 0; region a { let b = alloc_slice[a](4, byte_of(0));              borrow mut io as &!i in { n = fs_read(i, \"/tmp/x\", b); } }              release(io); return n; }",
         );
         assert!(message.contains("is not a borrowed `Fs`"), "{message}");
     }
@@ -6508,7 +6595,7 @@ mod linearity_tests {
         // §1: the label is `fs_read("/tmp")`, not `fs_read`. A row that
         // dropped the prefix would take away the thing the prefix is for.
         let message = refused(
-            "fn peek[&f, &b](fs: &f Fs(\"/tmp\"), into: &!b [byte]) -> [] int {              return fs_read(fs, \"/tmp/x\", into); }              fn main(world: World) -> [] int { let Split { io, ffi, fs, heap } = split(world); release(heap); \
+            "fn peek[&f, &b](fs: &f Fs(\"/tmp\"), into: &!b [byte]) -> [] int {              return fs_read(fs, \"/tmp/x\", into); }              fn main(world: World) -> [] int { let Split { io, ffi, fs, heap, args } = split(world); release(args); release(heap); \
              release(ffi); release(fs); return release(io); }",
         );
         assert!(message.contains("fs_read(\"/tmp\")"), "{message}");
@@ -6522,7 +6609,7 @@ mod linearity_tests {
         let program = check(
             "enum List { Empty, Cons(int, Box[List]) } \
              fn main(world: World) -> [] int { \
-             let Split { io, ffi, fs, heap } = split(world); \
+             let Split { io, ffi, fs, heap, args } = split(world); release(args); \
              release(ffi); release(fs); release(io); release(heap); return 0; }",
         )
         .expect("accepted");
@@ -6567,7 +6654,7 @@ mod linearity_tests {
         // allocates.
         let program = check(
             "fn main(world: World) -> [] int { \
-             let Split { io, ffi, fs, heap } = split(world); \
+             let Split { io, ffi, fs, heap, args } = split(world); release(args); \
              release(ffi); release(fs); release(io); \
              var n = 0; \
              borrow mut heap as &!h in { let b = box(h, 41); n = unbox(h, b); } \
@@ -6678,6 +6765,78 @@ mod linearity_tests {
              fn main() -> [] int { return 0; }",
         );
         assert!(message.contains("shared reference"), "{message}");
+    }
+
+    #[test]
+    fn reading_the_command_line_is_an_effect() {
+        // `docs/arguments.md` §2, and the reason `Args` is a capability at
+        // all: not that argv is dangerous, but that a function whose
+        // behaviour depends on it should say so.
+        let message = refused(
+            "fn verbose[&a](args: &a Args) -> [] bool { return arg_count(args) > 1; } \
+             fn main() -> [] int { return 0; }",
+        );
+        assert!(message.contains("performs `args`"), "{message}");
+    }
+
+    #[test]
+    fn an_argument_is_a_shared_static_slice() {
+        // §3.1: `static` because argv outlives every region, shared
+        // because a program does not own its own command line.
+        let program = check(
+            "fn first[&a](args: &a Args) -> [args] int { return len(arg(args, 0)); } \
+             fn main(world: World) -> [] int { \
+             let Split { io, ffi, fs, heap, args } = split(world); \
+             release(ffi); release(fs); release(heap); release(io); \
+             var n = 0; borrow args as &a in { n = first(a); } \
+             release(args); return n - n; }",
+        )
+        .expect("accepted");
+        assert!(program.funcs.iter().any(|f| f.name == "main"));
+    }
+
+    #[test]
+    fn owning_args_discharges_reading_them() {
+        // §8.2's rule again: `main` owns the capability, so its row stays
+        // `[]` while the program reads the command line.
+        let program = check(
+            "fn main(world: World) -> [] int { \
+             let Split { io, ffi, fs, heap, args } = split(world); \
+             release(ffi); release(fs); release(heap); release(io); \
+             var n = 0; borrow args as &a in { n = arg_count(a); } \
+             release(args); return n - 1; }",
+        )
+        .expect("accepted");
+        let main = program.funcs.iter().find(|f| f.name == "main").expect("a main");
+        assert!(main.effects.is_pure(), "`main` should declare [], not {:?}", main.effects);
+    }
+
+    #[test]
+    fn every_capability_taking_builtin_counts_its_region() {
+        // A builtin whose signature mentions `Region::Param(n)` must say so
+        // in `regions()`, or the parameter stays *rigid* and the call works
+        // from a region-polymorphic function while failing from inside a
+        // `borrow` block. That is a confusing way to find out, so it is
+        // checked here instead.
+        for builtin in crate::Builtin::ALL {
+            let prelude: Vec<crate::DefId> = (0..8).map(crate::DefId).collect();
+            let (params, ret) = builtin.signature(&prelude);
+            let highest = params
+                .iter()
+                .chain(std::iter::once(&ret))
+                .filter_map(|t| match t {
+                    crate::Type::Ref { region: crate::Region::Param(i), .. } => Some(*i + 1),
+                    _ => None,
+                })
+                .max()
+                .unwrap_or(0);
+            assert!(
+                builtin.regions() >= highest as usize,
+                "`{}` names {highest} region parameter(s) but declares {}",
+                builtin.name(),
+                builtin.regions()
+            );
+        }
     }
 
     #[test]

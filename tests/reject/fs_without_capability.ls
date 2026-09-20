@@ -13,7 +13,9 @@
 // instead, which authorises writing to a terminal and nothing about disks.
 
 fn main(world: World) -> [] int {
-    let Split { io, ffi, fs, heap } = split(world);
+    let Split { io, ffi, fs, heap, args } = split(world);
+    // This program reads no arguments, so that authority ends here.
+    release(args);
     release(ffi);
     release(heap);
     release(fs);

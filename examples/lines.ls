@@ -120,28 +120,24 @@ fn tally[&b](text: &b [byte], length: int) -> [] Counts {
 // The tool
 // ---------------------------------------------------------------------
 
-// The row is the documentation. Two labels, one prefix, and a caller that
-// wanted to know whether this function could read `/etc` would not have to
-// look inside it.
-fn report[&f, &i](
-    fs: &f Fs("/tmp"),
+// The row is the documentation. A caller that wanted to know whether this
+// function could read `/etc` would not have to look inside it -- and the
+// honest answer here is *yes*, which is the point of §1 below.
+fn report[&f, &p, &i](
+    fs: &f Fs(""),
+    path: &p [byte],
     io: &!i Io,
-) -> [fs_read("/tmp"), fs_write("/tmp"), io] int {
-    // There are no command-line arguments yet (`docs/filesystem.md` §6), so
-    // the tool lays down its own input first. The literal is `&static
-    // [byte]` -- it lives in the object file, and it outlives every region
-    // in the program (`docs/strings.md` §4).
-    fs_write(
-        fs,
-        "/tmp/lex-sys-lines.log",
-        "INFO  boot\nERROR disk full\nINFO  retry\nERROR disk full\nWARN  slow\nINFO  done\n",
-    );
-
+) -> [fs_read(""), fs_write(""), io] int {
     var status = 1;
     region a {
         let text = alloc_slice[a](512, byte_of(0));
-        let read = fs_read(fs, "/tmp/lex-sys-lines.log", text);
+        let read = fs_read(fs, path, text);
         if read < 0 {
+            // A missing file is an ordinary outcome and comes back as -1,
+            // not a trap (`docs/filesystem.md` §3). A path outside what the
+            // capability granted *would* trap -- but this one granted
+            // everything, so nothing here is outside it.
+            write_all(io, "cannot read that file\n");
             return 1;
         }
 
@@ -189,7 +185,7 @@ fn report[&f, &i](
 }
 
 fn main(world: World) -> [] int {
-    let Split { io, ffi, fs, heap } = split(world);
+    let Split { io, ffi, fs, heap, args } = split(world);
     // This program allocates nothing on the heap, so that authority ends here.
     release(heap);
     // File operations reach libc from the backend rather than through an
@@ -197,17 +193,45 @@ fn main(world: World) -> [] int {
     // at all -- which is the whole reason `Fs` means anything (§2).
     release(ffi);
 
-    // The one narrowing in the program. From here, `/tmp` is the entire
-    // filesystem as far as this process is concerned.
-    let tmp = narrow(fs, "/tmp");
-
+    // §1: `fs` is passed on **unnarrowed**, and that is a decision rather
+    // than an oversight.
+    //
+    // The path comes from the command line, and the prefix a capability is
+    // narrowed to is a *literal* checked where it is written
+    // (`linearity-and-effects.md` §7.4). So a tool that reads a path the
+    // user chose cannot narrow to it: there is no literal to narrow to.
+    // Narrowing to `/tmp` would make `lines /home/me/x.log` trap, which is
+    // not a safer tool, it is a broken one.
+    //
+    // What the design still buys, with the capability at its widest: the
+    // row on `report` says `fs_read("")` and `fs_write("")`, so a reader
+    // knows this program reads and writes arbitrary paths without opening
+    // the body. A tool that *did* know its directory would narrow, and its
+    // row would say so instead. The type tells the truth either way.
     var status = 1;
-    borrow tmp as &f in {
-        borrow mut io as &!i in {
-            status = report(f, i);
+    borrow fs as &f in {
+        borrow args as &g in {
+            borrow mut io as &!i in {
+                if arg_count(g) > 1 {
+                    // Given a path, read that file.
+                    status = report(f, arg(g, 1), i);
+                } else {
+                    // Given nothing, lay down a sample and read that --
+                    // which is how a tool with no input behaves anyway,
+                    // and is what lets a harness that passes no arguments
+                    // still run this file.
+                    fs_write(
+                        f,
+                        "/tmp/lex-sys-lines.log",
+                        "INFO  boot\nERROR disk full\nINFO  retry\nERROR disk full\nWARN  slow\nINFO  done\n",
+                    );
+                    status = report(f, "/tmp/lex-sys-lines.log", i);
+                }
+            }
         }
     }
-    release(tmp);
+    release(fs);
+    release(args);
     release(io);
     return status;
 }
