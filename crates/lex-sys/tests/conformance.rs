@@ -194,6 +194,44 @@ fn run_builds_and_executes_in_one_step() {
 }
 
 #[test]
+fn indexing_past_a_slice_traps_rather_than_reading_on() {
+    // `docs/defined-behaviour.md` §1: the alternative to a bounds check is
+    // reading past the end of an allocation, and this language has no
+    // undefined behaviour to do that in. One unsigned comparison covers
+    // both ends -- a negative index read as unsigned is enormous -- so the
+    // check below catches `xs[5]` and `xs[-1]` with the same instruction.
+    for index in ["5", "0 - 1"] {
+        let dir = scratch(&format!("slice-bounds-{}", index.replace([' ', '-'], "")));
+        let source = dir.join("bounds.ls");
+        std::fs::write(
+            &source,
+            format!(
+                "fn main(world: World) -> [] int {{\n\
+                     let Split {{ io, ffi }} = split(world); release(ffi); release(io);\n\
+                     var n = 0;\n\
+                     region a {{ let xs = alloc_slice[a](3, 7); n = xs[{index}]; }}\n\
+                     return n;\n\
+                 }}\n"
+            ),
+        )
+        .expect("a writable fixture");
+        let exe = dir.join("bounds");
+
+        let build = Command::new(BIN)
+            .args(["build".as_ref(), source.as_os_str(), "-o".as_ref(), exe.as_os_str()])
+            .output()
+            .expect("the compiler runs");
+        assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+
+        let run = Command::new(&exe).output().expect("the compiled program runs");
+        assert!(!run.status.success(), "`xs[{index}]` should not succeed");
+        assert_eq!(run.status.code(), None, "`xs[{index}]` should be killed by a signal, not exit");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[test]
 fn integer_overflow_traps_rather_than_wrapping() {
     // `docs/defined-behaviour.md` §2.1. Wrapping would be *defined* -- C has
     // it for unsigned, Rust has it in release -- so it is not undefined

@@ -78,6 +78,14 @@ pub enum Type {
         region: Region,
         inner: Box<Type>,
     },
+    /// `[T]` — a run of `T`s of a length known only at runtime.
+    ///
+    /// Unsized, like a struct is sized: it is a *referent* shape, never a
+    /// value on its own. `&!a [int]` is the slice, and it is an ordinary
+    /// reference, which is the point — every rule §5 gave references
+    /// (regions, outlives, the escape check, the unique-to-shared
+    /// coercion) applies to a slice without a second mechanism.
+    Slice(Box<Type>),
     /// A type indexed by a literal: the `"libc"` in `Ffi("libc")` (§7.4).
     ///
     /// A singleton — it unifies with itself and nothing else — which is what
@@ -95,7 +103,7 @@ impl Type {
         match self {
             Type::Var(v) => *v == var,
             Type::Named(_, args) => args.iter().any(|a| a.occurs(var)),
-            Type::Ref { inner, .. } => inner.occurs(var),
+            Type::Ref { inner, .. } | Type::Slice(inner) => inner.occurs(var),
             _ => false,
         }
     }
@@ -109,6 +117,7 @@ impl Type {
         match self {
             Type::Named(_, args) => args.iter().any(|a| a.mentions(region)),
             Type::Ref { region: r, inner, .. } => *r == region || inner.mentions(region),
+            Type::Slice(inner) => inner.mentions(region),
             _ => false,
         }
     }
@@ -121,6 +130,7 @@ impl Type {
                 out.push(*region);
                 inner.regions_into(out);
             }
+            Type::Slice(inner) => inner.regions_into(out),
             _ => {}
         }
     }
@@ -134,7 +144,7 @@ impl Type {
         match self {
             Type::Var(_) => true,
             Type::Named(_, args) => args.iter().any(Type::has_var),
-            Type::Ref { inner, .. } => inner.has_var(),
+            Type::Ref { inner, .. } | Type::Slice(inner) => inner.has_var(),
             _ => false,
         }
     }
@@ -160,6 +170,7 @@ impl Type {
                 region: region.substitute(regions),
                 inner: Box::new(inner.substitute(types, regions)),
             },
+            Type::Slice(inner) => Type::Slice(Box::new(inner.substitute(types, regions))),
             other => other.clone(),
         }
     }
@@ -309,6 +320,7 @@ impl Unifier {
     /// that is an error.
     pub fn resolve(&self, ty: &Type) -> Type {
         match self.shallow(ty) {
+            Type::Slice(inner) => Type::Slice(Box::new(self.resolve(&inner))),
             Type::Named(def, args) => {
                 Type::Named(def, args.iter().map(|a| self.resolve(a)).collect())
             }
@@ -353,6 +365,10 @@ impl Unifier {
                 self.unify_regions(r1, r2)?;
                 self.unify(&i1, &i2)
             }
+            // A slice's element type is invariant for the same reason a
+            // referent is: `[T]` is what a reference points at, and "`T`
+            // never changes" does not stop being true one level down.
+            (Type::Slice(a), Type::Slice(b)) => self.unify(&a, &b),
             (x, y) if x == y => Ok(()),
             (x, y) => {
                 Err(UnifyError::Mismatch { expected: self.resolve(&x), found: self.resolve(&y) })
@@ -371,6 +387,7 @@ impl Unifier {
             }
             Type::Var(v) => format!("?{}", v.0),
             Type::Lit(text) => format!("\"{text}\""),
+            Type::Slice(inner) => format!("[{}]", self.display(&inner)),
             Type::Named(def, args) if args.is_empty() => self.name_of(def).to_owned(),
             // A literal argument is written the way the source writes it:
             // `Ffi("libc")`, not `Ffi["libc"]`. What a capability is
