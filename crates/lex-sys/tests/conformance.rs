@@ -265,7 +265,7 @@ fn byte_of_traps_outside_a_byte_rather_than_truncating() {
             &source,
             format!(
                 "fn main(world: World) -> [] int {{\n\
-                     let Split {{ io, ffi, fs }} = split(world); release(fs); release(ffi); release(io);\n\
+                     let Split {{ io, ffi, fs, heap }} = split(world); release(heap); release(fs); release(ffi); release(io);\n\
                      return int_of(byte_of({value}));\n\
                  }}\n"
             ),
@@ -305,7 +305,7 @@ fn indexing_past_a_slice_traps_rather_than_reading_on() {
             &source,
             format!(
                 "fn main(world: World) -> [] int {{\n\
-                     let Split {{ io, ffi, fs }} = split(world); release(fs); release(ffi); release(io);\n\
+                     let Split {{ io, ffi, fs, heap }} = split(world); release(heap); release(fs); release(ffi); release(io);\n\
                      var n = 0;\n\
                      region a {{ let xs = alloc_slice[a](3, 7); n = xs[{index}]; }}\n\
                      return n;\n\
@@ -340,7 +340,7 @@ fn integer_overflow_traps_rather_than_wrapping() {
     std::fs::write(
         &source,
         "fn main(world: World) -> [] int {\n\
-             let Split { io, ffi, fs } = split(world); release(fs); release(ffi); release(io);\n\
+             let Split { io, ffi, fs, heap } = split(world); release(heap); release(fs); release(ffi); release(io);\n\
              var n = 9223372036854775807;\n\
              return n + 1;\n\
          }\n",
@@ -374,7 +374,7 @@ fn exhausting_an_arena_traps_rather_than_running_past_the_chunk() {
         &source,
         "struct Node { value: int }\n\
          fn main(world: World) -> [] int {\n\
-             let Split { io, ffi, fs } = split(world); release(fs); release(ffi); release(io);\n\
+             let Split { io, ffi, fs, heap } = split(world); release(heap); release(fs); release(ffi); release(io);\n\
              region a {\n\
                  var i = 0;\n\
                  while i < 20000 {\n\
@@ -409,7 +409,7 @@ fn division_by_zero_traps_rather_than_being_undefined() {
         &source,
         "fn divide(a: int, b: int) -> [] int { return a / b; }\n\
          fn main(world: World) -> [] int {\n\
-             let Split { io, ffi, fs } = split(world); release(fs); release(ffi);\n\
+             let Split { io, ffi, fs, heap } = split(world); release(heap); release(fs); release(ffi);\n\
              release(io);\n\
              return divide(1, 0);\n\
          }\n",
@@ -445,7 +445,7 @@ fn a_path_outside_the_granted_prefix_traps() {
     std::fs::write(
         &source,
         "fn main(world: World) -> [] int {\n\
-             let Split { io, ffi, fs } = split(world); release(ffi); release(io);\n\
+             let Split { io, ffi, fs, heap } = split(world); release(heap); release(ffi); release(io);\n\
              let tmp = narrow(fs, \"/tmp/lex-sys-granted\");\n\
              var read = 0;\n\
              region a {\n\
@@ -486,7 +486,7 @@ fn a_path_containing_dot_dot_traps() {
     std::fs::write(
         &source,
         "fn main(world: World) -> [] int {\n\
-             let Split { io, ffi, fs } = split(world); release(ffi); release(io);\n\
+             let Split { io, ffi, fs, heap } = split(world); release(heap); release(ffi); release(io);\n\
              let tmp = narrow(fs, \"/tmp\");\n\
              var read = 0;\n\
              region a {\n\
@@ -527,7 +527,7 @@ fn a_sibling_of_the_granted_directory_traps() {
     std::fs::write(
         &source,
         "fn main(world: World) -> [] int {\n\
-             let Split { io, ffi, fs } = split(world); release(ffi); release(io);\n\
+             let Split { io, ffi, fs, heap } = split(world); release(heap); release(ffi); release(io);\n\
              let tmp = narrow(fs, \"/tmp/lex-sys-granted\");\n\
              var read = 0;\n\
              region a {\n\
@@ -557,6 +557,75 @@ fn a_sibling_of_the_granted_directory_traps() {
 }
 
 #[test]
+fn the_heap_actually_frees() {
+    // `docs/heap.md` §3.1 claims the general heap cannot leak. The checker
+    // guarantees `unbox` runs on every path, but that is a claim about the
+    // *program* -- this is the claim about the emitted code.
+    //
+    // Eight million boxes of 2 KiB each, one at a time. Freeing makes the
+    // footprint one box; leaking makes it 16 GB, which no machine this runs
+    // on has. So a regression that dropped the `free` does not produce a
+    // subtly worse number here, it fails: either our own `trapz` fires when
+    // `malloc` returns null, or the process is killed. Both are a non-zero
+    // exit, and both are what this asserts against.
+    //
+    // (Run under valgrind on linux-x86_64 while this was written: one
+    // million allocs, one million frees, "in use at exit: 0 bytes in 0
+    // blocks". Valgrind is not on both CI targets, so the portable check is
+    // the one above.)
+    const FIELDS: usize = 256;
+    const ROUNDS: usize = 8_000_000;
+
+    let fields = (0..FIELDS).map(|i| format!("f{i}: int")).collect::<Vec<_>>().join(", ");
+    let init = (0..FIELDS).map(|i| format!("f{i}: 1")).collect::<Vec<_>>().join(", ");
+
+    let dir = scratch("heap-frees");
+    let source = dir.join("churn.ls");
+    std::fs::write(
+        &source,
+        format!(
+            "struct Chunk {{ {fields} }}\n\
+             fn churn[&h](heap: &!h Heap, rounds: int) -> [heap] int {{\n\
+                 var total = 0;\n\
+                 var i = 0;\n\
+                 while i < rounds {{\n\
+                     let b = box(heap, Chunk {{ {init} }});\n\
+                     let c = unbox(heap, b);\n\
+                     total = total + c.f0;\n\
+                     i = i + 1;\n\
+                 }}\n\
+                 return total;\n\
+             }}\n\
+             fn main(world: World) -> [] int {{\n\
+                 let Split {{ io, ffi, fs, heap }} = split(world);\n\
+                 release(ffi); release(fs); release(io);\n\
+                 var total = 0;\n\
+                 borrow mut heap as &!h in {{ total = churn(h, {ROUNDS}); }}\n\
+                 release(heap);\n\
+                 return total - {ROUNDS};\n\
+             }}\n"
+        ),
+    )
+    .expect("a writable fixture");
+
+    let exe = dir.join("churn");
+    let build = Command::new(BIN)
+        .args(["build".as_ref(), source.as_os_str(), "-o".as_ref(), exe.as_os_str()])
+        .output()
+        .expect("the compiler runs");
+    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+
+    let run = Command::new(&exe).output().expect("the compiled program runs");
+    assert_eq!(
+        run.status.code(),
+        Some(0),
+        "eight million boxes in a bounded footprint should succeed; a leak would need 16 GB"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn a_written_file_is_readable_by_its_owner() {
     // The regression guard for a real bug, and the reason it is worth a test
     // of its own rather than leaving it to `file_roundtrip.ls`.
@@ -579,7 +648,7 @@ fn a_written_file_is_readable_by_its_owner() {
         &source,
         format!(
             "fn main(world: World) -> [] int {{\n\
-                 let Split {{ io, ffi, fs }} = split(world); release(ffi); release(io);\n\
+                 let Split {{ io, ffi, fs, heap }} = split(world); release(heap); release(ffi); release(io);\n\
                  let one = narrow(fs, \"{path}\");\n\
                  var wrote = 0;\n\
                  borrow one as &f in {{ wrote = fs_write(f, \"{path}\", \"written\\n\"); }}\n\
@@ -625,7 +694,7 @@ fn a_missing_file_is_minus_one_rather_than_a_trap() {
     std::fs::write(
         &source,
         "fn main(world: World) -> [] int {\n\
-             let Split { io, ffi, fs } = split(world); release(ffi); release(io);\n\
+             let Split { io, ffi, fs, heap } = split(world); release(heap); release(ffi); release(io);\n\
              let tmp = narrow(fs, \"/tmp/lex-sys-not-here\");\n\
              var read = 0;\n\
              region a {\n\

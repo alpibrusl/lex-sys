@@ -9,7 +9,9 @@
 // at run time when a path is handed to an operation (§4).
 
 fn main(world: World) -> [] int {
-    let Split { io, ffi, fs } = split(world);
+    let Split { io, ffi, fs, heap } = split(world);
+    // This program allocates nothing on the heap, so that authority ends here.
+    release(heap);
     release(ffi);
     release(io);
 

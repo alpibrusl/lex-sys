@@ -189,7 +189,9 @@ fn report[&f, &i](
 }
 
 fn main(world: World) -> [] int {
-    let Split { io, ffi, fs } = split(world);
+    let Split { io, ffi, fs, heap } = split(world);
+    // This program allocates nothing on the heap, so that authority ends here.
+    release(heap);
     // File operations reach libc from the backend rather than through an
     // `extern fn`, so a program that touches files needs no FFI capability
     // at all -- which is the whole reason `Fs` means anything (§2).

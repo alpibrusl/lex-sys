@@ -11,8 +11,9 @@
 extern fn labs(n: int) -> [ffi("libc")] int;
 
 fn main(world: World) -> [] int {
-    let Split { io, ffi, fs } = split(world);
+    let Split { io, ffi, fs, heap } = split(world);
     // This program touches no files, so that authority ends here.
+    release(heap);
     release(fs);
     release(ffi);
     release(io);

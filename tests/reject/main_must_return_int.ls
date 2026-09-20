@@ -4,8 +4,9 @@
 // of taste: it takes the `World` and gives back the exit status.
 
 fn main(world: World) -> [] bool {
-    let Split { io, ffi, fs } = split(world);
+    let Split { io, ffi, fs, heap } = split(world);
     // This program touches no files, so that authority ends here.
+    release(heap);
     release(fs);
     // Nothing here calls into C, so that authority is dropped at once.
     release(ffi);

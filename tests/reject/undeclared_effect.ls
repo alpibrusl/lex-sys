@@ -14,8 +14,9 @@ fn quiet[&i](io: &!i Io) -> [] int {
 }
 
 fn main(world: World) -> [] int {
-    let Split { io, ffi, fs } = split(world);
+    let Split { io, ffi, fs, heap } = split(world);
     // This program touches no files, so that authority ends here.
+    release(heap);
     release(fs);
     // Nothing here calls into C, so that authority is dropped at once.
     release(ffi);

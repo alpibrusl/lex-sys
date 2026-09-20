@@ -37,7 +37,9 @@ fn save[&f](fs: &f Fs("/tmp/lex-sys-narrowed.txt")) -> [fs_write("/tmp/lex-sys-n
 }
 
 fn main(world: World) -> [] int {
-    let Split { io, ffi, fs } = split(world);
+    let Split { io, ffi, fs, heap } = split(world);
+    // This program allocates nothing on the heap, so that authority ends here.
+    release(heap);
     release(ffi);
 
     // The one narrowing in the program, and the whole of what the rest of
