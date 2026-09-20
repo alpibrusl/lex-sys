@@ -194,6 +194,38 @@ fn run_builds_and_executes_in_one_step() {
 }
 
 #[test]
+fn integer_overflow_traps_rather_than_wrapping() {
+    // `docs/defined-behaviour.md` §2.1. Wrapping would be *defined* -- C has
+    // it for unsigned, Rust has it in release -- so it is not undefined
+    // behaviour that is being refused here, it is a silently wrong answer.
+    // The wrong answer propagates; the stopped process does not.
+    let dir = scratch("integer-overflow");
+    let source = dir.join("overflow.ls");
+    std::fs::write(
+        &source,
+        "fn main(world: World) -> [] int {\n\
+             let Split { io, ffi } = split(world); release(ffi); release(io);\n\
+             var n = 9223372036854775807;\n\
+             return n + 1;\n\
+         }\n",
+    )
+    .expect("a writable fixture");
+    let exe = dir.join("overflow");
+
+    let build = Command::new(BIN)
+        .args(["build".as_ref(), source.as_os_str(), "-o".as_ref(), exe.as_os_str()])
+        .output()
+        .expect("the compiler runs");
+    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+
+    let run = Command::new(&exe).output().expect("the compiled program runs");
+    assert!(!run.status.success(), "overflow should not succeed");
+    assert_eq!(run.status.code(), None, "the process should be killed by a signal, not exit");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn exhausting_an_arena_traps_rather_than_running_past_the_chunk() {
     // §6: an arena is one chunk, obtained once and released once, which is
     // what makes release O(1). Asking it for more than it has is therefore

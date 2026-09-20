@@ -16,6 +16,7 @@
 //~ STDOUT M2 capability: 88
 //~ STDOUT M2 foreign: 7 9
 //~ STDOUT M2 arena: 1 4 9 -> 14
+//~ STDOUT M3 arithmetic: 6 1
 //~ EXIT 0
 
 // ---------------------------------------------------------------- output ---
@@ -541,6 +542,42 @@ fn m2_foreign[&f, &i](libc: &f Ffi("libc"), io: &!i Io) -> [ffi("libc"), io] int
     return newline(io);
 }
 
+// ----------------------------------------------------- M3: arithmetic ----
+// `int` is 64-bit two's complement, and `+`, `-`, `*` and unary `-` produce
+// the right answer or they **trap**. They never wrap.
+//
+// Wrapping silently is *defined* behaviour -- C has it for unsigned types,
+// Rust has it in release builds -- so it is not undefined behaviour being
+// refused here. It is a silently wrong answer, and the reason to refuse one
+// is that the wrong answer propagates and the stopped process does not.
+//
+// Wraparound is still the intent in a hash, a checksum or a cycle counter,
+// and a language that cannot say it forces a workaround worse than the thing
+// it forbids. So it is spelled out. The asymmetry is the whole design: `+`
+// is what you write when you mean arithmetic, `wrapping_add` is what you
+// write when you mean the bits, and you cannot get the second by accident.
+//
+// See `docs/defined-behaviour.md`, where every rule has a fixture.
+
+fn highest() -> [] int {
+    return 9223372036854775807;
+}
+
+fn m3_arithmetic[&i](io: &!i Io) -> [io] int {
+    putchar(io, 77); putchar(io, 51); space(io);          // "M3 "
+    putchar(io, 97); putchar(io, 114); putchar(io, 105); putchar(io, 116);
+    putchar(io, 104); putchar(io, 109); putchar(io, 101); putchar(io, 116);
+    putchar(io, 105); putchar(io, 99); putchar(io, 58); space(io);
+
+    // Checked, and right. `highest() + 1` here would kill the process.
+    print_nat(io, 2 + 4);
+
+    // Asked for, and wrapped: one past the top is the bottom, which is
+    // negative -- so the digit is 1.
+    space(io); digit(io, wrapping_add(highest(), 1) < 0);
+    return newline(io);
+}
+
 fn main(world: World) -> [] int {
     // §8.2: the runtime hands over exactly one `World`, and `split` consumes
     // it. There is no other way to obtain a capability.
@@ -558,6 +595,7 @@ fn main(world: World) -> [] int {
             m2_capability(i);
             m2_foreign(f, i);
             m2_arena(i);
+            m3_arithmetic(i);
         }
     }
 
