@@ -193,6 +193,66 @@ fn run_builds_and_executes_in_one_step() {
     assert_eq!(output.status.code(), Some(0));
 }
 
+/// The canonical printer's two contracts, over every `.ls` file in the repo.
+///
+/// 1. **Identity-preserving.** Parsing the printed text gives back the same
+///    hash for every declaration. That is what makes it the rendering step
+///    of a store that addresses code by hash rather than merely a
+///    pretty-printer.
+/// 2. **Idempotent.** Printing the output again changes nothing, so the
+///    canonical form is a fixed point.
+///
+/// Run over the accept fixtures, the examples *and* the reject fixtures --
+/// the last of those parse even though they are refused later, and they are
+/// where the odd syntax lives, so they are the most valuable input of the
+/// three.
+#[test]
+fn printing_preserves_every_identity_and_is_idempotent() {
+    let mut checked = 0;
+    for dir in ["tests/accept", "tests/reject", "examples"] {
+        for entry in std::fs::read_dir(repo_root().join(dir)).expect("a readable directory") {
+            let path = entry.expect("a readable entry").path();
+            if path.extension().and_then(|e| e.to_str()) != Some("ls") {
+                continue;
+            }
+            let source = std::fs::read_to_string(&path).expect("a readable fixture");
+            // A reject fixture may be refused by the *parser*, in which case
+            // there is no tree to print and nothing to check here.
+            let Ok(ast) = lex_sys_syntax::parse(&source) else { continue };
+
+            let printed = lex_sys_syntax::print(&ast);
+            let reparsed = lex_sys_syntax::parse(&printed).unwrap_or_else(|d| {
+                panic!(
+                    "{}: printed output does not parse: {}\n{printed}",
+                    path.display(),
+                    d.message
+                )
+            });
+
+            let before = lex_sys_id::identify(&ast);
+            let after = lex_sys_id::identify(&reparsed);
+            assert_eq!(
+                before.functions.len(),
+                after.functions.len(),
+                "{}: a declaration went missing",
+                path.display()
+            );
+            for (a, b) in before.functions.iter().zip(after.functions.iter()) {
+                assert_eq!(a.sig, b.sig, "{}: `{}`'s signature changed", path.display(), a.name);
+                assert_eq!(a.body, b.body, "{}: `{}`'s body changed", path.display(), a.name);
+            }
+            for (a, b) in before.types.iter().zip(after.types.iter()) {
+                assert_eq!(a.id, b.id, "{}: `{}` changed", path.display(), a.name);
+            }
+
+            let again = lex_sys_syntax::print(&reparsed);
+            assert_eq!(printed, again, "{}: printing is not a fixed point", path.display());
+            checked += 1;
+        }
+    }
+    assert!(checked > 100, "the walk should have found the whole suite, found {checked}");
+}
+
 #[test]
 fn indexing_past_a_slice_traps_rather_than_reading_on() {
     // `docs/defined-behaviour.md` §1: the alternative to a bounds check is
