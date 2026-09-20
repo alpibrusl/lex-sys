@@ -11,14 +11,30 @@ fn digit(b: bool) -> [] int {
     }
 }
 
-fn main() -> [io] int {
-    putchar(digit(2 < 3));
-    putchar(digit(3 <= 2));
-    putchar(digit(4 == 4));
-    putchar(digit(5 != 5));
-    putchar(digit(true && false));
-    putchar(digit(true || false));
-    putchar(digit(!true));
-    putchar(10);
+fn run[&i](io: &!i Io) -> [io] int {
+    putchar(io, digit(2 < 3));
+    putchar(io, digit(3 <= 2));
+    putchar(io, digit(4 == 4));
+    putchar(io, digit(5 != 5));
+    putchar(io, digit(true && false));
+    putchar(io, digit(true || false));
+    putchar(io, digit(!true));
+    putchar(io, 10);
     return 0;
+}
+
+fn main(world: World) -> [] int {
+    // §8.2: the runtime hands over exactly one `World`, and `split` consumes
+    // it. There is no other way to obtain a capability.
+    let Split { io } = split(world);
+    var status = 0;
+    // Threaded by borrow, not by move: a callee should not consume its
+    // caller's authority.
+    borrow mut io as &!i in {
+        status = run(i);
+    }
+    // Authority is a resource, so it is destroyed exactly once. A program
+    // that forgets this does not compile.
+    release(io);
+    return status;
 }

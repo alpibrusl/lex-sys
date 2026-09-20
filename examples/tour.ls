@@ -13,6 +13,7 @@
 //~ STDOUT M2 borrow: 4 8 12
 //~ STDOUT M2 unique: 3 5 5
 //~ STDOUT M2 effects: 42
+//~ STDOUT M2 capability: 88
 //~ EXIT 0
 
 // ---------------------------------------------------------------- output ---
@@ -23,63 +24,68 @@
 // type. `[]` is how a function says it is pure; `[io]` says it reaches the
 // console. The row is *exact* -- declaring an effect you do not perform is
 // as much an error as performing one you did not declare -- and it is
-// transitive, so `main`'s row is the whole program's.
+// transitive.
+//
+// And every one of them takes an `io: &!i Io`. That is not boilerplate: it
+// is the reason the row can be trusted. A function is handed the authority
+// to print or it cannot print, and `main` at the bottom of this file is the
+// only place any of it comes from.
 
-fn newline() -> [io] int {
-    return putchar(10);
+fn newline[&i](io: &!i Io) -> [io] int {
+    return putchar(io, 10);
 }
 
-fn space() -> [io] int {
-    return putchar(32);
+fn space[&i](io: &!i Io) -> [io] int {
+    return putchar(io, 32);
 }
 
-fn print_nat(n: int) -> [io] int {
+fn print_nat[&i](io: &!i Io, n: int) -> [io] int {
     if n >= 10 {
-        print_nat(n / 10);
+        print_nat(io, n / 10);
     }
-    return putchar(48 + n % 10);
+    return putchar(io, 48 + n % 10);
 }
 
 // ------------------------------------------------------------- M0: ints ----
 // Functions, arithmetic, `if`/`else`, `while`, and `let`/`var` bindings.
 // `let` is immutable; parameters are too.
 
-fn label_m0() -> [io] int {
-    putchar(77); putchar(48); putchar(58);      // "M0:"
+fn label_m0[&i](io: &!i Io) -> [io] int {
+    putchar(io, 77); putchar(io, 48); putchar(io, 58);      // "M0:"
     return 0;
 }
 
-fn m0() -> [io] int {
-    label_m0();
-    space(); print_nat(1 + 2 * 3);              // precedence: 7
-    space(); print_nat(10 - 3 - 2);             // left-associative: 5
-    space(); print_nat(0 - (-6 / 2 + 6) + 6);   // truncating division: 3
-    space(); print_nat(7 % 3);                  // remainder: 1
-    return newline();
+fn m0[&i](io: &!i Io) -> [io] int {
+    label_m0(io);
+    space(io); print_nat(io, 1 + 2 * 3);              // precedence: 7
+    space(io); print_nat(io, 10 - 3 - 2);             // left-associative: 5
+    space(io); print_nat(io, 0 - (-6 / 2 + 6) + 6);   // truncating division: 3
+    space(io); print_nat(io, 7 % 3);                  // remainder: 1
+    return newline(io);
 }
 
 // ------------------------------------------------------------ M1: bool -----
 // A comparison has a type. `if` and `while` require it, and there is no
 // conversion in either direction. `&&` and `||` short-circuit.
 
-fn digit(b: bool) -> [io] int {
+fn digit[&i](io: &!i Io, b: bool) -> [io] int {
     if b {
-        return putchar(49);
+        return putchar(io, 49);
     }
-    return putchar(48);
+    return putchar(io, 48);
 }
 
-fn m1_bool() -> [io] int {
-    putchar(77); putchar(49); space();            // "M1 "   // "M1:"
-    putchar(98); putchar(111); putchar(111); putchar(108); putchar(58); space();
-    digit(2 < 3);
-    digit(3 <= 2);
-    digit(4 == 4);
-    digit(5 != 5);
-    digit(true && false);
-    digit(true || false);
-    digit(!true);
-    return newline();
+fn m1_bool[&i](io: &!i Io) -> [io] int {
+    putchar(io, 77); putchar(io, 49); space(io);            // "M1 "   // "M1:"
+    putchar(io, 98); putchar(io, 111); putchar(io, 111); putchar(io, 108); putchar(io, 58); space(io);
+    digit(io, 2 < 3);
+    digit(io, 3 <= 2);
+    digit(io, 4 == 4);
+    digit(io, 5 != 5);
+    digit(io, true && false);
+    digit(io, true || false);
+    digit(io, !true);
+    return newline(io);
 }
 
 // ---------------------------------------------------------- M1: structs ----
@@ -94,15 +100,15 @@ fn length_squared(v: Vec2) -> [] int {
     return v.x * v.x + v.y * v.y;
 }
 
-fn m1_struct() -> [io] int {
+fn m1_struct[&i](io: &!i Io) -> [io] int {
     let v = Vec2 { x: 3, y: 4 };
-    putchar(77); putchar(49); space();            // "M1 "
-    putchar(115); putchar(116); putchar(114); putchar(117); putchar(99);
-    putchar(116); putchar(58); space();
-    putchar(40); print_nat(v.x); putchar(44); space(); print_nat(v.y); putchar(41);
-    space(); putchar(45); putchar(62); space();
-    print_nat(length_squared(v));               // 25
-    return newline();
+    putchar(io, 77); putchar(io, 49); space(io);            // "M1 "
+    putchar(io, 115); putchar(io, 116); putchar(io, 114); putchar(io, 117); putchar(io, 99);
+    putchar(io, 116); putchar(io, 58); space(io);
+    putchar(io, 40); print_nat(io, v.x); putchar(io, 44); space(io); print_nat(io, v.y); putchar(io, 41);
+    space(io); putchar(io, 45); putchar(io, 62); space(io);
+    print_nat(io, length_squared(v));               // 25
+    return newline(io);
 }
 
 // ------------------------------------------------------------ M1: enums ----
@@ -123,13 +129,13 @@ fn area(s: Shape) -> [] int {
     }
 }
 
-fn m1_enum() -> [io] int {
-    putchar(77); putchar(49); space();            // "M1 "
-    putchar(101); putchar(110); putchar(117); putchar(109); putchar(58); space();
-    print_nat(area(Shape::Empty));              // 0
-    space(); print_nat(area(Shape::Circle(2))); // 12
-    space(); print_nat(area(Shape::Rect(4, 5)));// 20
-    return newline();
+fn m1_enum[&i](io: &!i Io) -> [io] int {
+    putchar(io, 77); putchar(io, 49); space(io);            // "M1 "
+    putchar(io, 101); putchar(io, 110); putchar(io, 117); putchar(io, 109); putchar(io, 58); space(io);
+    print_nat(io, area(Shape::Empty));              // 0
+    space(io); print_nat(io, area(Shape::Circle(2))); // 12
+    space(io); print_nat(io, area(Shape::Rect(4, 5)));// 20
+    return newline(io);
 }
 
 // --------------------------------------------------------- M1: generics ----
@@ -148,24 +154,24 @@ fn unwrap_or[T](o: Opt[T], fallback: T) -> [] T {
     }
 }
 
-fn m1_generic() -> [io] int {
-    putchar(77); putchar(49); space();            // "M1 "
-    putchar(103); putchar(101); putchar(110); putchar(101); putchar(114);
-    putchar(105); putchar(99); putchar(58); space();
+fn m1_generic[&i](io: &!i Io) -> [io] int {
+    putchar(io, 77); putchar(io, 49); space(io);            // "M1 "
+    putchar(io, 103); putchar(io, 101); putchar(io, 110); putchar(io, 101); putchar(io, 114);
+    putchar(io, 105); putchar(io, 99); putchar(io, 58); space(io);
 
     // Instantiated at `int` twice...
-    print_nat(unwrap_or(Opt::Some(5), 0));      // 5
+    print_nat(io, unwrap_or(Opt::Some(5), 0));      // 5
     let missing: Opt[int] = Opt::None;          // the annotation settles `T`
-    space(); print_nat(unwrap_or(missing, 3));  // 3
+    space(io); print_nat(io, unwrap_or(missing, 3));  // 3
 
     // ...and at `bool`, which is a second copy of the same source.
-    space();
+    space(io);
     if unwrap_or(Opt::Some(true), false) {
-        putchar(122);                           // 'z'
+        putchar(io, 122);                           // 'z'
     } else {
-        putchar(45);
+        putchar(io, 45);
     }
-    return newline();
+    return newline(io);
 }
 
 // ------------------------------------------------- M2: linear resources ----
@@ -226,20 +232,20 @@ fn redeem_either(t: Ticket, as_is: bool) -> [] int {
     return redeem(stamp(t));
 }
 
-fn m2_linear() -> [io] int {
-    putchar(77); putchar(50); space();          // "M2 "
-    putchar(108); putchar(105); putchar(110); putchar(101); putchar(97);
-    putchar(114); putchar(58); space();         // "linear: "
+fn m2_linear[&i](io: &!i Io) -> [io] int {
+    putchar(io, 77); putchar(io, 50); space(io);          // "M2 "
+    putchar(io, 108); putchar(io, 105); putchar(io, 110); putchar(io, 101); putchar(io, 97);
+    putchar(io, 114); putchar(io, 58); space(io);         // "linear: "
 
-    print_nat(redeem(issue(4)));                                    // 4
-    space(); print_nat(redeem(stamp(issue(6))));                    // 7
-    space(); print_nat(redeem_both(Booking {
+    print_nat(io, redeem(issue(4)));                                    // 4
+    space(io); print_nat(io, redeem(stamp(issue(6))));                    // 7
+    space(io); print_nat(io, redeem_both(Booking {
         outbound: issue(2),
         inbound: issue(7),
     }));                                                            // 9
-    space(); print_nat(redeem_either(issue(5), true));              // 5
-    space(); print_nat(redeem_either(issue(5), false));             // 6
-    return newline();
+    space(io); print_nat(io, redeem_either(issue(5), true));              // 5
+    space(io); print_nat(io, redeem_either(issue(5), false));             // 6
+    return newline(io);
 }
 
 // ------------------------------------------------------ M2: borrowing ----
@@ -270,35 +276,35 @@ fn later_of[&dst, &src where src <= dst](a: &dst Ticket, b: &src Ticket) -> [] i
     return serial_of(a) + serial_of(b);
 }
 
-fn m2_borrow() -> [io] int {
-    putchar(77); putchar(50); space();          // "M2 "
-    putchar(98); putchar(111); putchar(114); putchar(114); putchar(111);
-    putchar(119); putchar(58); space();         // "borrow: "
+fn m2_borrow[&i](io: &!i Io) -> [io] int {
+    putchar(io, 77); putchar(io, 50); space(io);          // "M2 "
+    putchar(io, 98); putchar(io, 111); putchar(io, 114); putchar(io, 114); putchar(io, 111);
+    putchar(io, 119); putchar(io, 58); space(io);         // "borrow: "
 
     let held = issue(4);
 
     borrow held as &r in {
         // Reading through the reference, which the owned value refuses.
-        print_nat(r.serial);
+        print_nat(io, r.serial);
 
         // Shared borrows nest: freezing is not exclusive, because two
         // readers neither move the value nor change it.
-        space();
+        space(io);
         borrow held as &inner in {
-            print_nat(serial_of(r) + serial_of(inner));
+            print_nat(io, serial_of(r) + serial_of(inner));
         }
 
         // `r` comes from the enclosing block, so it outlives `inner` and may
         // be used where `&inner` is expected. Nothing else coerces.
-        space();
+        space(io);
         borrow held as &inner in {
-            print_nat(later_of(r, inner) + serial_of(r));
+            print_nat(io, later_of(r, inner) + serial_of(r));
         }
     }
 
     // Owned again, and still owed exactly one consumption.
     let spent = redeem(held);
-    return newline();
+    return newline(io);
 }
 
 // ------------------------------------------------ M2: unique borrows ----
@@ -328,23 +334,23 @@ fn advance[&r](m: &!r Meter) -> [] int {
     return m.reading;
 }
 
-fn m2_unique() -> [io] int {
-    putchar(77); putchar(50); space();          // "M2 "
-    putchar(117); putchar(110); putchar(105); putchar(113); putchar(117);
-    putchar(101); putchar(58); space();         // "unique: "
+fn m2_unique[&i](io: &!i Io) -> [io] int {
+    putchar(io, 77); putchar(io, 50); space(io);          // "M2 "
+    putchar(io, 117); putchar(io, 110); putchar(io, 105); putchar(io, 113); putchar(io, 117);
+    putchar(io, 101); putchar(io, 58); space(io);         // "unique: "
 
     var meter = Meter { reading: 1, step: 2 };
 
     borrow mut meter as &!r in {
-        print_nat(advance(r));
-        space(); print_nat(advance(r));
+        print_nat(io, advance(r));
+        space(io); print_nat(io, advance(r));
     }
 
     // Owned again, and carrying what the reference wrote. The value lived in
     // a buffer for the block and was read back when it closed, which is
     // sound precisely because the lock meant nothing else could have moved on.
-    space(); print_nat(meter.reading);
-    return newline();
+    space(io); print_nat(io, meter.reading);
+    return newline(io);
 }
 
 // -------------------------------------------------------- M2: effects ----
@@ -372,29 +378,79 @@ fn triple(n: int) -> [] int {
 
 // Performs `io`, because `print_nat` does. Nothing else about the body
 // matters to the row.
-fn show(n: int) -> [io] int {
-    return print_nat(n);
+fn show[&i](io: &!i Io, n: int) -> [io] int {
+    return print_nat(io, n);
 }
 
-fn m2_effects() -> [io] int {
-    putchar(77); putchar(50); space();          // "M2 "
-    putchar(101); putchar(102); putchar(102); putchar(101); putchar(99);
-    putchar(116); putchar(115); putchar(58); space();   // "effects: "
+fn m2_effects[&i](io: &!i Io) -> [io] int {
+    putchar(io, 77); putchar(io, 50); space(io);          // "M2 "
+    putchar(io, 101); putchar(io, 102); putchar(io, 102); putchar(io, 101); putchar(io, 99);
+    putchar(io, 116); putchar(io, 115); putchar(io, 58); space(io);   // "effects: "
 
     // A pure call inside an effectful body adds nothing to the row.
-    show(triple(14));
-    return newline();
+    show(io, triple(14));
+    return newline(io);
 }
 
-fn main() -> [io] int {
-    m0();
-    m1_bool();
-    m1_struct();
-    m1_enum();
-    m1_generic();
-    m2_linear();
-    m2_borrow();
-    m2_unique();
-    m2_effects();
+fn run[&i](io: &!i Io) -> [io] int {
+    m0(io);
+    m1_bool(io);
+    m1_struct(io);
+    m1_enum(io);
+    m1_generic(io);
+    m2_linear(io);
+    m2_borrow(io);
+    m2_unique(io);
+    m2_effects(io);
     return 0;
+}
+
+// --------------------------------------------------- M2: capabilities ----
+// The thesis, and the last piece of it. An effect row says what a function
+// does; a capability is what lets it. `[io]` on a signature means the
+// function was handed an `&!i Io` it did not create, and after that reading
+// the row and reading the parameter list are the same act.
+//
+// A capability is an ordinary `res` value -- no special kind, no special
+// syntax -- so everything in this file already applies to it. It is linear,
+// so it is released exactly once. It is borrowed rather than moved, so a
+// callee cannot consume its caller's authority. And it has no literal form,
+// so the only `Io` that exists is the one inside the `World` the runtime
+// handed `main`.
+//
+// That is the whole safety story, and it is stated as a type: a function
+// that is not given a capability cannot perform its effect.
+
+fn twice[&i](io: &!i Io, n: int) -> [io] int {
+    print_nat(io, n);
+    return print_nat(io, n);
+}
+
+fn m2_capability[&i](io: &!i Io) -> [io] int {
+    putchar(io, 77); putchar(io, 50); space(io);          // "M2 "
+    putchar(io, 99); putchar(io, 97); putchar(io, 112); putchar(io, 97);
+    putchar(io, 98); putchar(io, 105); putchar(io, 108); putchar(io, 105);
+    putchar(io, 116); putchar(io, 121); putchar(io, 58); space(io);
+
+    // Prints "8" twice -- and could not print at all without the `io` it was
+    // handed. Delete the parameter and the body stops compiling.
+    twice(io, 8);
+    return newline(io);
+}
+
+fn main(world: World) -> [] int {
+    // §8.2: the runtime hands over exactly one `World`, and `split` consumes
+    // it. There is no other way to obtain a capability.
+    let Split { io } = split(world);
+    var status = 0;
+    // Threaded by borrow, not by move: a callee should not consume its
+    // caller's authority.
+    borrow mut io as &!i in {
+        status = run(i);
+        m2_capability(i);
+    }
+    // Authority is a resource, so it is destroyed exactly once. A program
+    // that forgets this does not compile.
+    release(io);
+    return status;
 }

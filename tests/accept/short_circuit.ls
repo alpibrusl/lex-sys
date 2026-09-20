@@ -5,19 +5,35 @@
 //~ STDOUT ab
 //~ EXIT 0
 
-fn noisy() -> [io] bool {
-    putchar(88);                     // 'X'
+fn noisy[&i](io: &!i Io) -> [io] bool {
+    putchar(io, 88);                     // 'X'
     return true;
 }
 
-fn main() -> [io] int {
-    if false && noisy() {
-        putchar(63);                 // '?'
+fn run[&i](io: &!i Io) -> [io] int {
+    if false && noisy(io) {
+        putchar(io, 63);                 // '?'
     }
-    if true || noisy() {
-        putchar(97);                 // 'a'
+    if true || noisy(io) {
+        putchar(io, 97);                 // 'a'
     }
-    putchar(98);                     // 'b'
-    putchar(10);
+    putchar(io, 98);                     // 'b'
+    putchar(io, 10);
     return 0;
+}
+
+fn main(world: World) -> [] int {
+    // §8.2: the runtime hands over exactly one `World`, and `split` consumes
+    // it. There is no other way to obtain a capability.
+    let Split { io } = split(world);
+    var status = 0;
+    // Threaded by borrow, not by move: a callee should not consume its
+    // caller's authority.
+    borrow mut io as &!i in {
+        status = run(i);
+    }
+    // Authority is a resource, so it is destroyed exactly once. A program
+    // that forgets this does not compile.
+    release(io);
+    return status;
 }

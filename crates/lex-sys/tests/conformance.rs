@@ -200,7 +200,11 @@ fn division_by_zero_traps_rather_than_being_undefined() {
     std::fs::write(
         &source,
         "fn divide(a: int, b: int) -> [] int { return a / b; }\n\
-         fn main() -> [] int { return divide(1, 0); }\n",
+         fn main(world: World) -> [] int {\n\
+             let Split { io } = split(world);\n\
+             release(io);\n\
+             return divide(1, 0);\n\
+         }\n",
     )
     .expect("a writable fixture");
     let exe = dir.join("divzero");

@@ -21,16 +21,16 @@ fn bump[&r](c: &!r Counter) -> [] int {
     return c.n;
 }
 
-fn main() -> [io] int {
+fn run[&i](io: &!i Io) -> [io] int {
     var c = Counter { n: 1, step: 2 };
 
     borrow mut c as &!r in {
-        putchar(48 + bump(r));
-        putchar(48 + bump(r));
+        putchar(io, 48 + bump(r));
+        putchar(io, 48 + bump(r));
     }
 
     // Owned again, and carrying what the reference wrote.
-    putchar(48 + c.n);
+    putchar(io, 48 + c.n);
 
     // `&!r` is `val`, so it copies -- and the copies are copies of one
     // *pointer*, so writes through them alias rather than racing to be the
@@ -43,8 +43,24 @@ fn main() -> [io] int {
         a.n = 3;
         b.n = b.n + 4;
     }
-    putchar(48 + d.n);
+    putchar(io, 48 + d.n);
 
-    putchar(10);
+    putchar(io, 10);
     return 0;
+}
+
+fn main(world: World) -> [] int {
+    // §8.2: the runtime hands over exactly one `World`, and `split` consumes
+    // it. There is no other way to obtain a capability.
+    let Split { io } = split(world);
+    var status = 0;
+    // Threaded by borrow, not by move: a callee should not consume its
+    // caller's authority.
+    borrow mut io as &!i in {
+        status = run(i);
+    }
+    // Authority is a resource, so it is destroyed exactly once. A program
+    // that forgets this does not compile.
+    release(io);
+    return status;
 }

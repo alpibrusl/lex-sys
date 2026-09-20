@@ -365,7 +365,28 @@ pub struct Ast {
     type_spans: Vec<Span>,
 }
 
+/// Names the compiler provides, interned before the source is read.
+///
+/// A program never declares `World` or `Io` — they are the capabilities of
+/// `docs/linearity-and-effects.md` §8 — so without this the checker would
+/// have no symbol to resolve `main(world: World)` against.
+///
+/// Interning them first makes the table "prelude, then first appearance"
+/// rather than "first appearance", which is still a deterministic function
+/// of the source. Nothing downstream notices, because a hash encodes a
+/// name's *text* and never its index (`docs/canonical-ast.md` §4.1).
+pub const PRELUDE: &[&str] = &["World", "Io", "Split", "io"];
+
 impl Ast {
+    /// An AST whose interner already knows the prelude's names.
+    pub fn new() -> Self {
+        let mut ast = Ast::default();
+        for name in PRELUDE {
+            ast.symbols.intern(name);
+        }
+        ast
+    }
+
     pub fn push_expr(&mut self, expr: Expr, span: Span) -> ExprId {
         self.exprs.push(expr);
         self.expr_spans.push(span);

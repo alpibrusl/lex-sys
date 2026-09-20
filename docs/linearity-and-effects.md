@@ -6,18 +6,17 @@
 > now the specification the implementation is measured against; §12 lists what
 > is still open, and nothing there blocks the rest.
 >
-> **Implemented: §3 (modes), §4 (linearity), §5 (borrowing) in full, and
-> §7.1–7.3 (effect rows)** — the joins in §4.2, the back-edge rule in §4.3,
-> both borrow modes, the escape occurs-check of §5 rule 4, the outlives stack
-> of §5.2 with its `where` clauses, and rows that are canonical sets,
-> declared at every boundary, exact in both directions and part of `SigId`.
+> **Implemented: §3, §4, §5, §7.1–7.3 and §8.1–8.3** — modes, linearity,
+> both borrow modes, exact effect rows, and capabilities. §2's claim now
+> holds in code: an effect *is* a borrowed capability, `[io]` on a signature
+> means the function was handed an `&!i Io` it did not create, and the only
+> checker that runs over any of it is the linearity and borrow checker §3–§5
+> already needed.
 >
-> **Not implemented: §6, §7.4, §8, §9** — arenas, narrowing, capabilities and
-> the escape hatches. Rows are checked but not yet *grounded in authority*:
-> `putchar` performs `io` because the compiler says so, not because the
-> caller holds an `Io`. §8 is what turns a row from a description into a
-> permission, and until it lands the unification §2 claims is only half
-> shown.
+> **Not implemented: §6, §7.4, §8.4, §9** — arenas, narrowing, FFI and the
+> escape hatches. Those add capabilities that *carry data* (`Fs(prefix)`,
+> `Ffi(library)`), which is where §7.4's refinement lives; the two
+> capabilities that exist today carry none.
 >
 > Where the concrete syntax below differs from what was implemented, §5.3
 > says so and why. The syntax here was always illustrative (§1); the rules
@@ -678,6 +677,26 @@ fn widen(fs: &!f Fs) -> [fs_write("/")] int {
 
 ### 8.1 What one looks like
 
+> **What was built.** `World` and `Io`, plus the `Split` that `split` hands
+> back. `Heap`, `Fs` and `Ffi` wait for allocation, the filesystem and FFI:
+> a capability for an effect nothing can perform is decoration, which is
+> what §7.3 refuses for rows and what this refuses for the same reason.
+>
+> The prelude's types are predeclared rather than written in a program, and
+> a program may not declare its own — `capability_redeclared.ls`. Nor write
+> one as a literal: `Io { }` would be an ambient constructor spelled
+> differently, so it is refused (`no_ambient_capability.ls`). Since `World`
+> and `Io` carry no fields, taking one apart would end authority without
+> naming a consumer, so that is refused too and `release` is the only way
+> (`capability_destructured.ls`). `Split` is destructured on purpose.
+>
+> **Owning discharges; borrowing declares.** §8.2's remark that `main`'s row
+> is `[]` is implemented as a rule: an effect whose capability a function
+> owns *by value* does not appear in its row, because ownership is already
+> visible in the parameter list and is strictly stronger than borrowing. A
+> borrowed `&!i Io` discharges nothing — it is exactly what `[io]` names.
+
+
 A capability is an ordinary `res` value. It has no special kind, no special
 syntax, and no runtime representation beyond what its type says — most are
 zero-sized, and the ones that are not (a file descriptor, an arena pointer) are
@@ -851,14 +870,20 @@ rest are the sections not yet implemented.
 | `undeclared_effect.ls` | A call's row must be a subset of the declared row | 7.2 | ✓ |
 | `effect_declared_not_performed.ls` | An over-wide row is an error | 7.3 | ✓ |
 | `effect_widened.ls` | A capability may be narrowed, never widened | 7.4 | |
-| `no_ambient_capability.ls` | There is no way to obtain a capability but to be given one | 8.2 | |
-| `capability_used_after_release.ls` | A capability is a resource | 8.3 | |
-| `capability_leaked.ls` | A capability must be released | 8.3 | |
+| `no_ambient_capability.ls` | There is no way to obtain a capability but to be given one | 8.2 | ✓ |
+| `capability_used_after_release.ls` | A capability is a resource | 8.3 | ✓ |
+| `capability_leaked.ls` | A capability must be released | 8.3 | ✓ |
 | `ffi_without_capability.ls` | A foreign call requires its `Ffi` capability | 8.4 | |
 
 §7 adds three more: `effect_not_propagated.ls` (a row is transitive),
 `ungrounded_effect_label.ls` (a label nothing performs) and
 `effect_row_required.ls` (the syntax).
+
+§8 adds three: `world_leaked.ls` (the root is a resource too),
+`capability_destructured.ls` (taking one apart is not releasing it) and
+`capability_redeclared.ls` (a program may not declare its own `Io`).
+`main_takes_the_world.ls` replaces M0's `main_takes_arguments.ls`, since
+`main` now takes exactly one thing.
 
 §5 adds eight must-reject fixtures beyond the table, for the rules §5.3
 describes and for the syntax: `region_not_in_scope.ls`,
@@ -890,7 +915,7 @@ that rejects everything is not a rule either:
 | `arena_roundtrip.ls` | Allocate, walk, release in O(1) | |
 | `effect_exact.ls` | A row that is exactly what the body performs | ✓ |
 | `narrowed_capability.ls` | Attenuation, and a call that fits inside it | |
-| `threaded_io.ls` | `main` splitting `World` and threading `Io` down three frames | |
+| `threaded_io.ls` | `main` splitting `World` and threading `Io` down three frames | ✓ |
 
 ---
 

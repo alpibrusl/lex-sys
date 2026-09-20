@@ -28,17 +28,33 @@ fn size_of[&r](handle: &r File) -> [] int {
     return handle.size;
 }
 
-fn main() -> [io] int {
+fn run[&i](io: &!i Io) -> [io] int {
     let f = open(4);
 
     borrow f as &r in {
         // `r` is the region in a type and the reference in an expression.
-        putchar(48 + r.fd);
-        putchar(48 + size_of(r) / 2 - 1);
+        putchar(io, 48 + r.fd);
+        putchar(io, 48 + size_of(r) / 2 - 1);
     }
 
     // Owned again: the block closed, so the freeze lifted.
-    putchar(48 + close(f) - 5);
-    putchar(10);
+    putchar(io, 48 + close(f) - 5);
+    putchar(io, 10);
     return 0;
+}
+
+fn main(world: World) -> [] int {
+    // §8.2: the runtime hands over exactly one `World`, and `split` consumes
+    // it. There is no other way to obtain a capability.
+    let Split { io } = split(world);
+    var status = 0;
+    // Threaded by borrow, not by move: a callee should not consume its
+    // caller's authority.
+    borrow mut io as &!i in {
+        status = run(i);
+    }
+    // Authority is a resource, so it is destroyed exactly once. A program
+    // that forgets this does not compile.
+    release(io);
+    return status;
 }

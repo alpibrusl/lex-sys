@@ -49,11 +49,27 @@ fn unwrap[T](h: Held[T]) -> [] T {
     return value;
 }
 
-fn main() -> [io] int {
-    putchar(48 + sum(Point { x: 1, y: 2 }) - 0);
-    putchar(48 + unwrap(Held { value: 4 }));
-    putchar(48 + close_both(Pair { left: File { fd: 1 }, right: File { fd: 2 } }) / 10);
-    putchar(48 + close(unwrap(Held { value: File { fd: 2 } })));
-    putchar(10);
+fn run[&i](io: &!i Io) -> [io] int {
+    putchar(io, 48 + sum(Point { x: 1, y: 2 }) - 0);
+    putchar(io, 48 + unwrap(Held { value: 4 }));
+    putchar(io, 48 + close_both(Pair { left: File { fd: 1 }, right: File { fd: 2 } }) / 10);
+    putchar(io, 48 + close(unwrap(Held { value: File { fd: 2 } })));
+    putchar(io, 10);
     return 0;
+}
+
+fn main(world: World) -> [] int {
+    // §8.2: the runtime hands over exactly one `World`, and `split` consumes
+    // it. There is no other way to obtain a capability.
+    let Split { io } = split(world);
+    var status = 0;
+    // Threaded by borrow, not by move: a callee should not consume its
+    // caller's authority.
+    borrow mut io as &!i in {
+        status = run(i);
+    }
+    // Authority is a resource, so it is destroyed exactly once. A program
+    // that forgets this does not compile.
+    release(io);
+    return status;
 }
