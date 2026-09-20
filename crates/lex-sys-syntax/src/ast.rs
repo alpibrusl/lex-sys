@@ -92,6 +92,11 @@ pub enum TypeExpr {
     /// `&r T` and `&!r T` (`docs/linearity-and-effects.md` §5). The region is
     /// a name the parser does not resolve, exactly like a type's name.
     Ref { unique: bool, region: Symbol, inner: TypeId },
+    /// `[T]` — a run of `T`s whose length is a runtime value.
+    ///
+    /// Unsized: it is what a reference points *at*, never a value on its
+    /// own, so it appears as `&r [T]` or `&!r [T]` and nowhere else.
+    Slice(TypeId),
     /// The `"libc"` in `Ffi("libc")` — a type indexed by a literal (§7.4).
     ///
     /// It is a *type*, not a value: `Ffi("libc")` and `Ffi("libm")` are two
@@ -106,14 +111,14 @@ impl TypeExpr {
     pub fn head(&self) -> Option<Symbol> {
         match self {
             TypeExpr::Name { name, .. } => Some(*name),
-            TypeExpr::Ref { .. } | TypeExpr::Lit(_) => None,
+            TypeExpr::Ref { .. } | TypeExpr::Lit(_) | TypeExpr::Slice(_) => None,
         }
     }
 
     pub fn args(&self) -> &[TypeId] {
         match self {
             TypeExpr::Name { args, .. } => args,
-            TypeExpr::Ref { .. } | TypeExpr::Lit(_) => &[],
+            TypeExpr::Ref { .. } | TypeExpr::Lit(_) | TypeExpr::Slice(_) => &[],
         }
     }
 }
@@ -191,6 +196,16 @@ pub enum Expr {
         callee: Symbol,
         args: Vec<ExprId>,
     },
+    /// `s[i]` — one element of a slice, bounds-checked at runtime.
+    ///
+    /// Postfix, like `.field`, and parsed the same way: a primary followed
+    /// by brackets. A type-argument list also uses brackets, but types and
+    /// expressions are different positions, so nothing is ambiguous except
+    /// the two arena builtins, which are a closed set of reserved names.
+    Index {
+        base: ExprId,
+        index: ExprId,
+    },
     /// `alloc[a](Node { value: 1 })` — allocate in an arena (§6).
     ///
     /// Its own node rather than a call, because the brackets name a *region*
@@ -199,6 +214,18 @@ pub enum Expr {
     Alloc {
         region: Symbol,
         value: ExprId,
+    },
+    /// `alloc_slice[a](count, fill)` — a run of `count` copies of `fill` in
+    /// an arena, handed back as `&!a [T]`.
+    ///
+    /// The length is a runtime value and the fill is evaluated once, which
+    /// is what makes this a *slice* constructor rather than an array
+    /// literal. Array literals would need a length in the type, and a
+    /// length in the type is a second kind of generic parameter.
+    AllocSlice {
+        region: Symbol,
+        count: ExprId,
+        fill: ExprId,
     },
 }
 

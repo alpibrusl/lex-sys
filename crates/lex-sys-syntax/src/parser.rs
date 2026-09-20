@@ -354,6 +354,14 @@ impl<'a> Parser<'a> {
                 .ast
                 .push_type(TypeExpr::Ref { unique, region, inner }, tok.span.to(end)));
         }
+        // `[T]` — a slice's referent. Unambiguous here: a bracket at the
+        // *start* of a type can only open one, since a type-argument list
+        // follows a name and an effect row follows `->`.
+        if self.eat(TokenKind::LBracket) {
+            let inner = self.type_expr()?;
+            let end = self.expect(TokenKind::RBracket)?.span;
+            return Ok(self.ast.push_type(TypeExpr::Slice(inner), tok.span.to(end)));
+        }
         let name = self.ident()?;
         let mut args = Vec::new();
         let mut end = tok.span;
@@ -666,14 +674,27 @@ impl<'a> Parser<'a> {
     /// and `a.x + b.y` adds two fields.
     fn postfix(&mut self) -> Result<ExprId, Diagnostic> {
         let mut base = self.primary()?;
-        while self.peek().kind == TokenKind::Dot {
-            self.bump();
-            let tok = self.peek();
-            let name = self.ident()?;
-            let span = self.ast.expr_span(base).to(tok.span);
-            base = self.ast.push_expr(Expr::Field { base, name }, span);
+        loop {
+            match self.peek().kind {
+                TokenKind::Dot => {
+                    self.bump();
+                    let tok = self.peek();
+                    let name = self.ident()?;
+                    let span = self.ast.expr_span(base).to(tok.span);
+                    base = self.ast.push_expr(Expr::Field { base, name }, span);
+                }
+                // `s[i]`. Chains like `.field` does, so `rows[i].len` and
+                // `grid[i][j]` need no special case.
+                TokenKind::LBracket => {
+                    self.bump();
+                    let index = self.bracketed(|p| p.expr())?;
+                    let end = self.expect(TokenKind::RBracket)?.span;
+                    let span = self.ast.expr_span(base).to(end);
+                    base = self.ast.push_expr(Expr::Index { base, index }, span);
+                }
+                _ => return Ok(base),
+            }
         }
-        Ok(base)
     }
 
     /// Parse `inner` with struct literals allowed again: inside brackets of any
@@ -704,6 +725,24 @@ impl<'a> Parser<'a> {
             TokenKind::True | TokenKind::False => {
                 self.bump();
                 Ok(self.ast.push_expr(Expr::Bool(tok.kind == TokenKind::True), tok.span))
+            }
+            TokenKind::Ident if self.text(tok) == "alloc_slice" => {
+                // `alloc_slice[a](count, fill)`. Reserved like `alloc`, and
+                // for the same reason: the brackets name a *region*, which
+                // no other call site does, and postfix brackets on anything
+                // else are an index.
+                self.bump();
+                self.expect(TokenKind::LBracket)?;
+                let region = self.ident()?;
+                self.expect(TokenKind::RBracket)?;
+                self.expect(TokenKind::LParen)?;
+                let (count, fill) = self.bracketed(|p| {
+                    let count = p.expr()?;
+                    p.expect(TokenKind::Comma)?;
+                    Ok((count, p.expr()?))
+                })?;
+                let end = self.expect(TokenKind::RParen)?.span;
+                Ok(self.ast.push_expr(Expr::AllocSlice { region, count, fill }, tok.span.to(end)))
             }
             TokenKind::Ident if self.text(tok) == "alloc" => {
                 // `alloc[a](v)`: the one place brackets name a region at a

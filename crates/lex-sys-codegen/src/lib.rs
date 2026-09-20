@@ -71,10 +71,17 @@ fn leaves_into(ty: &Type, program: &Program, pointer: types::Type, out: &mut Vec
                 }
             }
         },
-        // A reference is one pointer, whatever it points at. Regions are
-        // erased: which `borrow` block a reference came from is a fact the
-        // checker used and the machine has no use for.
-        Type::Ref { .. } => out.push(pointer),
+        // A reference is one pointer, whatever it points at -- except a
+        // slice, which is a pointer *and* a length, because `[T]` is the one
+        // referent whose size is not in its type. Regions are erased either
+        // way: which block a reference came from is a fact the checker used
+        // and the machine has no use for.
+        Type::Ref { inner, .. } => {
+            out.push(pointer);
+            if matches!(inner.as_ref(), Type::Slice(_)) {
+                out.push(types::I64);
+            }
+        }
         other => {
             unreachable!("`{other:?}` reached the backend; the checker should have refused it")
         }
@@ -655,25 +662,110 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
         returned
     }
 
+    /// Take `bytes` from an arena, trapping if the chunk cannot spare them.
+    ///
+    /// Shared by `alloc` and `alloc_slice`, which differ only in how many
+    /// bytes they ask for and what they write there.
+    fn bump(&mut self, arena: u32, bytes: Value) -> Value {
+        let (base_var, bump_var) = self.arenas[arena as usize];
+        let at = self.builder.use_var(bump_var);
+        let next = self.builder.ins().iadd(at, bytes);
+
+        let base = self.builder.use_var(base_var);
+        let end = self.builder.ins().iadd_imm(base, ARENA_CHUNK);
+        // Two ways to be past the end, and a slice can hit either: the sum
+        // overshoots the chunk, or the size computation itself wrapped and
+        // the sum came out *below* where it started. Both are refused here
+        // rather than trusted to a length nobody checked.
+        let over = self.builder.ins().icmp(IntCC::UnsignedGreaterThan, next, end);
+        let wrapped = self.builder.ins().icmp(IntCC::UnsignedLessThan, next, at);
+        let bad = self.builder.ins().bor(over, wrapped);
+        self.builder.ins().trapnz(bad, TrapCode::HEAP_OUT_OF_BOUNDS);
+
+        self.builder.def_var(bump_var, next);
+        at
+    }
+
+    /// `alloc_slice[a](count, fill)` — `count` copies of `fill`, contiguous.
+    ///
+    /// Returns the two leaves a slice is made of: where it starts and how
+    /// many elements it has.
+    fn alloc_slice(&mut self, arena: u32, element: &Type, count: &Expr, fill: &Expr) -> Vec<Value> {
+        let count = self.scalar(count);
+        let values = self.expr(fill);
+        let stride = i64::from(leaf_count(element, self.program, self.pointer))
+            * i64::from(RETURN_SLOT_STRIDE);
+
+        // A negative length is not a small allocation, it is a mistake, and
+        // reading `s[0]` of one would be reading memory nobody reserved.
+        let negative = self.builder.ins().icmp_imm(IntCC::SignedLessThan, count, 0);
+        self.builder.ins().trapnz(negative, TrapCode::HEAP_OUT_OF_BOUNDS);
+
+        // `count * stride` is checked for the same reason every other
+        // multiplication is: a length that overflows the byte count would
+        // ask the arena for less than it is about to write.
+        let width = self.builder.ins().iconst(types::I64, stride);
+        let (bytes, overflowed) = self.builder.ins().smul_overflow(count, width);
+        self.builder.ins().trapnz(overflowed, TrapCode::INTEGER_OVERFLOW);
+        let start = self.bump(arena, bytes);
+
+        // Fill it. A loop rather than an unrolled run, because the length is
+        // a runtime value -- which is what makes this a slice.
+        let header = self.builder.create_block();
+        let body = self.builder.create_block();
+        let done = self.builder.create_block();
+        let cursor = self.temporary(types::I64);
+        let zero = self.builder.ins().iconst(types::I64, 0);
+        self.builder.def_var(cursor, zero);
+        self.builder.ins().jump(header, &[]);
+
+        self.builder.switch_to_block(header);
+        let i = self.builder.use_var(cursor);
+        let more = self.builder.ins().icmp(IntCC::SignedLessThan, i, count);
+        self.builder.ins().brif(more, body, &[], done, &[]);
+
+        self.builder.switch_to_block(body);
+        self.builder.seal_block(body);
+        let i = self.builder.use_var(cursor);
+        let offset = self.builder.ins().imul_imm(i, stride);
+        let address = self.builder.ins().iadd(start, offset);
+        self.store_leaves(address, &values);
+        let next = self.builder.ins().iadd_imm(i, 1);
+        self.builder.def_var(cursor, next);
+        self.builder.ins().jump(header, &[]);
+        self.builder.seal_block(header);
+
+        self.builder.switch_to_block(done);
+        self.builder.seal_block(done);
+        vec![start, count]
+    }
+
+    /// Where element `index` of a slice lives, with the bounds check in
+    /// front of it (`docs/defined-behaviour.md` §1).
+    ///
+    /// One unsigned comparison covers both ends: a negative index read as
+    /// unsigned is enormous, so `i >= len` catches it too.
+    fn element_address(&mut self, base: &Expr, index: &Expr, element: &Type) -> Value {
+        let slice = self.expr(base);
+        let (start, len) = (slice[0], slice[1]);
+        let index = self.scalar(index);
+
+        let out_of_range = self.builder.ins().icmp(IntCC::UnsignedGreaterThanOrEqual, index, len);
+        self.builder.ins().trapnz(out_of_range, TrapCode::HEAP_OUT_OF_BOUNDS);
+
+        let stride = i64::from(leaf_count(element, self.program, self.pointer))
+            * i64::from(RETURN_SLOT_STRIDE);
+        let offset = self.builder.ins().imul_imm(index, stride);
+        self.builder.ins().iadd(start, offset)
+    }
+
     /// `alloc[a](value)` — bump-allocate and write the value there (§6).
     fn alloc(&mut self, arena: u32, ty: &Type, value: &Expr) -> Value {
         let values = self.expr(value);
-        let (base_var, bump_var) = self.arenas[arena as usize];
         let bytes =
             i64::from(leaf_count(ty, self.program, self.pointer)) * i64::from(RETURN_SLOT_STRIDE);
-
-        let at = self.builder.use_var(bump_var);
-        let next = self.builder.ins().iadd_imm(at, bytes);
-
-        // Exhaustion is a trap. Every size here is a compile-time constant
-        // and the chunk is a constant too, so this is one compare against a
-        // pointer the program cannot have moved.
-        let base = self.builder.use_var(base_var);
-        let end = self.builder.ins().iadd_imm(base, ARENA_CHUNK);
-        let past = self.builder.ins().icmp(IntCC::UnsignedGreaterThan, next, end);
-        self.builder.ins().trapnz(past, TrapCode::HEAP_OUT_OF_BOUNDS);
-
-        self.builder.def_var(bump_var, next);
+        let size = self.builder.ins().iconst(self.pointer, bytes);
+        let at = self.bump(arena, size);
         self.store_leaves(at, &values);
         at
     }
@@ -727,6 +819,10 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
                 for (offset, value) in values.into_iter().enumerate() {
                     self.builder.def_var(Variable::from_u32(base + offset as u32), value);
                 }
+            }
+            Place::Element { base, index, element } => {
+                let address = self.element_address(base, index, element);
+                self.store_leaves(address, &values);
             }
             Place::Field { base, def, args, index } => {
                 let address = self.scalar(base);
@@ -961,6 +1057,17 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
             // are loaded out of the buffer the reference points at rather
             // than picked out of leaves already in registers.
             Expr::Alloc { arena, ty, value } => vec![self.alloc(*arena, ty, value)],
+            Expr::AllocSlice { arena, element, count, fill } => {
+                self.alloc_slice(*arena, element, count, fill)
+            }
+            Expr::Index { base, index, element } => {
+                let address = self.element_address(base, index, element);
+                let kinds = leaves(element, self.program, self.pointer);
+                self.load_leaves(address, &kinds)
+            }
+            // The length is the slice's second leaf: already there, never
+            // computed.
+            Expr::Len(slice) => vec![self.expr(slice)[1]],
             Expr::FieldRef { base, def, args, index } => {
                 let address = self.scalar(base);
                 let TypeInfo::Struct { fields, .. } = self.program.type_info(*def) else {
@@ -1119,6 +1226,12 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
                     }
                     Callee::Builtin(Builtin::WrappingMul) => {
                         vec![self.builder.ins().imul(args[0], args[1])]
+                    }
+                    // `len` never reaches here: it is checked and lowered
+                    // at the call site, like `release` and `narrow`, because
+                    // its argument's element type is what decides it.
+                    Callee::Builtin(Builtin::Len) => {
+                        unreachable!("`len` is lowered as `Expr::Len`")
                     }
                     Callee::Builtin(Builtin::PutChar) => {
                         let f = self.module.declare_func_in_func(self.putchar, self.builder.func);
@@ -1395,6 +1508,42 @@ mod tests {
                 !plain.iter().any(|n| n.contains("malloc") || n.contains("free")),
                 "{triple}: a program with no `region` should not reach the allocator: {plain:?}"
             );
+        }
+    }
+
+    /// A slice is two leaves, and the loop that fills one lowers on every
+    /// target.
+    ///
+    /// `alloc_slice` is the first construct that emits a *loop the backend
+    /// wrote* rather than one the program did, with a runtime trip count
+    /// and a stride that depends on the element's layout. Pointer width is
+    /// the target's, so emitting for both formats is the cheap way to find
+    /// out that the address arithmetic disagrees with one.
+    #[test]
+    fn a_slice_lowers_on_every_target() {
+        const SLICES: &str = "\
+            struct Cell { value: int, tag: bool } \
+            fn total[&r](xs: &r [Cell]) -> [] int { \
+                var sum = 0; var i = 0; \
+                while i < len(xs) { sum = sum + xs[i].value; i = i + 1; } \
+                return sum; \
+            } \
+            fn main() -> [] int { \
+                var answer = 0; \
+                region a { \
+                    let xs = alloc_slice[a](4, Cell { value: 0, tag: false }); \
+                    var i = 0; \
+                    while i < len(xs) { xs[i] = Cell { value: i, tag: true }; i = i + 1; } \
+                    answer = total(xs); \
+                } \
+                return answer - 6; \
+            }";
+        for (triple, _) in targets() {
+            let ast = parse(SLICES).expect("should parse");
+            let program = lower(&ast).expect("should lower");
+            let triple: Triple = triple.parse().expect("a valid triple");
+            compile_object_for(&program, "main", triple.clone())
+                .unwrap_or_else(|e| panic!("`{triple}` should emit: {e}"));
         }
     }
 

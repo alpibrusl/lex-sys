@@ -17,6 +17,7 @@
 //~ STDOUT M2 foreign: 7 9
 //~ STDOUT M2 arena: 1 4 9 -> 14
 //~ STDOUT M3 arithmetic: 6 1
+//~ STDOUT M3 slice: 3 1 4 1 5 -> 14
 //~ EXIT 0
 
 // ---------------------------------------------------------------- output ---
@@ -578,6 +579,67 @@ fn m3_arithmetic[&i](io: &!i Io) -> [io] int {
     return newline(io);
 }
 
+// --------------------------------------------------------- M3: slices ----
+// The first half of "enough to write real programs", and the thing strings
+// will be made of.
+//
+// A slice is an *ordinary reference*. `[T]` is a referent -- a run of `T`s
+// whose length is a runtime value -- and `&!a [T]` points at one. That is
+// the whole design: every rule §5 gave references applies to a slice with
+// no second mechanism. It carries a region, it cannot escape that region,
+// a unique one coerces to a shared one, and it is `val` because every
+// reference is.
+//
+// The length travels *in* the slice, beside the pointer, which is why
+// `len` reads a value rather than computing one -- and why `s[i]` can be
+// checked against it. Every index is bounds-checked and an out-of-range one
+// traps; the comparison is unsigned, so a negative index is caught by the
+// same instruction. There is no unchecked form, because reading past the
+// end of an allocation is the undefined behaviour this language does not
+// have (`docs/defined-behaviour.md` §4).
+
+fn sum_of[&r](xs: &r [int]) -> [] int {
+    var total = 0;
+    var i = 0;
+    while i < len(xs) {
+        total = total + xs[i];
+        i = i + 1;
+    }
+    return total;
+}
+
+fn m3_slice[&i](io: &!i Io) -> [io] int {
+    putchar(io, 77); putchar(io, 51); space(io);          // "M3 "
+    putchar(io, 115); putchar(io, 108); putchar(io, 105); putchar(io, 99);
+    putchar(io, 101); putchar(io, 58); space(io);         // "slice: "
+
+    var total = 0;
+    region a {
+        // Five zeroes, in the arena. The length is a runtime value, which
+        // is what makes this a slice rather than an array -- an array's
+        // length would live in its type.
+        let digits = alloc_slice[a](5, 0);
+        digits[0] = 3; digits[1] = 1; digits[2] = 4; digits[3] = 1; digits[4] = 5;
+
+        var n = 0;
+        while n < len(digits) {
+            if n > 0 {
+                space(io);
+            }
+            print_nat(io, digits[n]);
+            n = n + 1;
+        }
+        // Written through a unique slice above, read through a shared one
+        // here: `sum_of` only asked to borrow.
+        total = sum_of(digits);
+    }
+    // The slice and its arena are both gone by here, in one call.
+
+    space(io); putchar(io, 45); putchar(io, 62); space(io);   // " -> "
+    print_nat(io, total);
+    return newline(io);
+}
+
 fn main(world: World) -> [] int {
     // §8.2: the runtime hands over exactly one `World`, and `split` consumes
     // it. There is no other way to obtain a capability.
@@ -596,6 +658,7 @@ fn main(world: World) -> [] int {
             m2_foreign(f, i);
             m2_arena(i);
             m3_arithmetic(i);
+            m3_slice(i);
         }
     }
 

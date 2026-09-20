@@ -160,6 +160,17 @@ that one, and each is enforced rather than merely intended.
   nothing whose type mentions that region leaves it
   (`linearity-and-effects.md` §5, §6). The check is an occurs-check over one
   type, not an analysis.
+* **Every index is bounds-checked, and an out-of-range one traps.** `s[i]`
+  compares `i` against the length the slice carries, and the comparison is
+  unsigned — so a negative index, read as an enormous unsigned one, is
+  caught by the same instruction as an index past the end. There is no
+  unchecked form and no release mode that removes the check: reading past
+  the end of an allocation is the undefined behaviour §1 says this language
+  does not have.
+* **A slice's length is checked where it is made.** `alloc_slice[a](n, v)`
+  traps on a negative `n`, and the byte count `n * stride` is a checked
+  multiplication like any other (§2.1) — an overflowing length would
+  otherwise ask the arena for less memory than it is about to write.
 * **Arena exhaustion traps.** An arena is one 64 KiB chunk; asking for more
   than it holds kills the process rather than writing past the end of the
   allocation (§6 of `linearity-and-effects.md`). Growing the chunk would make
@@ -179,7 +190,10 @@ that one, and each is enforced rather than merely intended.
 Struct fields are laid out in declaration order. A value is *scalarised*
 into leaves — an `int` or a `bool` is one leaf, a struct is its fields'
 leaves in order, an enum is a tag leaf followed by the widest variant's —
-and where a value has to live in memory, each leaf takes 8 bytes.
+and where a value has to live in memory, each leaf takes 8 bytes. A
+reference is one leaf, a pointer; a *slice* is two, a pointer and a length,
+because `[T]` is the one referent whose size is not in its type. A slice's
+elements are contiguous, each one leaf-stride apart.
 
 This is deterministic, and the same compiler on the same source produces the
 same layout every time. **It is not yet a stability contract.** Nothing
@@ -228,7 +242,6 @@ that adds it, before the code that needs one:
 | Unsigned integers and other widths | Conversion rules, and whether unsigned arithmetic also traps (it should) |
 | Casts and conversions | Narrowing, and whether a lossy one traps or is refused |
 | Floating point | IEEE-754 semantics, NaN ordering, and whether the optimiser may reassociate (it may not) |
-| Slices and indexing | Bounds checks, which will trap |
 | Strings | Encoding, and what an invalid one is |
 | Concurrency | Everything. There is none, and a memory model is the price of adding any |
 
@@ -241,10 +254,12 @@ Not by assertion. Every rule above is a fixture:
 | Rule | Where |
 |---|---|
 | Overflow traps | `crates/lex-sys/tests/conformance.rs` — builds a program and checks the process died by signal |
+| Indexing past a slice traps | same, for `xs[5]` and `xs[-1]` on a slice of 3 |
 | Division by zero traps | same, and it predates this document |
 | Arena exhaustion traps | same |
 | Wrapping does not trap | `tests/accept/wrapping_arithmetic.ls` |
 | Struct fields run in declaration order | `tests/reject/struct_fields_out_of_order.ls` |
+| A slice is a reference, and `[T]` is not a value | `tests/accept/slices.ls`, `tests/reject/unsized_slice_value.ls` |
 | An oversized literal is refused | `crates/lex-sys-syntax` unit tests |
 
 A rule with no fixture is a rule this project does not have.

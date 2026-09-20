@@ -219,6 +219,13 @@ pub enum Builtin {
     WrappingAdd,
     WrappingSub,
     WrappingMul,
+    /// `len(s: &r [T]) -> [] int` — how many elements a slice has.
+    ///
+    /// Checked at the call site rather than through a written signature,
+    /// because the element type is whatever the argument's is and a fixed
+    /// signature cannot say that without a type parameter the builtin
+    /// table has no way to bind.
+    Len,
 }
 
 impl Builtin {
@@ -230,6 +237,7 @@ impl Builtin {
         Builtin::WrappingAdd,
         Builtin::WrappingSub,
         Builtin::WrappingMul,
+        Builtin::Len,
     ];
 
     pub fn name(self) -> &'static str {
@@ -241,6 +249,7 @@ impl Builtin {
             Builtin::WrappingAdd => "wrapping_add",
             Builtin::WrappingSub => "wrapping_sub",
             Builtin::WrappingMul => "wrapping_mul",
+            Builtin::Len => "len",
         }
     }
 
@@ -301,6 +310,7 @@ impl Builtin {
             Builtin::WrappingAdd | Builtin::WrappingSub | Builtin::WrappingMul => {
                 (vec![Type::Int, Type::Int], Type::Int)
             }
+            Builtin::Len => (Vec::new(), Type::Int),
             // Both are checked at the call site rather than here, because a
             // fixed signature cannot say what they need. `release` ends any
             // capability, and there is more than one kind; `narrow` has an
@@ -412,6 +422,24 @@ pub enum Expr {
         args: Vec<Type>,
         index: u32,
     },
+    /// `s[i]` — one element of a slice, bounds-checked (`defined-behaviour`
+    /// §8). `element` is what comes back, which is how the backend knows
+    /// the stride.
+    Index {
+        base: Box<Expr>,
+        index: Box<Expr>,
+        element: Type,
+    },
+    /// `len(s)` — a slice's length, which travels in the slice itself.
+    Len(Box<Expr>),
+    /// `alloc_slice[a](count, fill)` (§6): bump-allocate `count` elements
+    /// and write `fill` into each.
+    AllocSlice {
+        arena: u32,
+        element: Type,
+        count: Box<Expr>,
+        fill: Box<Expr>,
+    },
     /// `alloc[a](value)` (§6): bump-allocate in arena `arena` and hand back
     /// a unique reference to what was written there.
     ///
@@ -473,6 +501,9 @@ pub enum Place {
     /// `r.field = e`, where `base` evaluates to a pointer. The same field
     /// arithmetic as [`Expr::FieldRef`], running the other way.
     Field { base: Expr, def: DefId, args: Vec<Type>, index: u32 },
+    /// `s[i] = e`. `base` evaluates to a slice — a pointer and a length —
+    /// and the write is bounds-checked exactly as a read is.
+    Element { base: Expr, index: Expr, element: Type },
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -1354,11 +1385,19 @@ fn settle_types(stmts: &mut [Stmt], unifier: &Unifier) {
     for stmt in stmts {
         match stmt {
             Stmt::Store { place, value } => {
-                if let Place::Field { base, args, .. } = place {
-                    settle_expr(base, unifier);
-                    for arg in args.iter_mut() {
-                        *arg = unifier.resolve(arg);
+                match place {
+                    Place::Field { base, args, .. } => {
+                        settle_expr(base, unifier);
+                        for arg in args.iter_mut() {
+                            *arg = unifier.resolve(arg);
+                        }
                     }
+                    Place::Element { base, index, element } => {
+                        settle_expr(base, unifier);
+                        settle_expr(index, unifier);
+                        *element = unifier.resolve(element);
+                    }
+                    Place::Slot(_) => {}
                 }
                 settle_expr(value, unifier);
             }
@@ -1408,6 +1447,17 @@ fn settle_expr(expr: &mut Expr, unifier: &Unifier) {
             *ty = unifier.resolve(ty);
             settle_expr(value, unifier);
         }
+        Expr::AllocSlice { element, count, fill, .. } => {
+            *element = unifier.resolve(element);
+            settle_expr(count, unifier);
+            settle_expr(fill, unifier);
+        }
+        Expr::Index { base, index, element } => {
+            *element = unifier.resolve(element);
+            settle_expr(base, unifier);
+            settle_expr(index, unifier);
+        }
+        Expr::Len(inner) => settle_expr(inner, unifier),
         Expr::FieldRef { base, args, .. } => {
             settle_expr(base, unifier);
             for arg in args.iter_mut() {
@@ -1692,6 +1742,19 @@ fn resolve_type(
     regions: &[(Symbol, Region)],
     id: TypeId,
 ) -> Result<Type, Diagnostic> {
+    // Sized by default: `[T]` is a referent, and the one caller that may
+    // have one is the reference that points at it.
+    resolve_type_at(ast, defs, generics, regions, id, false)
+}
+
+fn resolve_type_at(
+    ast: &Ast,
+    defs: &[TypeDef],
+    generics: &[Symbol],
+    regions: &[(Symbol, Region)],
+    id: TypeId,
+    unsized_ok: bool,
+) -> Result<Type, Diagnostic> {
     let span = ast.type_span(id);
 
     // `&r T`: the region must already be in scope. A name that is not a
@@ -1712,7 +1775,9 @@ fn resolve_type(
         return Ok(Type::Ref {
             unique: *unique,
             region: *found,
-            inner: Box::new(resolve_type(ast, defs, generics, regions, *inner)?),
+            // The one place an unsized referent is allowed: `&r [T]` is how
+            // a slice is written, and the reference is what gives it a size.
+            inner: Box::new(resolve_type_at(ast, defs, generics, regions, *inner, true)?),
         });
     }
 
@@ -1723,8 +1788,25 @@ fn resolve_type(
         return Ok(Type::Lit(text.clone()));
     }
 
+    // `[T]`: a shape rather than a name, so there is nothing to look up.
+    // It is unsized, which is why it only ever appears under a reference --
+    // and that is checked where a type is *used*, not here.
+    if let TypeExpr::Slice(inner) = ast.ty(id) {
+        // `[T]` has no size of its own -- that is what the length in a
+        // slice is for -- so it cannot be a parameter, a field, a return
+        // type or a type argument. Only a reference may point at one.
+        if !unsized_ok {
+            return Err(Diagnostic::new(
+                "`[T]` has no size of its own, so it cannot be used as a value; write `&r [T]` or `&!r [T]`, which is a slice",
+                span,
+            ));
+        }
+        let element = resolve_type(ast, defs, generics, regions, *inner)?;
+        return Ok(Type::Slice(Box::new(element)));
+    }
+
     let TypeExpr::Name { name: written_name, args: written_args } = ast.ty(id) else {
-        unreachable!("a reference and a literal were handled above");
+        unreachable!("a reference, a literal and a slice were handled above");
     };
     let (written_name, written_args) = (*written_name, written_args.clone());
     let name = ast.name_of(written_name);
@@ -2485,6 +2567,29 @@ impl<'a> FnLowering<'a> {
                 self.trace.emit(Event::Assign { slot, span });
                 Ok((Place::Slot(slot), ty))
             }
+            AstExpr::Index { base, index } => {
+                let (base_id, index_id) = (*base, *index);
+                let base_span = self.ast.expr_span(base_id);
+                let (base_expr, base_ty) = self.expr(base_id)?;
+                let resolved = self.unifier.resolve(&base_ty);
+                // A shared slice promises its elements will not change, the
+                // same promise a shared reference makes about its referent.
+                if let Type::Ref { unique: false, .. } = &resolved {
+                    return Err(Diagnostic::new(
+                        "this is a shared slice `&`, which promises its elements will not change; `alloc_slice` hands back a unique one"
+                            .to_owned(),
+                        base_span,
+                    ));
+                }
+                let element = self.element_of(&base_ty, base_span)?;
+                let index_span = self.ast.expr_span(index_id);
+                let (index_expr, index_ty) = self.expr(index_id)?;
+                self.expect_type(&Type::Int, &index_ty, index_span)?;
+                Ok((
+                    Place::Element { base: base_expr, index: index_expr, element: element.clone() },
+                    element,
+                ))
+            }
             AstExpr::Field { base, name } => {
                 let (base_id, field) = (*base, *name);
                 let base_span = self.ast.expr_span(base_id);
@@ -2638,23 +2743,10 @@ impl<'a> FnLowering<'a> {
         value: ExprId,
         span: Span,
     ) -> Result<(Expr, Type), Diagnostic> {
-        let text = self.ast.name_of(region);
         // An arena is named, and the name has to be one that is open here.
         // A region *parameter* is not an arena: a caller's region is not
         // this function's to allocate in, and nothing was opened to hold it.
-        let Some(&id) = self
-            .open_blocks
-            .iter()
-            .rev()
-            .find(|id| self.arenas.contains(id) && self.blocks[**id as usize].name == region)
-        else {
-            return Err(Diagnostic::new(
-                format!(
-                    "`{text}` is not an arena open here; `alloc` allocates in a `region {text} {{ .. }}` block"
-                ),
-                span,
-            ));
-        };
+        let id = self.open_arena(region, span)?;
 
         let value_span = self.ast.expr_span(value);
         let (lowered, ty) = self.expr(value)?;
@@ -2682,6 +2774,139 @@ impl<'a> FnLowering<'a> {
             Expr::Alloc { arena: self.arena_of(id), ty: resolved, value: Box::new(lowered) },
             reference,
         ))
+    }
+
+    /// `len(s)` — how many elements a slice has.
+    ///
+    /// The length travels in the slice itself, so this reads a value that
+    /// is already there rather than computing one: a slice is a pointer and
+    /// a length, and `len` is the second half.
+    fn len(&mut self, args: &[ExprId], span: Span) -> Result<(Expr, Type), Diagnostic> {
+        let [slice] = args else {
+            return Err(Diagnostic::new(
+                format!("`len` takes 1 argument, but {} were given", args.len()),
+                span,
+            ));
+        };
+        let slice_span = self.ast.expr_span(*slice);
+        let (value, ty) = self.expr(*slice)?;
+        self.element_of(&ty, slice_span)?;
+        Ok((Expr::Len(Box::new(value)), Type::Int))
+    }
+
+    /// `alloc_slice[a](count, fill)` — a run of `count` copies of `fill`
+    /// (§6, and `defined-behaviour.md` §8's bounds rule).
+    ///
+    /// The length is a runtime value, which is what makes this a slice
+    /// rather than an array: an array's length lives in its type, and a
+    /// length in a type is a second kind of generic parameter that M3 is
+    /// not buying.
+    fn alloc_slice(
+        &mut self,
+        region: Symbol,
+        count: ExprId,
+        fill: ExprId,
+        span: Span,
+    ) -> Result<(Expr, Type), Diagnostic> {
+        let id = self.open_arena(region, span)?;
+
+        let count_span = self.ast.expr_span(count);
+        let (count_expr, count_ty) = self.expr(count)?;
+        self.expect_type(&Type::Int, &count_ty, count_span)?;
+
+        let fill_span = self.ast.expr_span(fill);
+        let (fill_expr, element) = self.expr(fill)?;
+        let element = self.unifier.resolve(&element);
+        // §6.1 again, and for the same reason: an arena reclaims memory and
+        // runs nothing, so a linear obligation inside would be dropped
+        // rather than discharged. A slice makes it worse -- there would be
+        // `count` of them -- but the rule is the one rule, not a new one.
+        if mode_of(self.defs, self.unifier, &element) == Mode::Res {
+            return Err(Diagnostic::new(
+                format!(
+                    "`{}` is `res`, and an arena holds `val` data only: the fill is copied into every element, and a linear value cannot be copied at all",
+                    self.unifier.display(&element)
+                ),
+                fill_span,
+            ));
+        }
+
+        let slice = Type::Slice(Box::new(element.clone()));
+        Ok((
+            Expr::AllocSlice {
+                arena: self.arena_of(id),
+                element,
+                count: Box::new(count_expr),
+                fill: Box::new(fill_expr),
+            },
+            Type::Ref { unique: true, region: Region::Block(id), inner: Box::new(slice) },
+        ))
+    }
+
+    /// `s[i]` — one element, bounds-checked at runtime.
+    ///
+    /// The check is not optional and not a mode: an out-of-range index
+    /// traps, because the alternative is reading past the end of an
+    /// allocation, which is the undefined behaviour this language does not
+    /// have (`defined-behaviour.md` §1).
+    fn index(
+        &mut self,
+        base: ExprId,
+        index: ExprId,
+        span: Span,
+    ) -> Result<(Expr, Type), Diagnostic> {
+        let base_span = self.ast.expr_span(base);
+        let (base_expr, base_ty) = self.expr(base)?;
+        let element = self.element_of(&base_ty, base_span)?;
+
+        let index_span = self.ast.expr_span(index);
+        let (index_expr, index_ty) = self.expr(index)?;
+        self.expect_type(&Type::Int, &index_ty, index_span)?;
+        let _ = span;
+
+        Ok((
+            Expr::Index {
+                base: Box::new(base_expr),
+                index: Box::new(index_expr),
+                element: element.clone(),
+            },
+            element,
+        ))
+    }
+
+    /// The element type of whatever `ty` is, if it is a slice at all.
+    fn element_of(&mut self, ty: &Type, span: Span) -> Result<Type, Diagnostic> {
+        let resolved = self.unifier.resolve(ty);
+        if let Type::Ref { inner, .. } = &resolved
+            && let Type::Slice(element) = self.unifier.resolve(inner)
+        {
+            return Ok(self.unifier.resolve(&element));
+        }
+        Err(Diagnostic::new(
+            format!(
+                "`{}` is not a slice, so it cannot be indexed",
+                self.unifier.display(&resolved)
+            ),
+            span,
+        ))
+    }
+
+    /// The arena `region` names, if it is one open here.
+    fn open_arena(&mut self, region: Symbol, span: Span) -> Result<u32, Diagnostic> {
+        let text = self.ast.name_of(region);
+        self.open_blocks
+            .iter()
+            .rev()
+            .find(|id| self.arenas.contains(id) && self.blocks[**id as usize].name == region)
+            .copied()
+            .ok_or_else(|| {
+                Diagnostic::new(
+                    format!(
+                        "`{text}` is not an arena open here; `alloc` allocates in a `region {text} {{ .. }}` block"
+                    ),
+                    span,
+                )
+            })
     }
 
     /// Which arena number a block id was given.
@@ -3197,6 +3422,10 @@ impl<'a> FnLowering<'a> {
                 (Expr::Bin { op, lhs: Box::new(l), rhs: Box::new(r) }, result)
             }
             AstExpr::Alloc { region, value } => return self.alloc(*region, *value, span),
+            AstExpr::AllocSlice { region, count, fill } => {
+                return self.alloc_slice(*region, *count, *fill, span);
+            }
+            AstExpr::Index { base, index } => return self.index(*base, *index, span),
             AstExpr::Call { callee, args } => {
                 let text = self.ast.name_of(*callee);
                 if self.lookup(*callee).is_some() {
@@ -3235,6 +3464,9 @@ impl<'a> FnLowering<'a> {
                 }
                 if Builtin::from_name(text) == Some(Builtin::Release) {
                     return self.release(args, span);
+                }
+                if Builtin::from_name(text) == Some(Builtin::Len) {
+                    return self.len(args, span);
                 }
                 let (params, ret) = if let Some(builtin) = Builtin::from_name(text) {
                     // A builtin's region parameters are instantiated exactly
@@ -4300,6 +4532,123 @@ mod capability_tests {
             "a `World` should occupy no machine value, got {:?}",
             main.slots[0]
         );
+    }
+}
+
+/// Slices: M3's first half, built on §5's references.
+#[cfg(test)]
+mod slice_tests {
+    use super::Program;
+    use super::tests::lower_src;
+
+    fn refused(src: &str) -> String {
+        lower_src(src).expect_err("this should be refused").message
+    }
+
+    fn accepted(src: &str) -> Program {
+        lower_src(src).expect("this should be accepted")
+    }
+
+    /// `main` with `body` inside, for the cases about a region rather than
+    /// about a signature.
+    fn in_main(body: &str) -> String {
+        format!("fn main() -> [] int {{ {body} return 0; }}")
+    }
+
+    #[test]
+    fn a_slice_is_a_reference_and_carries_its_region() {
+        accepted(&in_main("region a { let xs = alloc_slice[a](3, 0); xs[0] = 1; let n = xs[0]; }"));
+
+        // And it cannot outlive the arena it points into -- the same
+        // occurs-check that stops a `borrow`'s reference escaping, run by
+        // the same code. A slice adds no escape rule of its own.
+        let message = refused(
+            "fn escape[&q](fallback: &q [int]) -> [] &q [int] \
+             { region a { return alloc_slice[a](1, 0); } } \
+             fn main() -> [] int { return 0; }",
+        );
+        assert!(message.contains("may not outlive its region"), "{message}");
+    }
+
+    #[test]
+    fn an_unsized_referent_is_not_a_value() {
+        // `[T]`'s length is a runtime value rather than part of its type,
+        // so there is nothing to lay out. Only a reference may point at one.
+        for written in [
+            "fn f(xs: [int]) -> [] int { return 0; }",
+            "struct S { xs: [int] }",
+            "fn f[&r](xs: &r [[int]]) -> [] int { return 0; }",
+        ] {
+            let message = refused(&format!("{written} fn main() -> [] int {{ return 0; }}"));
+            assert!(message.contains("no size of its own"), "{written}: {message}");
+        }
+    }
+
+    #[test]
+    fn a_slice_holds_val_data_only() {
+        // §6.1, sharpened: the fill is copied into every element, and a
+        // linear value cannot be copied at all.
+        let message = refused(
+            "res struct File { fd: int } \
+             fn open(n: int) -> [] File { return File { fd: n }; } \
+             fn main() -> [] int { region a { let s = alloc_slice[a](2, open(1)); } return 0; }",
+        );
+        assert!(message.contains("arena holds `val` data only"), "{message}");
+    }
+
+    #[test]
+    fn a_shared_slice_may_not_be_written_through() {
+        let message = refused(
+            "fn clobber[&r](xs: &r [int]) -> [] int { xs[0] = 1; return 0; } \
+             fn main() -> [] int { return 0; }",
+        );
+        assert!(message.contains("shared slice"), "{message}");
+
+        // The unique one may, and the coercion the other way still holds:
+        // a function wanting `&r [int]` accepts the `&!a [int]` `alloc_slice`
+        // hands back.
+        accepted(
+            "fn total[&r](xs: &r [int]) -> [] int { return len(xs); } \
+             fn main() -> [] int { region a { let xs = alloc_slice[a](2, 0); \
+             xs[0] = 1; let n = total(xs); } return 0; }",
+        );
+    }
+
+    #[test]
+    fn only_a_slice_can_be_indexed_or_measured() {
+        let indexed = refused(&in_main("let x = 3; let y = x[0];"));
+        assert!(indexed.contains("is not a slice"), "{indexed}");
+
+        let measured = refused(&in_main("let x = 3; let n = len(x);"));
+        assert!(measured.contains("is not a slice"), "{measured}");
+    }
+
+    #[test]
+    fn an_index_is_an_int_and_so_is_a_length() {
+        let bad_index =
+            refused(&in_main("region a { let xs = alloc_slice[a](2, 0); let n = xs[true]; }"));
+        assert!(bad_index.contains("expected `int`"), "{bad_index}");
+
+        let bad_count = refused(&in_main("region a { let xs = alloc_slice[a](true, 0); }"));
+        assert!(bad_count.contains("expected `int`"), "{bad_count}");
+    }
+
+    #[test]
+    fn a_slices_element_type_comes_from_its_fill() {
+        // No annotation anywhere: `alloc_slice[a](3, true)` is a slice of
+        // `bool` because the fill is one, and indexing it yields `bool`.
+        accepted(&in_main(
+            "region a { let flags = alloc_slice[a](3, true); \
+             if flags[0] { let n = 1; } }",
+        ));
+
+        // And the element type is invariant, like every other referent.
+        let message = refused(
+            "fn ints[&r](xs: &r [int]) -> [] int { return len(xs); } \
+             fn main() -> [] int { region a { let flags = alloc_slice[a](2, true); \
+             let n = ints(flags); } return 0; }",
+        );
+        assert!(message.contains("expected"), "{message}");
     }
 }
 

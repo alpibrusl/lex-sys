@@ -45,9 +45,15 @@ defined behaviour, and a canonical content-addressable AST designed in from day 
 > [`docs/defined-behaviour.md`](docs/defined-behaviour.md), and every rule in
 > it has a fixture.
 >
-> **Still missing:** strings, slices and a general heap — those are M3, and
-> so are the escape hatches (§9). Do not mistake this for a usable language
-> yet.
+> **And there are slices.** `&!a [T]` is a run of values in an arena, with
+> its length beside the pointer. It is an *ordinary reference* — same
+> regions, same escape check, same unique-to-shared coercion — so slices
+> needed no second mechanism. Every index is bounds-checked and an
+> out-of-range one traps, with no unchecked form to reach for.
+>
+> **Still missing:** strings and a general heap — those are the rest of M3,
+> and so are the escape hatches (§9). Do not mistake this for a usable
+> language yet.
 
 ## What this is
 
@@ -131,6 +137,7 @@ cargo run -p lex-sys -- run examples/tour.ls
 # M2 foreign: 7 9
 # M2 arena: 1 4 9 -> 14
 # M3 arithmetic: 6 1
+# M3 slice: 3 1 4 1 5 -> 14
 ```
 
 `examples/tour.ls` is the shortest honest answer to "what can this language
@@ -164,8 +171,8 @@ comparison, `&&`/`||` with short-circuiting, `if`/`else`, `while`, `let`/`var`
 bindings, structs, enums with exhaustive `match`, generics over both,
 `res`/`val` modes with exactly-once linearity and destructuring `let`,
 shared and unique borrows with lexical regions, exact effect rows,
-capabilities, narrowing, capability-gated foreign calls, arenas, and
-checked arithmetic.
+capabilities, narrowing, capability-gated foreign calls, arenas, checked
+arithmetic, and slices.
 
 ```
 res struct Ticket { serial: int }
@@ -275,6 +282,24 @@ rather than discharged. Asking for more than the chunk holds traps, because
 the alternative is writing past an allocation and this language has no
 undefined behaviour to do that in.
 
+A run of values is a slice, which is a reference like any other:
+
+```
+region a {
+    let xs = alloc_slice[a](5, 0);      // xs : &!a [int]
+    xs[0] = 3;                          // bounds-checked; out of range traps
+    total = sum_of(xs);                 // &!a [int] where &r [int] is wanted
+}
+```
+
+`[T]` is the referent — a run of `T`s whose length is a runtime value — and
+`&!a [T]` points at one. Because it is an ordinary reference it carries a
+region, cannot escape it, coerces from unique to shared, and is `val`; none
+of that needed a second mechanism. The length travels beside the pointer,
+which is why `len` reads a value rather than computing one and why every
+index can be checked against it. There is no unchecked indexing and no
+release mode that removes the check.
+
 There is **no borrow checker**. A region is a block, so a reference's validity
 is lexical rather than inferred: no non-lexical lifetimes, no variance, no
 dataflow. A binding is `Owned`, `Frozen` or `Locked`, set at block entry and
@@ -282,10 +307,11 @@ restored at block exit; `r_inner <= r_outer` holds exactly when the outer
 block encloses the inner one, which is a walk up a stack; and escape is an
 occurs-check over one type.
 
-**What does not, yet:** strings, slices and a general heap. That is why
+**What does not, yet:** strings and a general heap. That is why
 `examples/hello.ls` still packs its greeting into two 64-bit words and
 unpacks it a byte at a time, and why a foreign call can pass an integer but
-not a pointer to bytes.
+not a pointer to bytes — the slice to point it at exists now, but nothing
+yet says what a string *is*.
 
 Every example declares what it prints in its own header, and a test walks
 `examples/` and checks them, so an example that stops matching the language
@@ -357,7 +383,7 @@ M0–M3 with acceptance criteria, sequencing, risks and open decisions.
 | **M0** — native hello world ([#3](https://github.com/alpibrusl/lex-sys/issues/3)) | Lexer, parser, AST, IR, Cranelift backend, a real executable | **done** — green on both targets |
 | **M1** — typed core | Type checker, `bool`, structs, ADTs with exhaustiveness, monomorphised generics. No linearity, no effects — deliberately | **done** |
 | **M2** — the actual thesis ([#2](https://github.com/alpibrusl/lex-sys/issues/2)) | Linear ownership, effect rows and capability-passing as **one** system | **complete** — §3 through §8 of the design document, every must-reject fixture enforced |
-| **M3** — minimal but real | Slices and strings, arenas, libc FFI, settled overflow semantics, canonical printer, per-unit identity | started — per-unit identity, overflow semantics, arenas and libc FFI are in; slices, strings and the canonical printer remain |
+| **M3** — minimal but real | Slices and strings, arenas, libc FFI, settled overflow semantics, canonical printer, per-unit identity | started — per-unit identity, overflow semantics, arenas, libc FFI and slices are in; strings and the canonical printer remain |
 
 Deliberately excluded from "minimal": borrow checker, traits, `comptime`, own
 optimiser, incremental compilation, LSP, async. Each is "yes, later" — saying

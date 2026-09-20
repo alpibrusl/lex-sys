@@ -113,6 +113,9 @@ mod tag {
     pub const STR: u8 = 0x66;
     pub const REGION: u8 = 0x67;
     pub const ALLOC: u8 = 0x68;
+    pub const ALLOC_SLICE: u8 = 0x69;
+    pub const INDEX: u8 = 0x6a;
+    pub const TYPE_SLICE: u8 = 0x6b;
 
     /// The tag for a declared mode. Written out rather than cast from the
     /// enum, so adding a mode cannot silently renumber the others.
@@ -342,6 +345,15 @@ fn encode_type(
                 encoder.tag(tag::NONE).str(ast.name_of(region));
             }
         }
+        encode_type(ast, encoder, inner, type_ids, generics, regions);
+        return;
+    }
+
+    // `[T]`: a shape rather than a name, so it gets its own tag instead of
+    // being a `Name` that no declaration could ever match.
+    if let TypeExpr::Slice(inner) = written {
+        let inner = *inner;
+        encoder.tag(tag::TYPE_SLICE);
         encode_type(ast, encoder, inner, type_ids, generics, regions);
         return;
     }
@@ -713,6 +725,20 @@ impl BodyHasher<'_> {
         }
     }
 
+    /// Which region a name refers to, positionally where it is one in
+    /// scope. The name itself never reaches a hash: `region a` and
+    /// `region q` are one body.
+    fn region_reference(&mut self, region: Symbol) {
+        match self.regions.iter().rposition(|r| *r == region) {
+            Some(index) => {
+                self.encoder.tag(tag::LOCAL).u32(index as u32);
+            }
+            None => {
+                self.encoder.tag(tag::NONE).str(self.ast.name_of(region));
+            }
+        }
+    }
+
     fn expr(&mut self, id: ExprId) {
         match self.ast.expr(id) {
             Expr::Int(value) => {
@@ -728,18 +754,22 @@ impl BodyHasher<'_> {
                 self.encoder.tag(tag::LOCAL);
                 self.name(*name);
             }
+            Expr::Index { base, index } => {
+                self.encoder.tag(tag::INDEX);
+                self.expr(*base);
+                self.expr(*index);
+            }
+            Expr::AllocSlice { region, count, fill } => {
+                self.encoder.tag(tag::ALLOC_SLICE);
+                self.region_reference(*region);
+                self.expr(*count);
+                self.expr(*fill);
+            }
             Expr::Alloc { region, value } => {
                 // Which arena is part of what this expression *means*, so it
                 // reaches the hash -- positionally, since the name does not.
                 self.encoder.tag(tag::ALLOC);
-                match self.regions.iter().rposition(|r| r == region) {
-                    Some(index) => {
-                        self.encoder.tag(tag::LOCAL).u32(index as u32);
-                    }
-                    None => {
-                        self.encoder.tag(tag::NONE).str(self.ast.name_of(*region));
-                    }
-                }
+                self.region_reference(*region);
                 self.expr(*value);
             }
             Expr::StructLit { name, fields } => {
@@ -1235,6 +1265,53 @@ mod tests {
             ),
             body(
                 "struct N { v: int } fn f() -> [] int { let b = N { v: 1 }; borrow b as &a in { let x = 1; } return 0; }",
+                "f"
+            )
+        );
+    }
+
+    // ---- slices --------------------------------------------------------
+
+    #[test]
+    fn a_slice_is_a_different_type_from_its_element() {
+        assert_ne!(
+            sig("fn f[&r](xs: &r [int]) -> [] int { return 0; }", "f"),
+            sig("fn f[&r](xs: &r int) -> [] int { return 0; }", "f")
+        );
+        assert_ne!(
+            sig("fn f[&r](xs: &r [int]) -> [] int { return 0; }", "f"),
+            sig("fn f[&r](xs: &r [bool]) -> [] int { return 0; }", "f")
+        );
+    }
+
+    #[test]
+    fn an_index_reaches_the_body_hash() {
+        // Which element is read is what the expression *means*, so two
+        // bodies reading different ones are two bodies.
+        assert_ne!(
+            body("fn f[&r](xs: &r [int]) -> [] int { return xs[0]; }", "f"),
+            body("fn f[&r](xs: &r [int]) -> [] int { return xs[1]; }", "f")
+        );
+        // And indexing is not field access, whatever the offsets work out to.
+        assert_ne!(
+            body("fn f[&r](xs: &r [int]) -> [] int { return xs[0]; }", "f"),
+            body("fn f[&r](xs: &r [int]) -> [] int { return len(xs); }", "f")
+        );
+    }
+
+    #[test]
+    fn a_slices_arena_reaches_the_body_hash_and_its_name_does_not() {
+        assert_eq!(
+            body("fn f() -> [] int { region a { let xs = alloc_slice[a](1, 0); } return 0; }", "f"),
+            body("fn f() -> [] int { region q { let xs = alloc_slice[q](1, 0); } return 0; }", "f")
+        );
+        assert_ne!(
+            body(
+                "fn f() -> [] int { region o { region i { let xs = alloc_slice[i](1, 0); } } return 0; }",
+                "f"
+            ),
+            body(
+                "fn f() -> [] int { region o { region i { let xs = alloc_slice[o](1, 0); } } return 0; }",
                 "f"
             )
         );
