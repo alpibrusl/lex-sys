@@ -15,6 +15,7 @@
 //~ STDOUT M2 effects: 42
 //~ STDOUT M2 capability: 88
 //~ STDOUT M2 foreign: 7 9
+//~ STDOUT M2 arena: 1 4 9 -> 14
 //~ EXIT 0
 
 // ---------------------------------------------------------------- output ---
@@ -393,6 +394,67 @@ fn m2_effects[&i](io: &!i Io) -> [io] int {
     return newline(io);
 }
 
+// ---------------------------------------------------------- M2: arenas ----
+// The other thing that opens a region, and the answer to the question §5
+// leaves hanging: if a reference's validity is a block, where does data that
+// outlives its *creator* live?
+//
+// `region a { .. }` opens an arena. `alloc[a](v)` puts a value in it and
+// hands back `&!a T` -- an ordinary unique reference, carrying the region,
+// subject to every rule §5 already gave. At block exit the whole arena goes
+// in one call: no traversal, no per-object bookkeeping, no finalisers.
+//
+// The escape rule is not a new rule. Nothing whose type mentions `a` leaves
+// the block, checked by the same occurs-check that stops a `borrow`'s
+// reference escaping -- which is the claim §6 is making. An arena's lifetime
+// and a borrow's lifetime are one mechanism, and nesting is §5.2's stack
+// over again: an inner arena may hold what an outer one allocated, never the
+// reverse.
+//
+// And arenas hold `val` data only (§6.1). Releasing one reclaims memory; it
+// does not close files or release capabilities. A `res` value inside would
+// have its memory taken back with its obligation undischarged -- a leak with
+// a static blessing, which is the exact case §4 refuses to let affine typing
+// paper over.
+
+struct Cell {
+    value: int,
+}
+
+// Written against a *shared* reference, and called below on something the
+// arena handed back as unique: `&!r T` is `&r T` plus permission to write.
+fn cell_value[&r](c: &r Cell) -> [] int {
+    return c.value;
+}
+
+fn m2_arena[&i](io: &!i Io) -> [io] int {
+    putchar(io, 77); putchar(io, 50); space(io);          // "M2 "
+    putchar(io, 97); putchar(io, 114); putchar(io, 101); putchar(io, 110);
+    putchar(io, 97); putchar(io, 58); space(io);          // "arena: "
+
+    var total = 0;
+    region a {
+        var n = 1;
+        while n <= 3 {
+            let cell = alloc[a](Cell { value: 0 });
+            // Written through the unique reference, read through a function
+            // that only asked to borrow.
+            cell.value = n * n;
+            if n > 1 {
+                space(io);
+            }
+            print_nat(io, cell_value(cell));
+            total = total + cell_value(cell);
+            n = n + 1;
+        }
+    }
+    // Three allocations, one release, and it already happened.
+
+    space(io); putchar(io, 45); putchar(io, 62); space(io);   // " -> "
+    print_nat(io, total);
+    return newline(io);
+}
+
 fn run[&i](io: &!i Io) -> [io] int {
     m0(io);
     m1_bool(io);
@@ -495,6 +557,7 @@ fn main(world: World) -> [] int {
             status = run(i);
             m2_capability(i);
             m2_foreign(f, i);
+            m2_arena(i);
         }
     }
 

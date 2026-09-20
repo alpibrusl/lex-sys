@@ -385,6 +385,17 @@ pub enum Expr {
         args: Vec<Type>,
         index: u32,
     },
+    /// `alloc[a](value)` (§6): bump-allocate in arena `arena` and hand back
+    /// a unique reference to what was written there.
+    ///
+    /// `ty` is what was allocated, which is how the backend knows how many
+    /// bytes to take. It is always `val`: §6.1 refuses anything else,
+    /// because an arena reclaims memory and runs nothing.
+    Alloc {
+        arena: u32,
+        ty: Type,
+        value: Box<Expr>,
+    },
     /// A struct value. Fields are in *declaration* order whatever order they
     /// were written in, so the backend never has to consult a name.
     Struct {
@@ -461,6 +472,16 @@ pub enum Stmt {
         def: DefId,
         args: Vec<Type>,
         arms: Vec<Arm>,
+    },
+    /// `region a { .. }` (§6).
+    ///
+    /// `arena` numbers this function's arenas in the order they open, which
+    /// is what an `Expr::Alloc` inside the body names. The region itself is
+    /// a block in the same table `borrow` uses -- an arena's lifetime and a
+    /// borrow's lifetime are one mechanism, which is §6's claim.
+    Region {
+        arena: u32,
+        body: Vec<Stmt>,
     },
     /// `borrow x as &r in { .. }` (§5).
     ///
@@ -573,7 +594,7 @@ pub fn terminates(body: &[Stmt]) -> bool {
         // A `borrow` block runs unconditionally, exactly once, so it
         // terminates when its body does. Unlike a `while`, there is no
         // question of whether it is entered.
-        Some(Stmt::Borrow { body, .. }) => terminates(body),
+        Some(Stmt::Borrow { body, .. } | Stmt::Region { body, .. }) => terminates(body),
         _ => false,
     }
 }
@@ -1324,7 +1345,7 @@ fn settle_types(stmts: &mut [Stmt], unifier: &Unifier) {
                 settle_expr(cond, unifier);
                 settle_types(body, unifier);
             }
-            Stmt::Borrow { body, .. } => settle_types(body, unifier),
+            Stmt::Borrow { body, .. } | Stmt::Region { body, .. } => settle_types(body, unifier),
             Stmt::Match { scrutinee, args, arms, .. } => {
                 settle_expr(scrutinee, unifier);
                 for arg in args.iter_mut() {
@@ -1355,6 +1376,10 @@ fn settle_expr(expr: &mut Expr, unifier: &Unifier) {
             for field in fields {
                 settle_expr(field, unifier);
             }
+        }
+        Expr::Alloc { ty, value, .. } => {
+            *ty = unifier.resolve(ty);
+            settle_expr(value, unifier);
         }
         Expr::FieldRef { base, args, .. } => {
             settle_expr(base, unifier);
@@ -1436,6 +1461,7 @@ fn lower_function(
         region_outlives: signature.outlives.clone(),
         blocks: Vec::new(),
         open_blocks: Vec::new(),
+        arenas: Vec::new(),
         slot_scope: Vec::new(),
         slot_origin: Vec::new(),
         ret: ret.clone(),
@@ -1766,6 +1792,11 @@ struct FnLowering<'a> {
     blocks: Vec<BorrowBlock>,
     /// The ids of the blocks open right now, outermost first.
     open_blocks: Vec<u32>,
+    /// The block ids that are *arenas* (§6), in the order they opened. A
+    /// block's position here is the number an `alloc` inside it carries to
+    /// the backend, and membership is what tells an arena from a borrow's
+    /// region -- `alloc[r]` into a borrow's region has nothing to allocate.
+    arenas: Vec<u32>,
     /// For each slot, the innermost `borrow` block open when it was declared.
     /// A slot's type may mention that block and its ancestors, and nothing
     /// else: that is §5 rule 4, the escape occurs-check.
@@ -2041,10 +2072,19 @@ impl<'a> FnLowering<'a> {
     /// Require `found` to be usable where `expected` is wanted, reporting the
     /// failure at `span`.
     ///
-    /// Equality, with §5.2's single coercion on top: a reference whose region
-    /// *outlives* the expected one is accepted, because it is valid for at
-    /// least as long as it needs to be. Nothing else coerces, and the
-    /// referent is invariant -- "`T` never changes".
+    /// Equality, with two coercions on top and no others.
+    ///
+    /// §5.2's: a reference whose region *outlives* the expected one is
+    /// accepted, because it is valid for at least as long as it needs to be.
+    ///
+    /// And §6's: a unique reference is accepted where a shared one is
+    /// expected, never the reverse. `&!r T` is `&r T` plus permission to
+    /// write, so handing one over as read-only gives the callee strictly
+    /// less than it already had. Without this, arena data would be
+    /// unreachable from every helper written against `&r` — §6 hands back
+    /// `&!a` and nothing else, so `value_of[&r](n: &r Node)` could never be
+    /// called on anything allocated. The referent stays invariant: "`T`
+    /// never changes" is untouched.
     fn expect_type(&mut self, expected: &Type, found: &Type, span: Span) -> Result<(), Diagnostic> {
         let want = self.unifier.shallow(expected);
         let got = self.unifier.shallow(found);
@@ -2052,7 +2092,7 @@ impl<'a> FnLowering<'a> {
             Type::Ref { unique: want_unique, region: want_region, inner: want_inner },
             Type::Ref { unique: got_unique, region: got_region, inner: got_inner },
         ) = (&want, &got)
-            && want_unique == got_unique
+            && (want_unique == got_unique || (!*want_unique && *got_unique))
         {
             let wanted = self.unifier.resolve_region(*want_region);
             let given = self.unifier.resolve_region(*got_region);
@@ -2253,6 +2293,7 @@ impl<'a> FnLowering<'a> {
             AstStmt::Borrow { value, unique, region, body } => {
                 self.borrow_stmt(*value, *unique, *region, body, span)?
             }
+            AstStmt::Region { region, body } => self.region_stmt(*region, body)?,
             AstStmt::Return(e) => {
                 let (value, found) = self.expr(*e)?;
                 // §5 rule 4, at the one place a value can leave a region: a
@@ -2265,9 +2306,11 @@ impl<'a> FnLowering<'a> {
                 if let Some(Region::Block(id)) =
                     mentioned.into_iter().find(|r| matches!(r, Region::Block(_)))
                 {
+                    let kind =
+                        if self.arenas.contains(&id) { "an arena" } else { "a `borrow` block" };
                     return Err(Diagnostic::new(
                         format!(
-                            "this returns a reference into `{}`, which is a `borrow` block in this function; a reference may not outlive its region",
+                            "this returns a reference into `{}`, which is {kind} in this function; a reference may not outlive its region",
                             self.ast.name_of(self.blocks[id as usize].name)
                         ),
                         self.ast.expr_span(*e),
@@ -2523,6 +2566,100 @@ impl<'a> FnLowering<'a> {
 
         self.open_blocks.pop();
         Ok(Stmt::Borrow { referent, reference, unique, body: lowered? })
+    }
+
+    /// `region a { .. }` — an arena (§6).
+    ///
+    /// Almost exactly `borrow_stmt` with the referent taken out, and that is
+    /// the section's whole claim made structural: the region it opens is a
+    /// block in the same table, so §5.2's outlives relation, §5's
+    /// occurs-check and the scope rules all apply to it without a line of
+    /// new reasoning. What escapes an arena is decided by the code that
+    /// decides what escapes a borrow, because there is only one.
+    fn region_stmt(&mut self, region: Symbol, body: &Block) -> Result<Stmt, Diagnostic> {
+        let id = self.blocks.len() as u32;
+        self.blocks.push(BorrowBlock { name: region, parent: self.open_blocks.last().copied() });
+        self.open_blocks.push(id);
+        let names: Vec<String> =
+            self.blocks.iter().map(|b| self.ast.name_of(b.name).to_owned()).collect();
+        self.unifier.set_region_block_names(names);
+
+        // The arena's number is its position among this function's arenas,
+        // which is what an `alloc` inside it names at the backend.
+        let arena = self.arenas.len() as u32;
+        self.arenas.push(id);
+
+        self.scopes.push(Vec::new());
+        self.trace.open();
+        let lowered = self.stmts(&body.stmts);
+        let events = self.trace.close();
+        self.trace.emit(Event::Scope(events));
+        self.scopes.pop();
+
+        self.open_blocks.pop();
+        Ok(Stmt::Region { arena, body: lowered? })
+    }
+
+    /// `alloc[a](value)` (§6).
+    ///
+    /// Three questions, and the first two are lookups rather than solves:
+    /// which arena `a` names, whether what is being allocated is `val`, and
+    /// what type comes back.
+    fn alloc(
+        &mut self,
+        region: Symbol,
+        value: ExprId,
+        span: Span,
+    ) -> Result<(Expr, Type), Diagnostic> {
+        let text = self.ast.name_of(region);
+        // An arena is named, and the name has to be one that is open here.
+        // A region *parameter* is not an arena: a caller's region is not
+        // this function's to allocate in, and nothing was opened to hold it.
+        let Some(&id) = self
+            .open_blocks
+            .iter()
+            .rev()
+            .find(|id| self.arenas.contains(id) && self.blocks[**id as usize].name == region)
+        else {
+            return Err(Diagnostic::new(
+                format!(
+                    "`{text}` is not an arena open here; `alloc` allocates in a `region {text} {{ .. }}` block"
+                ),
+                span,
+            ));
+        };
+
+        let value_span = self.ast.expr_span(value);
+        let (lowered, ty) = self.expr(value)?;
+        let resolved = self.unifier.resolve(&ty);
+        // §6.1: an arena releases memory. It does not close files, release
+        // capabilities or run anything -- so a `res` value put in one would
+        // have its memory reclaimed with its obligation undischarged, which
+        // is a leak with a static blessing.
+        if mode_of(self.defs, self.unifier, &resolved) == Mode::Res {
+            return Err(Diagnostic::new(
+                format!(
+                    "`{}` is `res`, and an arena holds `val` data only: releasing one reclaims memory and runs nothing, so a linear obligation put inside would be dropped rather than discharged",
+                    self.unifier.display(&resolved)
+                ),
+                value_span,
+            ));
+        }
+
+        let reference = Type::Ref {
+            unique: true,
+            region: Region::Block(id),
+            inner: Box::new(resolved.clone()),
+        };
+        Ok((
+            Expr::Alloc { arena: self.arena_of(id), ty: resolved, value: Box::new(lowered) },
+            reference,
+        ))
+    }
+
+    /// Which arena number a block id was given.
+    fn arena_of(&self, block: u32) -> u32 {
+        self.arenas.iter().position(|id| *id == block).expect("an arena block") as u32
     }
 
     /// Check a `match`: the scrutinee is an enum, every arm names a variant of
@@ -3011,6 +3148,7 @@ impl<'a> FnLowering<'a> {
                 let result = op.result(&operand);
                 (Expr::Bin { op, lhs: Box::new(l), rhs: Box::new(r) }, result)
             }
+            AstExpr::Alloc { region, value } => return self.alloc(*region, *value, span),
             AstExpr::Call { callee, args } => {
                 let text = self.ast.name_of(*callee);
                 if self.lookup(*callee).is_some() {
@@ -4102,6 +4240,153 @@ mod capability_tests {
             "a `World` should occupy no machine value, got {:?}",
             main.slots[0]
         );
+    }
+}
+
+/// Arenas: `docs/linearity-and-effects.md` §6.
+#[cfg(test)]
+mod arena_tests {
+    use super::tests::lower_src;
+    use super::{Program, Stmt};
+
+    const NODE: &str = "struct Node { value: int } ";
+
+    fn refused(src: &str) -> String {
+        lower_src(src).expect_err("this should be refused").message
+    }
+
+    fn accepted(src: &str) -> Program {
+        lower_src(src).expect("this should be accepted")
+    }
+
+    /// `main` with `body` inside, for the cases about a region rather than
+    /// about a signature.
+    fn in_main(body: &str) -> String {
+        format!("{NODE} fn main() -> [] int {{ {body} return 0; }}")
+    }
+
+    #[test]
+    fn an_arena_is_a_region_and_alloc_hands_back_a_unique_reference() {
+        let program = accepted(&in_main(
+            "region a { let n = alloc[a](Node { value: 1 }); let v = n.value; }",
+        ));
+        let main = program.func(program.find("main").expect("main"));
+        assert!(
+            matches!(main.body.first(), Some(Stmt::Region { arena: 0, .. })),
+            "a `region` lowers to an arena, got {:?}",
+            main.body.first()
+        );
+    }
+
+    #[test]
+    fn nothing_mentioning_the_arena_escapes_it() {
+        // §6, and the same occurs-check §5 runs -- which is the claim: an
+        // arena's lifetime and a borrow's lifetime are one mechanism.
+        let message = refused(&format!(
+            "{NODE} fn escape[&q](fallback: &q Node) -> [] &q Node \
+             {{ region a {{ return alloc[a](Node {{ value: 1 }}); }} }} \
+             fn main() -> [] int {{ return 0; }}"
+        ));
+        assert!(message.contains("may not outlive its region"), "{message}");
+    }
+
+    #[test]
+    fn an_inner_arenas_reference_may_not_be_stored_in_an_outer_one() {
+        // Nesting is §5.2's stack. The outer arena outlives the inner, so
+        // references go inwards and never back out.
+        let message = refused(&in_main(
+            "region o { var held = alloc[o](Node { value: 1 }); \
+             region i { held = alloc[i](Node { value: 2 }); } }",
+        ));
+        assert!(message.contains("does not outlive"), "{message}");
+
+        // And the permitted direction is genuinely permitted.
+        accepted(&in_main(
+            "region o { let base = alloc[o](Node { value: 1 }); \
+             region i { let n = base.value + alloc[i](Node { value: 2 }).value; } }",
+        ));
+    }
+
+    #[test]
+    fn an_arena_holds_val_data_only() {
+        // §6.1: releasing an arena reclaims memory and runs nothing, so a
+        // linear obligation put inside would be dropped rather than
+        // discharged -- a leak with a static blessing.
+        let message = refused(
+            "res struct File { fd: int } \
+             fn open(n: int) -> [] File { return File { fd: n }; } \
+             fn main() -> [] int { let f = open(3); region a { let p = alloc[a](f); } return 0; }",
+        );
+        assert!(message.contains("arena holds `val` data only"), "{message}");
+    }
+
+    #[test]
+    fn alloc_names_an_arena_that_is_open() {
+        let unopened = refused(&in_main("let n = alloc[a](Node { value: 1 });"));
+        assert!(unopened.contains("is not an arena open here"), "{unopened}");
+
+        // A `borrow` block's region is a region, but it is not an arena:
+        // there is no chunk behind it to allocate in.
+        let borrowed = refused(&format!(
+            "{NODE} fn main() -> [] int {{ let b = Node {{ value: 1 }}; \
+             borrow b as &r in {{ let n = alloc[r](Node {{ value: 2 }}); }} return 0; }}"
+        ));
+        assert!(borrowed.contains("is not an arena open here"), "{borrowed}");
+
+        // Nor is a region *parameter*: a caller's region is not this
+        // function's to allocate in.
+        let parameter = refused(&format!(
+            "{NODE} fn f[&q](n: &q Node) -> [] int {{ let p = alloc[q](Node {{ value: 1 }}); return 0; }} \
+             fn main() -> [] int {{ return 0; }}"
+        ));
+        assert!(parameter.contains("is not an arena open here"), "{parameter}");
+    }
+
+    #[test]
+    fn an_inner_arena_shadows_an_outer_one_of_the_same_name() {
+        // Two arenas, two regions: `Region::Block` carries identity rather
+        // than depth, so the inner `a` is not the outer `a`.
+        let program =
+            accepted(&in_main("region a { region a { let n = alloc[a](Node { value: 1 }); } }"));
+        let main = program.func(program.find("main").expect("main"));
+        let Some(Stmt::Region { arena: 0, body }) = main.body.first() else {
+            panic!("the outer arena, got {:?}", main.body.first());
+        };
+        assert!(
+            matches!(body.first(), Some(Stmt::Region { arena: 1, .. })),
+            "the inner arena is a second one, got {:?}",
+            body.first()
+        );
+    }
+
+    #[test]
+    fn a_unique_reference_is_accepted_where_a_shared_one_is_wanted() {
+        // §6's one new coercion, and what makes arena data reachable from a
+        // helper written against `&r`: `&!r T` is `&r T` plus permission to
+        // write, so handing one over read-only gives away nothing.
+        accepted(&format!(
+            "{NODE} fn value_of[&r](n: &r Node) -> [] int {{ return n.value; }} \
+             fn main() -> [] int {{ region a {{ let v = value_of(alloc[a](Node {{ value: 1 }})); }} return 0; }}"
+        ));
+
+        // The other direction stays refused: a shared reference promises the
+        // referent will not change, and nothing may write through it.
+        let message = refused(&format!(
+            "{NODE} fn bump[&r](n: &!r Node) -> [] int {{ n.value = 1; return 0; }} \
+             fn main() -> [] int {{ let b = Node {{ value: 1 }}; \
+             borrow b as &r in {{ let x = bump(r); }} return 0; }}"
+        ));
+        assert!(message.contains("unique reference"), "{message}");
+    }
+
+    #[test]
+    fn an_arena_reference_is_val_and_costs_one_pointer() {
+        // A reference is `val` whatever it points at (§5 rule 3), so a
+        // binding holding one owes nothing at scope end. Two of them from
+        // the same arena is not a double anything.
+        accepted(&in_main(
+            "region a { let x = alloc[a](Node { value: 1 }); let y = x; let z = x.value; }",
+        ));
     }
 }
 

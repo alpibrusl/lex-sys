@@ -12,7 +12,7 @@ use std::fmt;
 
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::{
-    AbiParam, InstBuilder, MemFlags, StackSlotData, StackSlotKind, Value, types,
+    AbiParam, InstBuilder, MemFlags, StackSlotData, StackSlotKind, TrapCode, Value, types,
 };
 use cranelift_codegen::settings::{self, Configurable};
 use cranelift_codegen::{Context, isa};
@@ -112,6 +112,17 @@ fn returns_indirectly(ty: &Type, program: &Program, pointer: types::Type) -> boo
 /// promises. `docs/defined-behaviour.md` still owns that question in M3, and
 /// nothing here is observable to a program.
 const RETURN_SLOT_STRIDE: i32 = 8;
+
+/// How much memory one arena takes when it opens (§6).
+///
+/// A single chunk, obtained once and released once, which is what makes
+/// "one pointer reset, no traversal, no per-object bookkeeping" true rather
+/// than aspirational. Exhausting it *traps*: the alternative is a chunk list,
+/// which turns release into a walk, and the alternative to trapping is
+/// undefined behaviour, which the language does not have. Growth without
+/// giving up either property is an M3 question, and the trap is what keeps
+/// the answer honest until then.
+const ARENA_CHUNK: i64 = 64 * 1024;
 
 /// Every lex-sys function is emitted under this prefix, so a program may define
 /// a function called `write` or `exit` without colliding with libc.
@@ -358,6 +369,10 @@ struct BodyEmitter<'a, 'f> {
     pointer: types::Type,
     /// Where each slot's leaves begin among the function's variables.
     slot_base: Vec<u32>,
+    /// Each open arena's base pointer and bump pointer, indexed by the arena
+    /// number `Stmt::Region` carries. Variables rather than values because a
+    /// `region` inside a loop opens a fresh arena on every iteration.
+    arenas: Vec<(Variable, Variable)>,
     /// Slot leaves occupy the variables below this; temporaries the backend
     /// needs for its own purposes are numbered from here.
     next_var: u32,
@@ -391,6 +406,7 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
             return_pointer: None,
             pointer,
             slot_base,
+            arenas: Vec::new(),
             next_var,
         }
     }
@@ -495,6 +511,15 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
 
     /// Hand back a result, in registers or through the caller's buffer.
     fn emit_return(&mut self, values: Vec<Value>) {
+        // Leaving every arena this `return` jumps out of, innermost first.
+        // The returned value cannot point into one — §6's occurs-check is
+        // what guarantees that — so releasing here is releasing memory
+        // nothing can still reach.
+        for index in (0..self.arenas.len()).rev() {
+            let (base_var, _) = self.arenas[index];
+            let held = self.builder.use_var(base_var);
+            self.free(held);
+        }
         match self.return_pointer {
             Some(address) => {
                 self.store_leaves(address, &values);
@@ -528,6 +553,11 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
                     }
                 }
                 Stmt::While { cond, body } => self.while_stmt(cond, body),
+                Stmt::Region { arena, body } => {
+                    if self.region_stmt(*arena, body) {
+                        return true;
+                    }
+                }
                 Stmt::Borrow { referent, reference, unique, body } => {
                     if self.borrow_stmt(*referent, *reference, *unique, body) {
                         return true;
@@ -554,6 +584,100 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
     /// be: the checker froze the referent for the whole region, so the
     /// variables and the buffer cannot have drifted apart. A unique borrow
     /// will need the copy back, and the buffer is where it will come from.
+    /// Declare a libc symbol the backend reaches for itself, on first use.
+    ///
+    /// `Module::declare_function` is idempotent for one name and signature,
+    /// so after the first call this is a lookup. Declaring on use rather
+    /// than up front is what keeps a program with no `region` block free of
+    /// an import it never makes — and what stops the symbol assertions in
+    /// the tests below from passing vacuously.
+    fn libc_fn(&mut self, name: &str, params: &[types::Type], returns: &[types::Type]) -> FuncId {
+        let mut sig = self.module.make_signature();
+        sig.call_conv = self.module.isa().default_call_conv();
+        for param in params {
+            sig.params.push(AbiParam::new(*param));
+        }
+        for ret in returns {
+            sig.returns.push(AbiParam::new(*ret));
+        }
+        self.module
+            .declare_function(name, Linkage::Import, &sig)
+            .expect("libc's own symbols are declared consistently")
+    }
+
+    /// `free(pointer)` — release one arena's chunk.
+    fn free(&mut self, held: Value) {
+        let pointer = self.pointer;
+        let id = self.libc_fn("free", &[pointer], &[]);
+        let f = self.module.declare_func_in_func(id, self.builder.func);
+        self.builder.ins().call(f, &[held]);
+    }
+
+    /// `region a { .. }` — open an arena, run the body, release it (§6).
+    ///
+    /// One `malloc` in, one `free` out. Between them the arena is two
+    /// pointers: where the next allocation goes, and where the chunk ends.
+    /// The end is not stored, because it is the base plus a constant.
+    ///
+    /// Release is a single `free` whatever was allocated — no traversal and
+    /// no per-object bookkeeping, which is the property §6 is trading
+    /// expressiveness for. Nothing runs at teardown because nothing *can*:
+    /// §6.1 keeps `res` values out, so there is no obligation left inside to
+    /// discharge.
+    fn region_stmt(&mut self, arena: u32, body: &[Stmt]) -> bool {
+        let pointer = self.pointer;
+        let size = self.builder.ins().iconst(pointer, ARENA_CHUNK);
+        let id = self.libc_fn("malloc", &[pointer], &[pointer]);
+        let f = self.module.declare_func_in_func(id, self.builder.func);
+        let call = self.builder.ins().call(f, &[size]);
+        let base = self.builder.inst_results(call)[0];
+        // Out of memory is a trap, not a null pointer wandering into a
+        // store. The language has no undefined behaviour to fall back on.
+        self.builder.ins().trapz(base, TrapCode::HEAP_OUT_OF_BOUNDS);
+
+        let base_var = self.temporary(pointer);
+        let bump_var = self.temporary(pointer);
+        self.builder.def_var(base_var, base);
+        self.builder.def_var(bump_var, base);
+        debug_assert_eq!(self.arenas.len(), arena as usize, "arenas open in order");
+        self.arenas.push((base_var, bump_var));
+
+        let returned = self.stmts(body);
+
+        // Skipped when the body returned: `emit_return` already released
+        // this arena on the way out, and there is no block left to put a
+        // second call in.
+        if !returned {
+            let held = self.builder.use_var(base_var);
+            self.free(held);
+        }
+        self.arenas.pop();
+        returned
+    }
+
+    /// `alloc[a](value)` — bump-allocate and write the value there (§6).
+    fn alloc(&mut self, arena: u32, ty: &Type, value: &Expr) -> Value {
+        let values = self.expr(value);
+        let (base_var, bump_var) = self.arenas[arena as usize];
+        let bytes =
+            i64::from(leaf_count(ty, self.program, self.pointer)) * i64::from(RETURN_SLOT_STRIDE);
+
+        let at = self.builder.use_var(bump_var);
+        let next = self.builder.ins().iadd_imm(at, bytes);
+
+        // Exhaustion is a trap. Every size here is a compile-time constant
+        // and the chunk is a constant too, so this is one compare against a
+        // pointer the program cannot have moved.
+        let base = self.builder.use_var(base_var);
+        let end = self.builder.ins().iadd_imm(base, ARENA_CHUNK);
+        let past = self.builder.ins().icmp(IntCC::UnsignedGreaterThan, next, end);
+        self.builder.ins().trapnz(past, TrapCode::HEAP_OUT_OF_BOUNDS);
+
+        self.builder.def_var(bump_var, next);
+        self.store_leaves(at, &values);
+        at
+    }
+
     fn borrow_stmt(
         &mut self,
         referent: Slot,
@@ -836,6 +960,7 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
             // The same field arithmetic as `Expr::Field`, except the leaves
             // are loaded out of the buffer the reference points at rather
             // than picked out of leaves already in registers.
+            Expr::Alloc { arena, ty, value } => vec![self.alloc(*arena, ty, value)],
             Expr::FieldRef { base, def, args, index } => {
                 let address = self.scalar(base);
                 let TypeInfo::Struct { fields, .. } = self.program.type_info(*def) else {
@@ -1071,11 +1196,15 @@ mod tests {
     }
 
     /// Compile for a target and read back the object's symbol table.
-    fn symbols(triple: &str) -> Vec<(String, bool)> {
+    /// Each symbol's name, whether it is global, and whether this object
+    /// *defines* it. An import is global and undefined; an export is global
+    /// and defined, and the difference is what "only `main` is exported"
+    /// means once the backend reaches for libc on its own.
+    fn symbols(triple: &str) -> Vec<(String, bool, bool)> {
         symbols_of(SOURCE, triple)
     }
 
-    fn symbols_of(source: &str, triple: &str) -> Vec<(String, bool)> {
+    fn symbols_of(source: &str, triple: &str) -> Vec<(String, bool, bool)> {
         let ast = parse(source).expect("should parse");
         let program = lower(&ast).expect("should lower");
         let bytes = compile_object_for(&program, "main", triple.parse().expect("a valid triple"))
@@ -1083,18 +1212,18 @@ mod tests {
         let file = object::File::parse(&*bytes).expect("a readable object file");
         // Text symbols are the functions; an undefined import reads back as
         // `Unknown`, and section and file symbols are neither.
-        let mut names: Vec<(String, bool)> = file
+        let mut names: Vec<(String, bool, bool)> = file
             .symbols()
             .filter(|s| matches!(s.kind(), SymbolKind::Text | SymbolKind::Unknown))
-            .filter_map(|s| s.name().ok().map(|n| (n.to_owned(), s.is_global())))
-            .filter(|(name, _)| !name.is_empty())
+            .filter_map(|s| s.name().ok().map(|n| (n.to_owned(), s.is_global(), !s.is_undefined())))
+            .filter(|(name, _, _)| !name.is_empty())
             .collect();
         names.sort();
         names
     }
 
     fn names(triple: &str) -> Vec<String> {
-        symbols(triple).into_iter().map(|(n, _)| n).collect()
+        symbols(triple).into_iter().map(|(n, _, _)| n).collect()
     }
 
     /// A symbol is spelled as it was declared, plus whatever the platform adds
@@ -1175,7 +1304,7 @@ mod tests {
             }";
         for (triple, prefix) in targets() {
             let names: Vec<String> =
-                symbols_of(FOREIGN, &triple).into_iter().map(|(n, _)| n).collect();
+                symbols_of(FOREIGN, &triple).into_iter().map(|(n, _, _)| n).collect();
             let expected = format!("{prefix}labs");
             assert!(names.contains(&expected), "{triple} should import `{expected}`: {names:?}");
             assert!(
@@ -1185,19 +1314,66 @@ mod tests {
         }
     }
 
+    /// §6: an arena is one `malloc` in and one `free` out, on every target.
+    ///
+    /// The symbol check is the cheap half. The real assertion is that the
+    /// body emits at all: `region` and `alloc` are the first constructs that
+    /// build a pointer from a call result and bump it, and pointer width is
+    /// the target's rather than a constant — the same class of mistake that
+    /// `a_borrow_lowers_on_every_target` exists to catch.
+    #[test]
+    fn an_arena_reaches_libc_on_every_target() {
+        const ARENA: &str = "\
+            struct Node { value: int, tag: bool } \
+            fn value_of[&r](n: &r Node) -> [] int { return n.value; } \
+            fn main() -> [] int { \
+                var total = 0; \
+                region a { \
+                    let first = alloc[a](Node { value: 1, tag: true }); \
+                    first.value = first.value + 1; \
+                    region inner { \
+                        let second = alloc[inner](Node { value: 2, tag: false }); \
+                        total = value_of(first) + value_of(second); \
+                    } \
+                } \
+                return total - 4; \
+            }";
+        for (triple, prefix) in targets() {
+            let with_arena: Vec<String> =
+                symbols_of(ARENA, &triple).into_iter().map(|(n, _, _)| n).collect();
+            for base in ["malloc", "free"] {
+                let expected = format!("{prefix}{base}");
+                assert!(
+                    with_arena.contains(&expected),
+                    "{triple} should import `{expected}`: {with_arena:?}"
+                );
+            }
+
+            // And a program with no arena imports neither, which is what
+            // makes the assertion above mean something.
+            let plain = names(&triple);
+            assert!(
+                !plain.iter().any(|n| n.contains("malloc") || n.contains("free")),
+                "{triple}: a program with no `region` should not reach the allocator: {plain:?}"
+            );
+        }
+    }
+
     #[test]
     fn only_the_entry_point_is_global() {
         for (triple, _) in targets() {
             let triple = triple.as_str();
-            for (name, global) in symbols(triple) {
+            for (name, global, _) in symbols(triple) {
                 if name.contains("lexs_") {
                     assert!(!global, "{triple}: `{name}` should be local");
                 }
             }
+            // libc's symbols are global too, but this object imports them
+            // rather than defining them, so they are not exports.
             let globals: Vec<String> = symbols(triple)
                 .into_iter()
-                .filter(|(name, global)| *global && !name.contains("putchar"))
-                .map(|(name, _)| name)
+                .filter(|(_, global, defined)| *global && *defined)
+                .map(|(name, _, _)| name)
                 .collect();
             assert_eq!(globals.len(), 1, "{triple}: exactly one exported symbol, got {globals:?}");
             assert!(globals[0].ends_with("main"), "{triple}: {globals:?}");

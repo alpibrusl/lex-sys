@@ -6,8 +6,8 @@
 > now the specification the implementation is measured against; §12 lists what
 > is still open, and nothing there blocks the rest.
 >
-> **Implemented: §3, §4, §5, §7 and §8** — modes, linearity, both borrow
-> modes, exact effect rows, narrowing, capabilities and FFI. §2's claim now
+> **Implemented: §3 through §8** — modes, linearity, both borrow modes,
+> arenas, exact effect rows, narrowing, capabilities and FFI. §2's claim now
 > holds in code: an effect *is* a borrowed capability, `[io]` on a signature
 > means the function was handed an `&!i Io` it did not create, and the only
 > checker that runs over any of it is the linearity and borrow checker §3–§5
@@ -18,7 +18,12 @@
 > A foreign call is now a real call into libc, gated by a capability that
 > names the library it reaches.
 >
-> **Not implemented: §6 and §9** — arenas and the escape hatches.
+> §6 was the last of them, and it is where §5's bet is paid for: lexical
+> regions are cheap to check precisely because a reference cannot outlive its
+> block, and an arena is what data that outlives its *creator* lives in
+> instead. Both open a region, both are checked by the same occurs-check.
+>
+> **Not implemented: §9** — the escape hatches.
 >
 > Where the concrete syntax below differs from what was implemented, §5.3
 > says so and why. The syntax here was always illustrative (§1); the rules
@@ -488,6 +493,13 @@ There is no `*r` yet: a reference to a struct is read with `.field`, which
 covers what §5's own examples do. A reference to a scalar can be made and
 passed and not otherwise read, which is a wart rather than a rule.
 
+**A unique reference may be used where a shared one is expected**, and never
+the reverse. `&!r T` is `&r T` plus permission to write, so passing one
+read-only hands the callee strictly less than it already held. This arrived
+with §6 rather than here: arenas hand back `&!a` and nothing else, so
+without the coercion no function written against `&r` could touch allocated
+data at all. The referent stays invariant either way — "`T` never changes".
+
 **Locking is what makes the implementation cheap.** A reference is a pointer
 at a buffer the referent is spilled into for the block. A shared borrow needs
 no write-back, because the referent is frozen and the two cannot drift. A
@@ -566,6 +578,49 @@ consumption event, with per-object finalisers — reintroduces implicit
 destructors and turns an O(1) release into a traversal. If it turns out to bite
 in practice, the fix is a *separate* `scope` construct with explicit
 registration, not a weakening of this rule.
+
+> **What was built.** `region a { .. }` and `alloc[a](v)`, spelled as above.
+> The region name is written bare in both, because `&` is the reference
+> constructor and there is nothing in either position for it to construct.
+>
+> **An arena is a `borrow` block with the referent taken out.** Opening one
+> pushes a block onto the same table §5 uses, with the same parent link — so
+> §5.2's outlives relation, §5's occurs-check and the scope rules apply to
+> it without a line of new reasoning. `reference_escapes_arena.ls` is
+> refused by the code that refuses `reference_escapes_borrow.ls`, and
+> `inner_region_stored_in_outer.ls` by the code behind `unrelated_regions.ls`.
+> That is §6's claim — "an arena's lifetime and a borrow's lifetime are one
+> mechanism, not two that happen to look alike" — and it is structural
+> rather than asserted.
+>
+> **`alloc[a]` hands back `&!a T`**, an ordinary unique reference. There is
+> no second notion of a pointer-into-an-arena, so reading, writing through
+> it and passing it to a region-polymorphic function all work unchanged.
+> `a` must be an arena open right now: a `borrow` block's region is a region
+> but has no chunk behind it, and a region *parameter* is a caller's, not
+> this function's to allocate in.
+>
+> **One new coercion, which §6 forces.** A unique reference is accepted
+> where a shared one is expected, never the reverse — `&!r T` is `&r T`
+> plus permission to write, so handing one over read-only gives the callee
+> strictly less than it already had. Without it nothing written against
+> `&r` could touch arena data at all, since `alloc` hands back `&!a` and
+> nothing else. The referent stays invariant.
+>
+> **At runtime** an arena is one `malloc` when the block opens and one
+> `free` when it closes, with a bump pointer in between; a `return` out of a
+> region releases every arena it leaves, innermost first. Release is one
+> call whatever was allocated, which is the O(1) the section is trading
+> expressiveness for — and it is *only* a `free`, because §6.1 kept
+> everything with an obligation out of the chunk.
+>
+> **Exhausting the chunk traps.** A single chunk is what makes release one
+> call; growing it would make release a walk. The alternative to trapping is
+> writing past the end of an allocation, which is undefined behaviour, which
+> this language does not have. So the arena is 64 KiB and asking for more
+> kills the process, deterministically, the same way division by zero does.
+> Growth that keeps both properties is an M3 question and the trap is what
+> keeps the answer honest until it is answered.
 
 ---
 
@@ -921,8 +976,8 @@ fixture declaring its own expected message in a `//~ ERROR` header, run by
 `crates/lex-sys/tests/conformance.rs`. M2 adds to it; it does not invent
 anything.
 
-A ✓ in the last column means the fixture exists and the rule is enforced; the
-rest are the sections not yet implemented.
+A ✓ in the last column means the fixture exists and the rule is enforced.
+Every row carries one.
 
 | Fixture | Rule | § | |
 |---|---|---|---|
@@ -939,9 +994,9 @@ rest are the sections not yet implemented.
 | `two_unique_borrows.ls` | One unique borrow at a time | 5 | ✓ |
 | `unrelated_regions.ls` | Sibling regions do not outlive each other | 5.2 | ✓ |
 | `region_param_unsatisfied.ls` | A declared `<=` must hold at the call site | 5.2 | ✓ |
-| `reference_escapes_arena.ls` | Nothing mentioning the arena's region escapes it | 6 | |
-| `inner_region_stored_in_outer.ls` | An inner region's reference may not be stored outward | 6 | |
-| `arena_holds_res.ls` | `alloc` takes `val` data only | 6.1 | |
+| `reference_escapes_arena.ls` | Nothing mentioning the arena's region escapes it | 6 | ✓ |
+| `inner_region_stored_in_outer.ls` | An inner region's reference may not be stored outward | 6 | ✓ |
+| `arena_holds_res.ls` | `alloc` takes `val` data only | 6.1 | ✓ |
 | `undeclared_effect.ls` | A call's row must be a subset of the declared row | 7.2 | ✓ |
 | `effect_declared_not_performed.ls` | An over-wide row is an error | 7.3 | ✓ |
 | `effect_widened.ls` | A capability may be narrowed, never widened | 7.4 | ✓ |
@@ -990,7 +1045,7 @@ that rejects everything is not a rule either:
 | `borrow_and_return.ls` | A borrow used and discarded inside its region | ✓ |
 | `two_shared_borrows.ls` | Shared borrows nest | ✓ |
 | `nested_regions.ls` | An inner region reading an outer one | ✓ |
-| `arena_roundtrip.ls` | Allocate, walk, release in O(1) | |
+| `arena_roundtrip.ls` | Allocate, walk, release in O(1) | ✓ |
 | `effect_exact.ls` | A row that is exactly what the body performs | ✓ |
 | `narrowed_capability.ls` | Attenuation, and a call that fits inside it | ✓ |
 | `threaded_io.ls` | `main` splitting `World` and threading `Io` down three frames | ✓ |

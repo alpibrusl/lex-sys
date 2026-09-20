@@ -4,7 +4,7 @@ A **systems dialect carrying Lex's philosophy**: native compilation, no GC, line
 ownership and capability-typed effects unified into one resource system, fully
 defined behaviour, and a canonical content-addressable AST designed in from day one.
 
-> **Status: M1 complete, M2 started, M3 started.** A bootstrap compiler takes a
+> **Status: M1 complete, M2 complete, M3 started.** A bootstrap compiler takes a
 > `.ls` file to a real native executable, and CI proves it on **linux-x86_64
 > and darwin-aarch64**. The language has a type system: `int` and `bool`,
 > structs, enums with exhaustive pattern matching, and monomorphised generics.
@@ -30,8 +30,14 @@ defined behaviour, and a canonical content-addressable AST designed in from day 
 > and never the other way — so a program cannot grant itself what it was not
 > given. C's effects stop being invisible at the point they enter.
 >
-> **Still missing:** arenas (§6). There are also no strings, no slices and
-> no allocation: those are M3. Do not mistake this for a usable language
+> **And there is allocation.** `region a { .. }` opens an arena, `alloc[a](v)`
+> puts a value in it, and the whole thing is released in one call at block
+> exit — no traversal, no finalisers. It is the same region machinery as a
+> borrow, checked by the same occurs-check, which is what §5's lexical bet
+> was for. **M2 is complete.**
+>
+> **Still missing:** strings, slices and a general heap — those are M3, and
+> so are the escape hatches (§9). Do not mistake this for a usable language
 > yet.
 
 ## What this is
@@ -112,6 +118,7 @@ cargo run -p lex-sys -- run examples/tour.ls
 # M2 effects: 42
 # M2 capability: 88
 # M2 foreign: 7 9
+# M2 arena: 1 4 9 -> 14
 ```
 
 `examples/tour.ls` is the shortest honest answer to "what can this language
@@ -124,7 +131,7 @@ comparison, `&&`/`||` with short-circuiting, `if`/`else`, `while`, `let`/`var`
 bindings, structs, enums with exhaustive `match`, generics over both,
 `res`/`val` modes with exactly-once linearity and destructuring `let`,
 shared and unique borrows with lexical regions, exact effect rows,
-capabilities, narrowing, and capability-gated foreign calls.
+capabilities, narrowing, capability-gated foreign calls, and arenas.
 
 ```
 res struct Ticket { serial: int }
@@ -215,6 +222,25 @@ library at all, so it authorises nothing until it is narrowed; an
 what it attenuates, so there is no way back to the wider capability — the
 same commitment `lex-os` makes for manifests, for the same reason.
 
+Data that has to outlive the block that made it goes in an arena:
+
+```
+region a {
+    let node = alloc[a](Node { value: 1 });   // node : &!a Node
+    total = total + value_of(node);
+}                                             // released here, in one call
+```
+
+An arena *is* a region — the same block, the same parent chain, the same
+occurs-check — which is what the lexical bet in §5 was for. Nothing whose
+type mentions `a` leaves the block, an inner arena may hold what an outer
+one allocated and never the reverse, and release is one `free` whatever was
+allocated. Arenas hold `val` data only: releasing one reclaims memory and
+runs nothing, so a linear value inside would have its obligation dropped
+rather than discharged. Asking for more than the chunk holds traps, because
+the alternative is writing past an allocation and this language has no
+undefined behaviour to do that in.
+
 There is **no borrow checker**. A region is a block, so a reference's validity
 is lexical rather than inferred: no non-lexical lifetimes, no variance, no
 dataflow. A binding is `Owned`, `Frozen` or `Locked`, set at block entry and
@@ -222,8 +248,7 @@ restored at block exit; `r_inner <= r_outer` holds exactly when the outer
 block encloses the inner one, which is a walk up a stack; and escape is an
 occurs-check over one type.
 
-**What does not, yet:** strings, slices and allocation — and arenas (§6),
-the one part of the M2 document still unbuilt. That is why
+**What does not, yet:** strings, slices and a general heap. That is why
 `examples/hello.ls` still packs its greeting into two 64-bit words and
 unpacks it a byte at a time, and why a foreign call can pass an integer but
 not a pointer to bytes.
@@ -277,10 +302,10 @@ carry them exists now, while it is cheap.
 
 | Doc | What | Status |
 |---|---|---|
-| [`docs/linearity-and-effects.md`](docs/linearity-and-effects.md) | The M2 gate: linear ownership, capability-typed effects, how they unify, and 23 must-reject fixtures written out as the conformance suite | settled; §3–5, §7 and §8 implemented |
+| [`docs/linearity-and-effects.md`](docs/linearity-and-effects.md) | The M2 gate: linear ownership, capability-typed effects, how they unify, and 23 must-reject fixtures written out as the conformance suite | settled; §3 through §8 implemented |
 | [`docs/bootstrap.md`](docs/bootstrap.md) | What M0 settled: bootstrap host (Rust), extension (`.ls`), the M0 surface, what is scaffolding and what replaces it | written |
 | [`docs/canonical-ast.md`](docs/canonical-ast.md) | Canonicalisation rules and per-unit identity: what is hashed, and what a hash is allowed to change with | written, implemented |
-| `docs/memory-model.md` | Regions, escape, the escape hatches and their cost | not written (M2) |
+| `docs/memory-model.md` | Regions, escape, the escape hatches and their cost | not written — §5 and §6 settled and built regions and escape; what remains is §9's escape hatches, which M3 needs |
 | `docs/defined-behaviour.md` | Every place C and Rust leave behaviour open, and what we define it to | not written (M3) |
 
 Division already traps on a zero divisor and on `int::MIN / -1` rather than
@@ -297,8 +322,8 @@ M0–M3 with acceptance criteria, sequencing, risks and open decisions.
 |---|---|---|
 | **M0** — native hello world ([#3](https://github.com/alpibrusl/lex-sys/issues/3)) | Lexer, parser, AST, IR, Cranelift backend, a real executable | **done** — green on both targets |
 | **M1** — typed core | Type checker, `bool`, structs, ADTs with exhaustiveness, monomorphised generics. No linearity, no effects — deliberately | **done** |
-| **M2** — the actual thesis ([#2](https://github.com/alpibrusl/lex-sys/issues/2)) | Linear ownership, effect rows and capability-passing as **one** system | **done** — §3–§5, §7 and §8, narrowing and FFI included; arenas (§6) remain |
-| **M3** — minimal but real | Slices and strings, arenas, libc FFI, settled overflow semantics, canonical printer, per-unit identity | started — per-unit identity landed, and libc FFI arrived early with M2's capabilities |
+| **M2** — the actual thesis ([#2](https://github.com/alpibrusl/lex-sys/issues/2)) | Linear ownership, effect rows and capability-passing as **one** system | **complete** — §3 through §8 of the design document, every must-reject fixture enforced |
+| **M3** — minimal but real | Slices and strings, arenas, libc FFI, settled overflow semantics, canonical printer, per-unit identity | started — per-unit identity landed, and arenas and libc FFI arrived early with M2's regions and capabilities |
 
 Deliberately excluded from "minimal": borrow checker, traits, `comptime`, own
 optimiser, incremental compilation, LSP, async. Each is "yes, later" — saying
