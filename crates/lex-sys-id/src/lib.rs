@@ -111,6 +111,8 @@ mod tag {
     /// A string literal, in the only two places one may appear: a narrowing
     /// argument and a type indexed by a literal.
     pub const STR: u8 = 0x66;
+    pub const REGION: u8 = 0x67;
+    pub const ALLOC: u8 = 0x68;
 
     /// The tag for a declared mode. Written out rather than cast from the
     /// enum, so adding a mode cannot silently renumber the others.
@@ -648,6 +650,15 @@ impl BodyHasher<'_> {
                 self.scope.binders.pop();
                 self.regions.pop();
             }
+            Stmt::Region { region, body } => {
+                // Positional like a borrow's, and for the same reason: the
+                // name is the author's, and no caller and no reader of the
+                // hash can tell `region a` from `region q`.
+                self.encoder.tag(tag::REGION);
+                self.regions.push(*region);
+                self.block(body);
+                self.regions.pop();
+            }
             Stmt::Destructure { struct_name, fields, value } => {
                 self.encoder.tag(tag::DESTRUCTURE);
                 self.type_reference(*struct_name);
@@ -716,6 +727,20 @@ impl BodyHasher<'_> {
             Expr::Name(name) => {
                 self.encoder.tag(tag::LOCAL);
                 self.name(*name);
+            }
+            Expr::Alloc { region, value } => {
+                // Which arena is part of what this expression *means*, so it
+                // reaches the hash -- positionally, since the name does not.
+                self.encoder.tag(tag::ALLOC);
+                match self.regions.iter().rposition(|r| r == region) {
+                    Some(index) => {
+                        self.encoder.tag(tag::LOCAL).u32(index as u32);
+                    }
+                    None => {
+                        self.encoder.tag(tag::NONE).str(self.ast.name_of(*region));
+                    }
+                }
+                self.expr(*value);
             }
             Expr::StructLit { name, fields } => {
                 self.encoder.tag(tag::STRUCT_LIT);
@@ -1160,6 +1185,58 @@ mod tests {
         assert_eq!(
             body("fn f() -> [] int { return 1 + 1; }", "f"),
             body("fn f() -> [io] int { return 1 + 1; }", "f")
+        );
+    }
+
+    // ---- arenas (§6) ---------------------------------------------------
+
+    #[test]
+    fn an_arenas_name_does_not_reach_the_hash() {
+        // Positional like a borrow's region, and for the same reason: no
+        // caller and no reader can tell `region a` from `region q`.
+        assert_eq!(
+            body(
+                "struct N { v: int } fn f() -> [] int { region a { let n = alloc[a](N { v: 1 }); } return 0; }",
+                "f"
+            ),
+            body(
+                "struct N { v: int } fn f() -> [] int { region q { let n = alloc[q](N { v: 1 }); } return 0; }",
+                "f"
+            )
+        );
+    }
+
+    #[test]
+    fn which_arena_an_allocation_goes_in_reaches_the_hash() {
+        // Two nested arenas, and an allocation that moves from the inner to
+        // the outer is a different body: where a value lives is what the
+        // expression means, not decoration.
+        assert_ne!(
+            body(
+                "struct N { v: int } fn f() -> [] int { region o { region i { let n = alloc[i](N { v: 1 }); } } return 0; }",
+                "f"
+            ),
+            body(
+                "struct N { v: int } fn f() -> [] int { region o { region i { let n = alloc[o](N { v: 1 }); } } return 0; }",
+                "f"
+            )
+        );
+    }
+
+    #[test]
+    fn an_arena_is_not_a_borrow_block() {
+        // Both open a region and both are a block; they are still two
+        // different statements, and a hash that confused them would say a
+        // rewritten body had not changed.
+        assert_ne!(
+            body(
+                "struct N { v: int } fn f() -> [] int { let b = N { v: 1 }; region a { let x = 1; } return 0; }",
+                "f"
+            ),
+            body(
+                "struct N { v: int } fn f() -> [] int { let b = N { v: 1 }; borrow b as &a in { let x = 1; } return 0; }",
+                "f"
+            )
         );
     }
 

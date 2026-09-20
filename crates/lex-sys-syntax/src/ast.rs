@@ -191,6 +191,15 @@ pub enum Expr {
         callee: Symbol,
         args: Vec<ExprId>,
     },
+    /// `alloc[a](Node { value: 1 })` — allocate in an arena (§6).
+    ///
+    /// Its own node rather than a call, because the brackets name a *region*
+    /// and nothing else in the language does that at a call site. The region
+    /// is not inferred: an arena is chosen, never guessed.
+    Alloc {
+        region: Symbol,
+        value: ExprId,
+    },
 }
 
 /// A brace-delimited sequence of statements.
@@ -242,6 +251,20 @@ pub enum Stmt {
     Borrow {
         value: Symbol,
         unique: bool,
+        region: Symbol,
+        body: Block,
+    },
+    /// `region a { .. }` — an arena (§6).
+    ///
+    /// The same shape as `borrow`, deliberately: it introduces a region that
+    /// is a block, and what may not escape it is decided by the same
+    /// occurs-check. An arena's lifetime and a borrow's lifetime are one
+    /// mechanism, which is the section's claim.
+    ///
+    /// The region is written bare rather than as `&a`, because `&` is the
+    /// reference constructor and there is nothing else a `region` could
+    /// introduce.
+    Region {
         region: Symbol,
         body: Block,
     },

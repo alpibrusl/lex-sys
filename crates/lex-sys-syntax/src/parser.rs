@@ -403,6 +403,7 @@ impl<'a> Parser<'a> {
             TokenKind::While => self.while_stmt(),
             TokenKind::Match => self.match_stmt(),
             TokenKind::Borrow => self.borrow_stmt(),
+            TokenKind::Region => self.region_stmt(),
             // An expression statement, or an assignment to whatever that
             // expression turns out to name. M0 has no assignment expression,
             // so the `=` decides between them after the fact rather than by
@@ -580,6 +581,18 @@ impl<'a> Parser<'a> {
         Ok(self.ast.push_stmt(Stmt::Borrow { value, unique, region, body }, kw.span.to(end)))
     }
 
+    /// `region a { .. }` (§6).
+    ///
+    /// The region is written bare. `&` is the reference constructor, and
+    /// there is nothing here for it to construct -- what follows `region` is
+    /// a region name and can be nothing else.
+    fn region_stmt(&mut self) -> Result<StmtId, Diagnostic> {
+        let kw = self.bump();
+        let region = self.ident()?;
+        let (body, end) = self.block()?;
+        Ok(self.ast.push_stmt(Stmt::Region { region, body }, kw.span.to(end)))
+    }
+
     // ---- expressions ---------------------------------------------------
 
     fn expr(&mut self) -> Result<ExprId, Diagnostic> {
@@ -691,6 +704,21 @@ impl<'a> Parser<'a> {
             TokenKind::True | TokenKind::False => {
                 self.bump();
                 Ok(self.ast.push_expr(Expr::Bool(tok.kind == TokenKind::True), tok.span))
+            }
+            TokenKind::Ident if self.text(tok) == "alloc" => {
+                // `alloc[a](v)`: the one place brackets name a region at a
+                // call site, so it is parsed as itself rather than as a call
+                // that happens to be spelled oddly. The arena is written,
+                // never inferred -- allocating somewhere the author did not
+                // name is exactly the ambient behaviour §6 exists to refuse.
+                self.bump();
+                self.expect(TokenKind::LBracket)?;
+                let region = self.ident()?;
+                self.expect(TokenKind::RBracket)?;
+                self.expect(TokenKind::LParen)?;
+                let value = self.bracketed(|p| p.expr())?;
+                let end = self.expect(TokenKind::RParen)?.span;
+                Ok(self.ast.push_expr(Expr::Alloc { region, value }, tok.span.to(end)))
             }
             TokenKind::Ident => {
                 let name = self.ident()?;
@@ -1197,6 +1225,40 @@ mod tests {
         let labels: Vec<&str> = decl.effects.iter().map(|e| ast.name_of(e.name)).collect();
         assert_eq!(labels, ["io", "fs"], "the parser keeps what was written");
         assert!(decl.effects.iter().all(|e| e.argument.is_none()));
+    }
+
+    #[test]
+    fn a_region_block_names_its_region_bare() {
+        // §6: `&` is the reference constructor, and there is nothing here
+        // for it to construct.
+        let (ast, decl) = one_fn("fn f() -> [] int { region a { let x = 1; } return 0; }");
+        let Stmt::Region { region, body } = ast.stmt(decl.body.stmts[0]) else {
+            panic!("a region statement");
+        };
+        assert_eq!(ast.name_of(*region), "a");
+        assert_eq!(body.stmts.len(), 1);
+        assert!(parse("fn f() -> [] int { region &a { } return 0; }").is_err());
+    }
+
+    #[test]
+    fn alloc_names_its_arena_in_brackets() {
+        let (ast, decl) =
+            one_fn("fn f() -> [] int { region a { let n = alloc[a](1); } return 0; }");
+        let Stmt::Region { body, .. } = ast.stmt(decl.body.stmts[0]) else {
+            panic!("a region statement");
+        };
+        let Stmt::Let { value, .. } = ast.stmt(body.stmts[0]) else { panic!("a binding") };
+        let Expr::Alloc { region, .. } = ast.expr(*value) else { panic!("an allocation") };
+        assert_eq!(ast.name_of(*region), "a");
+    }
+
+    #[test]
+    fn alloc_without_an_arena_is_not_a_call() {
+        // The arena is written, never inferred: allocating somewhere the
+        // author did not name is the ambient behaviour §6 refuses.
+        let err = parse("fn f() -> [] int { let n = alloc(1); return 0; }")
+            .expect_err("should be refused");
+        assert!(err.message.contains('['), "{}", err.message);
     }
 
     #[test]

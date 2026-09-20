@@ -194,6 +194,46 @@ fn run_builds_and_executes_in_one_step() {
 }
 
 #[test]
+fn exhausting_an_arena_traps_rather_than_running_past_the_chunk() {
+    // §6: an arena is one chunk, obtained once and released once, which is
+    // what makes release O(1). Asking it for more than it has is therefore
+    // possible -- and it *traps*, because the alternative to a trap is
+    // writing past the end of an allocation, and this language does not have
+    // undefined behaviour to do that in (#1).
+    let dir = scratch("arena-exhaustion");
+    let source = dir.join("exhaust.ls");
+    std::fs::write(
+        &source,
+        "struct Node { value: int }\n\
+         fn main(world: World) -> [] int {\n\
+             let Split { io, ffi } = split(world); release(ffi); release(io);\n\
+             region a {\n\
+                 var i = 0;\n\
+                 while i < 20000 {\n\
+                     let node = alloc[a](Node { value: i });\n\
+                     i = i + 1;\n\
+                 }\n\
+             }\n\
+             return 0;\n\
+         }\n",
+    )
+    .expect("a writable fixture");
+    let exe = dir.join("exhaust");
+
+    let build = Command::new(BIN)
+        .args(["build".as_ref(), source.as_os_str(), "-o".as_ref(), exe.as_os_str()])
+        .output()
+        .expect("the compiler runs");
+    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+
+    let run = Command::new(&exe).output().expect("the compiled program runs");
+    assert!(!run.status.success(), "an exhausted arena should not succeed");
+    assert_eq!(run.status.code(), None, "the process should be killed by a signal, not exit");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn division_by_zero_traps_rather_than_being_undefined() {
     let dir = scratch("divide-by-zero");
     let source = dir.join("divzero.ls");
