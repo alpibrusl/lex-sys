@@ -178,12 +178,28 @@ pub enum Expr {
     },
 }
 
+/// Where a value is written.
+///
+/// Two shapes, and deliberately not more: a whole local, or a field of
+/// whatever a unique reference points at. Writing to a field of an *owned*
+/// local would be a partial write, and what a partial write means for a
+/// binding holding a `res` field is a question §4 does not answer — so it is
+/// refused rather than guessed at.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Place {
+    /// A whole local: `let`, `var`, a destructured part, or `x = e`.
+    Slot(Slot),
+    /// `r.field = e`, where `base` evaluates to a pointer. The same field
+    /// arithmetic as [`Expr::FieldRef`], running the other way.
+    Field { base: Expr, def: DefId, args: Vec<Type>, index: u32 },
+}
+
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Stmt {
-    /// Both `let`/`var` and plain assignment: by this point the difference is
-    /// spent, having been checked during lowering.
+    /// `let`/`var`, a destructured part, and assignment alike: by this point
+    /// the difference is spent, having been checked during lowering.
     Store {
-        slot: Slot,
+        place: Place,
         value: Expr,
     },
     /// An expression evaluated for its effects; its value is discarded.
@@ -212,6 +228,10 @@ pub enum Stmt {
     Borrow {
         referent: Slot,
         reference: Slot,
+        /// A unique borrow writes the buffer back into the referent when the
+        /// block closes; a shared one has nothing to write back, because the
+        /// referent was frozen and cannot have drifted.
+        unique: bool,
         body: Vec<Stmt>,
     },
     Return(Expr),
@@ -722,9 +742,16 @@ pub fn lower(ast: &Ast) -> Result<Program, Diagnostic> {
 fn settle_types(stmts: &mut [Stmt], unifier: &Unifier) {
     for stmt in stmts {
         match stmt {
-            Stmt::Store { value, .. } | Stmt::Eval(value) | Stmt::Return(value) => {
-                settle_expr(value, unifier)
+            Stmt::Store { place, value } => {
+                if let Place::Field { base, args, .. } = place {
+                    settle_expr(base, unifier);
+                    for arg in args.iter_mut() {
+                        *arg = unifier.resolve(arg);
+                    }
+                }
+                settle_expr(value, unifier);
             }
+            Stmt::Eval(value) | Stmt::Return(value) => settle_expr(value, unifier),
             Stmt::If { cond, then_body, else_body } => {
                 settle_expr(cond, unifier);
                 settle_types(then_body, unifier);
@@ -1441,28 +1468,16 @@ impl<'a> FnLowering<'a> {
                     ));
                 }
                 let slot = self.declare(*name, declared, *mutable, span);
-                Stmt::Store { slot, value }
+                Stmt::Store { place: Place::Slot(slot), value }
             }
-            AstStmt::Assign { name, value } => {
-                let value_span = self.ast.expr_span(match self.ast.stmt(id) {
-                    AstStmt::Assign { value, .. } => *value,
-                    _ => unreachable!(),
-                });
+            AstStmt::Assign { place, value } => {
+                let value_span = self.ast.expr_span(*value);
                 let (value, found) = self.expr(*value)?;
-                let text = self.ast.name_of(*name);
-                let Some(binding) = self.lookup(*name) else {
-                    return Err(Diagnostic::new(format!("`{text}` is not bound here"), span));
-                };
-                if !binding.mutable {
-                    return Err(Diagnostic::new(
-                        format!("`{text}` is immutable; declare it with `var` to assign to it"),
-                        span,
-                    ));
-                }
-                let (slot, declared) = (binding.slot, binding.ty.clone());
+                // The place is resolved *after* the value, so `x = x + 1`
+                // reads `x` before the write is recorded.
+                let (place, declared) = self.place(*place, span)?;
                 self.expect_type(&declared, &found, value_span)?;
-                self.trace.emit(Event::Assign { slot, span });
-                Stmt::Store { slot, value }
+                Stmt::Store { place, value }
             }
             AstStmt::Expr(e) => {
                 let (value, found) = self.expr(*e)?;
@@ -1606,12 +1621,12 @@ impl<'a> FnLowering<'a> {
         }
 
         let whole = self.temp(Type::Named(def_id, type_args.clone()));
-        let mut out = vec![Stmt::Store { slot: whole, value }];
+        let mut out = vec![Stmt::Store { place: Place::Slot(whole), value }];
         for (field, index) in fields.iter().zip(order) {
             let ty = declared[index].1.substitute(&type_args, &[]);
             let slot = self.declare(*field, ty, false, span);
             out.push(Stmt::Store {
-                slot,
+                place: Place::Slot(slot),
                 value: Expr::Field {
                     base: Box::new(Expr::Load(whole)),
                     def: def_id,
@@ -1629,6 +1644,106 @@ impl<'a> FnLowering<'a> {
     /// the reference share the name `r`, which is how §5 writes it: `r` is
     /// the region in a type and the reference in an expression, and the two
     /// namespaces never meet.
+    /// Resolve the left side of an assignment to a place (§5 rule 2).
+    ///
+    /// A place is a whole local or a field of whatever a *unique* reference
+    /// points at, and nothing else. Two things it deliberately is not:
+    ///
+    /// * a field of an owned local. That is a partial write, and what one
+    ///   means for a binding holding a `res` field is a question §4 does not
+    ///   answer. Writing the whole value says the same thing and asks
+    ///   nothing new.
+    /// * anything reached through a *shared* reference. Freezing promises
+    ///   the referent will not change; writing through it is that promise
+    ///   broken, whoever holds the reference.
+    fn place(&mut self, id: ExprId, span: Span) -> Result<(Place, Type), Diagnostic> {
+        match self.ast.expr(id) {
+            AstExpr::Name(name) => {
+                let text = self.ast.name_of(*name);
+                let Some(binding) = self.lookup(*name) else {
+                    return Err(Diagnostic::new(format!("`{text}` is not bound here"), span));
+                };
+                if !binding.mutable {
+                    return Err(Diagnostic::new(
+                        format!("`{text}` is immutable; declare it with `var` to assign to it"),
+                        span,
+                    ));
+                }
+                let (slot, ty) = (binding.slot, binding.ty.clone());
+                self.trace.emit(Event::Assign { slot, span });
+                Ok((Place::Slot(slot), ty))
+            }
+            AstExpr::Field { base, name } => {
+                let (base_id, field) = (*base, *name);
+                let base_span = self.ast.expr_span(base_id);
+                let (base_expr, base_ty) = self.expr(base_id)?;
+                let resolved = self.unifier.resolve(&base_ty);
+                let Type::Ref { unique, inner, .. } = resolved else {
+                    return Err(Diagnostic::new(
+                        format!(
+                            "`{}` is not a reference, so this would write one field and leave the rest; assign the whole value instead",
+                            self.unifier.display(&resolved)
+                        ),
+                        base_span,
+                    ));
+                };
+                if !unique {
+                    return Err(Diagnostic::new(
+                        "this is a shared reference `&`, which promises its referent will not change; `borrow mut` binds one that may be written through"
+                            .to_owned(),
+                        base_span,
+                    ));
+                }
+                let Type::Named(def_id, type_args) = self.unifier.resolve(&inner) else {
+                    return Err(Diagnostic::new(
+                        format!("`{}` has no fields", self.unifier.display(&inner)),
+                        base_span,
+                    ));
+                };
+                let def =
+                    self.defs.iter().find(|d| d.def == def_id).expect("a named type is declared");
+                let field_text = self.ast.name_of(field);
+                let DefKind::Struct(fields) = &def.kind else {
+                    return Err(Diagnostic::new(
+                        format!(
+                            "`{}` is an enum; its payload is reached by matching, not with `.`",
+                            self.ast.name_of(def.name)
+                        ),
+                        base_span,
+                    ));
+                };
+                let Some(index) = fields.iter().position(|(n, _)| *n == field) else {
+                    return Err(Diagnostic::new(
+                        format!("`{}` has no field `{field_text}`", self.ast.name_of(def.name)),
+                        span,
+                    ));
+                };
+                let ty = fields[index].1.substitute(&type_args, &[]);
+                // The write destroys whatever was there. For a `val` field
+                // that costs nothing; for a `res` one it is the silent drop
+                // §4 exists to forbid, and there is no consumer named here.
+                self.trace.emit(Event::Discard {
+                    ty: ty.clone(),
+                    what: "the value overwritten here",
+                    span,
+                });
+                Ok((
+                    Place::Field {
+                        base: base_expr,
+                        def: def_id,
+                        args: type_args,
+                        index: index as u32,
+                    },
+                    ty,
+                ))
+            }
+            _ => Err(Diagnostic::new(
+                "this cannot be assigned to; a place is a binding or a field reached through a unique reference",
+                span,
+            )),
+        }
+    }
+
     fn borrow_stmt(
         &mut self,
         value: Symbol,
@@ -1637,13 +1752,6 @@ impl<'a> FnLowering<'a> {
         body: &Block,
         span: Span,
     ) -> Result<Stmt, Diagnostic> {
-        if unique {
-            return Err(Diagnostic::new(
-                "`borrow mut` is not implemented yet; this slice has shared borrows, and unique ones are the rest of §5",
-                span,
-            ));
-        }
-
         let text = self.ast.name_of(value);
         let Some(binding) = self.lookup(value) else {
             return Err(Diagnostic::new(format!("`{text}` is not bound here"), span));
@@ -1661,18 +1769,18 @@ impl<'a> FnLowering<'a> {
         self.trace.open();
         // Frozen for the whole block: not movable, not consumable. A `val`
         // referent notices nothing, because reading one was never a move.
-        self.trace.emit(Event::Freeze { slot: referent, span });
+        self.trace.emit(Event::Freeze { slot: referent, unique, span });
         let reference =
             Type::Ref { unique, region: Region::Block(id), inner: Box::new(referent_ty) };
         let reference = self.declare(region, reference, false, span);
         let lowered = self.stmts(&body.stmts);
-        self.trace.emit(Event::Thaw { slot: referent });
+        self.trace.emit(Event::Thaw { slot: referent, unique });
         let events = self.trace.close();
         self.trace.emit(Event::Scope(events));
         self.scopes.pop();
 
         self.open_blocks.pop();
-        Ok(Stmt::Borrow { referent, reference, body: lowered? })
+        Ok(Stmt::Borrow { referent, reference, unique, body: lowered? })
     }
 
     /// Check a `match`: the scrutinee is an enum, every arm names a variant of
@@ -2310,7 +2418,7 @@ mod tests {
         assert_eq!(
             f.body[0],
             Stmt::Store {
-                slot: Slot(2),
+                place: Place::Slot(Slot(2)),
                 value: Expr::Bin {
                     op: BinOp::Add,
                     lhs: Box::new(Expr::Load(Slot(0))),
@@ -3390,12 +3498,82 @@ mod linearity_tests {
     }
 
     #[test]
-    fn a_unique_borrow_is_refused_rather_than_half_checked() {
+    fn a_unique_borrow_locks_its_referent() {
+        // §5 rule 2: nothing else may touch it at all, not even a read.
         let message = refused(
-            "fn main() -> int { let f = open(1); \
-             borrow mut f as &!r in { let n = r.fd; } return close(f); }",
+            "struct C { n: int } fn main() -> int { var c = C { n: 1 }; \
+             borrow mut c as &!r in { let peek = c; } return 0; }",
         );
-        assert!(message.contains("not implemented yet"), "{message}");
+        assert!(message.contains("nothing else may read it"), "{message}");
+    }
+
+    #[test]
+    fn there_is_at_most_one_unique_borrow() {
+        let message = refused(
+            "struct C { n: int } fn main() -> int { var c = C { n: 1 }; \
+             borrow mut c as &!a in { borrow mut c as &!b in { return 0; } } }",
+        );
+        assert!(message.contains("already uniquely borrowed"), "{message}");
+    }
+
+    #[test]
+    fn a_frozen_value_cannot_be_borrowed_uniquely() {
+        let message = refused(
+            "struct C { n: int } fn main() -> int { var c = C { n: 1 }; \
+             borrow c as &s in { borrow mut c as &!u in { return 0; } } }",
+        );
+        assert!(message.contains("cannot be borrowed uniquely"), "{message}");
+    }
+
+    #[test]
+    fn a_unique_borrow_releases_its_lock_at_the_end_of_the_block() {
+        accepted(
+            "struct C { n: int } fn main() -> int { var c = C { n: 1 }; \
+             borrow mut c as &!a in { a.n = 2; } \
+             borrow mut c as &!b in { b.n = 3; } return c.n - 3; }",
+        );
+    }
+
+    #[test]
+    fn copies_of_one_unique_reference_alias() {
+        // `&!r` is `val`, so it copies. Both copies are copies of one
+        // pointer, so the second write sees the first. Spilling the value in
+        // and reading it back per copy would lose one of them, which is why
+        // there is a single buffer per block rather than one per reference.
+        accepted(
+            "struct C { n: int } fn main() -> int { var c = C { n: 0 }; \
+             borrow mut c as &!r in { let a = r; let b = r; a.n = 3; b.n = b.n + 4; } \
+             return c.n - 7; }",
+        );
+    }
+
+    #[test]
+    fn a_shared_reference_may_not_be_written_through() {
+        let message = refused(
+            "struct C { n: int } fn main() -> int { var c = C { n: 1 }; \
+             borrow c as &r in { r.n = 2; } return 0; }",
+        );
+        assert!(message.contains("shared reference"), "{message}");
+    }
+
+    #[test]
+    fn a_field_of_an_owned_local_is_not_a_place() {
+        let message = refused(
+            "struct C { n: int } fn main() -> int { var c = C { n: 1 }; c.n = 2; return 0; }",
+        );
+        assert!(message.contains("assign the whole value instead"), "{message}");
+    }
+
+    #[test]
+    fn a_write_through_a_reference_may_not_drop_a_res_field() {
+        // Overwriting names no consumer for what was there, which is the
+        // silent drop §4 refuses however it is spelled.
+        let message = refused(
+            "struct Holder { f: File } \
+             fn set[&r](h: &!r Holder) -> int { h.f = open(2); return 0; } \
+             fn main() -> int { return 0; }",
+        );
+        assert!(message.contains("cannot be discarded"), "{message}");
     }
 
     #[test]

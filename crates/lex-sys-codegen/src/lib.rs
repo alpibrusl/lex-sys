@@ -20,8 +20,8 @@ use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_module::{FuncId, Linkage, Module, default_libcall_names};
 use cranelift_object::{ObjectBuilder, ObjectModule};
 use lex_sys_ir::{
-    Arm, BinOp, Builtin, Callee, Expr, Func, FuncId as IrFuncId, Program, Slot, Stmt, TypeInfo,
-    terminates,
+    Arm, BinOp, Builtin, Callee, Expr, Func, FuncId as IrFuncId, Place, Program, Slot, Stmt,
+    TypeInfo, terminates,
 };
 use lex_sys_types::{DefId, Type};
 use target_lexicon::Triple;
@@ -471,12 +471,9 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
     fn stmts(&mut self, stmts: &[Stmt]) -> bool {
         for stmt in stmts {
             match stmt {
-                Stmt::Store { slot, value } => {
+                Stmt::Store { place, value } => {
                     let values = self.expr(value);
-                    let base = self.slot_base[slot.0 as usize];
-                    for (offset, value) in values.into_iter().enumerate() {
-                        self.builder.def_var(Variable::from_u32(base + offset as u32), value);
-                    }
+                    self.write(place, values);
                 }
                 Stmt::Eval(expr) => {
                     self.expr(expr);
@@ -492,8 +489,8 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
                     }
                 }
                 Stmt::While { cond, body } => self.while_stmt(cond, body),
-                Stmt::Borrow { referent, reference, body } => {
-                    if self.borrow_stmt(*referent, *reference, body) {
+                Stmt::Borrow { referent, reference, unique, body } => {
+                    if self.borrow_stmt(*referent, *reference, *unique, body) {
                         return true;
                     }
                 }
@@ -518,7 +515,13 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
     /// be: the checker froze the referent for the whole region, so the
     /// variables and the buffer cannot have drifted apart. A unique borrow
     /// will need the copy back, and the buffer is where it will come from.
-    fn borrow_stmt(&mut self, referent: Slot, reference: Slot, body: &[Stmt]) -> bool {
+    fn borrow_stmt(
+        &mut self,
+        referent: Slot,
+        reference: Slot,
+        unique: bool,
+        body: &[Stmt],
+    ) -> bool {
         let ty = self.func.slots[referent.0 as usize].clone();
         let buffer = self.return_buffer(&ty);
         let base = self.slot_base[referent.0 as usize];
@@ -528,7 +531,58 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
             .collect();
         self.store_leaves(buffer, &values);
         self.builder.def_var(Variable::from_u32(self.slot_base[reference.0 as usize]), buffer);
-        self.stmts(body)
+        let returned = self.stmts(body);
+
+        // A unique borrow may have written through the reference, and the
+        // variables still hold what the buffer held on the way in. Reading
+        // them back is sound because the checker *locked* the referent for
+        // the whole block: nothing else could touch it, so the buffer is the
+        // only version that moved.
+        //
+        // Skipped when the body returned, because nothing after this runs --
+        // and Cranelift has no block to put the loads in.
+        if unique && !returned {
+            let kinds = leaves(&ty, self.program, self.pointer);
+            let restored = self.load_leaves(buffer, &kinds);
+            for (offset, value) in restored.into_iter().enumerate() {
+                self.builder.def_var(Variable::from_u32(base + offset as u32), value);
+            }
+        }
+        returned
+    }
+
+    /// Write leaf values into a place.
+    ///
+    /// A whole local is `def_var` per leaf, as it always was. A field through
+    /// a reference is the same arithmetic as reading one, running the other
+    /// way: find where the field starts among the referent's leaves, and
+    /// store there.
+    fn write(&mut self, place: &Place, values: Vec<Value>) {
+        match place {
+            Place::Slot(slot) => {
+                let base = self.slot_base[slot.0 as usize];
+                for (offset, value) in values.into_iter().enumerate() {
+                    self.builder.def_var(Variable::from_u32(base + offset as u32), value);
+                }
+            }
+            Place::Field { base, def, args, index } => {
+                let address = self.scalar(base);
+                let TypeInfo::Struct { fields, .. } = self.program.type_info(*def) else {
+                    unreachable!("a field write to an enum should have been refused");
+                };
+                let start: u32 = fields[..*index as usize]
+                    .iter()
+                    .map(|(_, ty)| {
+                        leaf_count(&ty.substitute(args, &[]), self.program, self.pointer)
+                    })
+                    .sum();
+                let offset = start as i32 * RETURN_SLOT_STRIDE;
+                for (i, value) in values.into_iter().enumerate() {
+                    let at = offset + i as i32 * RETURN_SLOT_STRIDE;
+                    self.builder.ins().store(MemFlags::trusted(), value, address, at);
+                }
+            }
+        }
     }
 
     fn if_stmt(&mut self, cond: &Expr, then_body: &[Stmt], else_body: &[Stmt]) -> bool {

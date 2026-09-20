@@ -33,10 +33,6 @@ impl<'a> Parser<'a> {
         self.tokens[self.pos]
     }
 
-    fn peek_at(&self, n: usize) -> Token {
-        self.tokens[(self.pos + n).min(self.tokens.len() - 1)]
-    }
-
     fn text(&self, tok: Token) -> &'a str {
         &self.source[tok.span.start as usize..tok.span.end as usize]
     }
@@ -311,14 +307,22 @@ impl<'a> Parser<'a> {
             TokenKind::While => self.while_stmt(),
             TokenKind::Match => self.match_stmt(),
             TokenKind::Borrow => self.borrow_stmt(),
-            // `x = e;` — an assignment, not an expression: M0 has no
-            // assignment expressions, so this is decided by lookahead.
-            TokenKind::Ident if self.peek_at(1).kind == TokenKind::Eq => self.assign_stmt(),
+            // An expression statement, or an assignment to whatever that
+            // expression turns out to name. M0 has no assignment expression,
+            // so the `=` decides between them after the fact rather than by
+            // looking ahead -- which is what lets the left side grow from a
+            // name to `r.field` without the lookahead growing with it.
             _ => {
-                let value = self.expr()?;
+                let first = self.expr()?;
+                if self.eat(TokenKind::Eq) {
+                    let value = self.expr()?;
+                    let end = self.expect(TokenKind::Semi)?.span;
+                    let span = self.ast.expr_span(first).to(end);
+                    return Ok(self.ast.push_stmt(Stmt::Assign { place: first, value }, span));
+                }
                 let end = self.expect(TokenKind::Semi)?.span;
-                let span = self.ast.expr_span(value).to(end);
-                Ok(self.ast.push_stmt(Stmt::Expr(value), span))
+                let span = self.ast.expr_span(first).to(end);
+                Ok(self.ast.push_stmt(Stmt::Expr(first), span))
             }
         }
     }
@@ -360,15 +364,6 @@ impl<'a> Parser<'a> {
         let value = self.expr()?;
         let end = self.expect(TokenKind::Semi)?.span;
         Ok(self.ast.push_stmt(Stmt::Let { name, mutable, ty, value }, kw.span.to(end)))
-    }
-
-    fn assign_stmt(&mut self) -> Result<StmtId, Diagnostic> {
-        let name_tok = self.peek();
-        let name = self.ident()?;
-        self.expect(TokenKind::Eq)?;
-        let value = self.expr()?;
-        let end = self.expect(TokenKind::Semi)?.span;
-        Ok(self.ast.push_stmt(Stmt::Assign { name, value }, name_tok.span.to(end)))
     }
 
     fn return_stmt(&mut self) -> Result<StmtId, Diagnostic> {
@@ -1068,6 +1063,28 @@ mod tests {
         assert!(err.message.contains("write `as &!r`"), "{}", err.message);
         let err = parse("fn f(x: int) -> int { borrow x as &!r in { return 0; } }").unwrap_err();
         assert!(err.message.contains("write `borrow mut`"), "{}", err.message);
+    }
+
+    #[test]
+    fn an_assignment_target_is_an_expression() {
+        // Decided by the `=` after the fact rather than by lookahead, which
+        // is what lets the left side grow without the parser growing with it.
+        let (ast, decl) = one_fn("fn f(p: P) -> int { p.x = 1; return 0; }");
+        let Stmt::Assign { place, .. } = ast.stmt(decl.body.stmts[0]) else {
+            panic!("expected an assignment")
+        };
+        assert!(matches!(ast.expr(*place), Expr::Field { .. }));
+
+        let (ast, decl) = one_fn("fn f() -> int { var x = 0; x = 1; return x; }");
+        let Stmt::Assign { place, .. } = ast.stmt(decl.body.stmts[1]) else { panic!() };
+        assert!(matches!(ast.expr(*place), Expr::Name(_)));
+    }
+
+    #[test]
+    fn a_comparison_is_still_an_expression_statement() {
+        // `==` is one token, so it never reaches the assignment branch.
+        let (ast, decl) = one_fn("fn f(a: int) -> int { a == 1; return 0; }");
+        assert!(matches!(ast.stmt(decl.body.stmts[0]), Stmt::Expr(_)));
     }
 
     #[test]

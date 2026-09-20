@@ -90,14 +90,17 @@ pub(crate) enum Event {
     Read { ty: Type, span: Span },
     /// A `return`. Every live obligation must be discharged by now.
     Return { span: Span },
-    /// A `borrow` block opened over this slot (§5 rule 1). Frozen means not
-    /// movable and not consumable — a read is still fine, which is the whole
-    /// point, and for a `val` slot a read was never a move so nothing
-    /// changes.
-    Freeze { slot: Slot, span: Span },
+    /// A `borrow` block opened over this slot (§5 rules 1 and 2).
+    ///
+    /// Shared freezes: not movable, not consumable, not uniquely borrowable
+    /// — a read is still fine, which is the whole point, and for a `val` slot
+    /// a read was never a move so nothing changes.
+    ///
+    /// Unique *locks*: nothing else may touch it at all, not even a read.
+    Freeze { slot: Slot, unique: bool, span: Span },
     /// The block closed and the slot is owned again. §5: "a three-valued flag
     /// set at block entry and restored at block exit".
-    Thaw { slot: Slot },
+    Thaw { slot: Slot, unique: bool },
     /// A block. Whatever it declared must be dead when it closes.
     Scope(Vec<Event>),
     /// `if`/`else`, a `match`'s arms, or the right-hand side of `&&`/`||`.
@@ -157,10 +160,19 @@ struct Check<'a> {
     /// Filled in by `Declare`, so an error can name the binding it is about.
     names: Vec<Option<(String, Span)>>,
     state: Vec<State>,
-    /// How many `borrow` blocks are open over each slot. A count rather than
-    /// a flag because shared borrows nest (§5's `two_shared_borrows`), and
-    /// the innermost one closing must not thaw the whole thing.
-    frozen: Vec<u32>,
+    /// What each slot is borrowed as. `Owned | Frozen(n) | Locked` — §5's
+    /// three-valued flag, with the shared case counting because shared
+    /// borrows nest and the innermost closing must not thaw the whole thing.
+    borrowed: Vec<Borrow>,
+}
+
+/// §5's three-valued flag: a binding is owned, frozen by some number of
+/// shared borrows, or locked by exactly one unique borrow.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Borrow {
+    Owned,
+    Frozen(u32),
+    Locked,
 }
 
 /// Check one function body's trace. `slots` are the settled slot types.
@@ -176,7 +188,7 @@ pub(crate) fn check(
         slots,
         names: vec![None; slots.len()],
         state: vec![State::Untracked; slots.len()],
-        frozen: vec![0; slots.len()],
+        borrowed: vec![Borrow::Owned; slots.len()],
     };
     check.run(events)?;
     Ok(())
@@ -205,7 +217,7 @@ impl Check<'_> {
                     self.state[slot.0 as usize] =
                         if self.is_res(*slot) { State::Live } else { State::Untracked };
                 }
-                Event::Freeze { slot, span } => {
+                Event::Freeze { slot, unique, span } => {
                     if self.state[slot.0 as usize] == State::Moved {
                         return Err(Diagnostic::new(
                             format!(
@@ -215,18 +227,62 @@ impl Check<'_> {
                             *span,
                         ));
                     }
-                    self.frozen[slot.0 as usize] += 1;
+                    let name = self.name(*slot);
+                    let held = &mut self.borrowed[slot.0 as usize];
+                    *held = match (*held, unique) {
+                        // §5 rule 2: one unique borrow at a time, and never
+                        // alongside a shared one. A unique reference is the
+                        // only way to reach the value, or it is not unique.
+                        (Borrow::Locked, _) => {
+                            return Err(Diagnostic::new(
+                                format!(
+                                    "`{name}` is already uniquely borrowed; a `&!` reference is the only way to reach a value, so there is at most one"
+                                ),
+                                *span,
+                            ));
+                        }
+                        (Borrow::Frozen(_), true) => {
+                            return Err(Diagnostic::new(
+                                format!(
+                                    "`{name}` is already borrowed by an enclosing `borrow`, so it cannot be borrowed uniquely here"
+                                ),
+                                *span,
+                            ));
+                        }
+                        (Borrow::Owned, true) => Borrow::Locked,
+                        (Borrow::Owned, false) => Borrow::Frozen(1),
+                        // Shared borrows nest: freezing is not exclusive.
+                        (Borrow::Frozen(n), false) => Borrow::Frozen(n + 1),
+                    };
                 }
-                Event::Thaw { slot } => {
-                    self.frozen[slot.0 as usize] -= 1;
+                Event::Thaw { slot, unique } => {
+                    let held = &mut self.borrowed[slot.0 as usize];
+                    *held = match (*held, unique) {
+                        (Borrow::Frozen(n), false) if n > 1 => Borrow::Frozen(n - 1),
+                        _ => Borrow::Owned,
+                    };
+                }
+                // §5 rule 2: a locked binding may not be *touched* — not
+                // read, not borrowed again, not moved. That is stronger than
+                // frozen and it is what makes `&!` mean unique: if the owner
+                // could still read it, the reference would not be the only
+                // way to reach the value.
+                Event::Use { slot, span } if self.borrowed[slot.0 as usize] == Borrow::Locked => {
+                    return Err(Diagnostic::new(
+                        format!(
+                            "`{}` is uniquely borrowed here, so nothing else may read it; the reference is the only way to reach it",
+                            self.name(*slot)
+                        ),
+                        *span,
+                    ));
                 }
                 Event::Use { slot, span } => match self.state[slot.0 as usize] {
                     State::Untracked => {}
-                    // Reading a `res` binding *is* moving it — this slice has
-                    // no non-owning read of an owned name — so a frozen one
+                    // Reading a `res` binding *is* moving it — there is no
+                    // non-owning read of an owned name — so a frozen one
                     // cannot be read at all. §5 rule 1: frozen means not
                     // movable, not consumable.
-                    State::Live if self.frozen[slot.0 as usize] > 0 => {
+                    State::Live if self.borrowed[slot.0 as usize] != Borrow::Owned => {
                         return Err(Diagnostic::new(
                             format!(
                                 "`{}` is frozen by an enclosing `borrow`, so it cannot be moved or consumed here",
@@ -250,10 +306,10 @@ impl Check<'_> {
                     // A frozen binding may not change underneath a reference
                     // to it. §5 rule 1 says not movable and not consumable;
                     // assignment is the third way to break the promise.
-                    if self.frozen[slot.0 as usize] > 0 {
+                    if self.borrowed[slot.0 as usize] != Borrow::Owned {
                         return Err(Diagnostic::new(
                             format!(
-                                "`{}` is frozen by an enclosing `borrow`, so it cannot be assigned to here",
+                                "`{}` is borrowed by an enclosing `borrow`, so it cannot be assigned to here",
                                 self.name(*slot)
                             ),
                             *span,

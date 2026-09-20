@@ -11,6 +11,7 @@
 //~ STDOUT M1 generic: 5 3 z
 //~ STDOUT M2 linear: 4 7 9 5 6
 //~ STDOUT M2 borrow: 4 8 12
+//~ STDOUT M2 unique: 3 5 5
 //~ EXIT 0
 
 // ---------------------------------------------------------------- output ---
@@ -293,6 +294,52 @@ fn m2_borrow() -> int {
     return newline();
 }
 
+// ------------------------------------------------ M2: unique borrows ----
+// A shared borrow promises the value will not change, which is why several
+// may nest and why nothing has to be written back when the block closes.
+// `borrow mut x as &!r in { .. }` makes the opposite promise: it *locks* `x`
+// for the block, and the reference may be written through.
+//
+// Locked is stronger than frozen. Nothing else may touch `x` at all -- not a
+// read, not a second borrow, not a move -- and that is what makes `&!r` mean
+// unique. If the owner could still read the value, the reference would not
+// be the only way to reach it.
+//
+// Writing through it needs somewhere to write *to*: a place is a whole
+// binding, or a field reached through a unique reference. A field of an
+// owned local is deliberately not one -- that is a partial write, and what a
+// partial write means for a binding holding a `res` field is a question §4
+// does not answer.
+
+struct Meter {
+    reading: int,
+    step: int,
+}
+
+fn advance[&r](m: &!r Meter) -> int {
+    m.reading = m.reading + m.step;
+    return m.reading;
+}
+
+fn m2_unique() -> int {
+    putchar(77); putchar(50); space();          // "M2 "
+    putchar(117); putchar(110); putchar(105); putchar(113); putchar(117);
+    putchar(101); putchar(58); space();         // "unique: "
+
+    var meter = Meter { reading: 1, step: 2 };
+
+    borrow mut meter as &!r in {
+        print_nat(advance(r));
+        space(); print_nat(advance(r));
+    }
+
+    // Owned again, and carrying what the reference wrote. The value lived in
+    // a buffer for the block and was read back when it closed, which is
+    // sound precisely because the lock meant nothing else could have moved on.
+    space(); print_nat(meter.reading);
+    return newline();
+}
+
 fn main() -> int {
     m0();
     m1_bool();
@@ -301,5 +348,6 @@ fn main() -> int {
     m1_generic();
     m2_linear();
     m2_borrow();
+    m2_unique();
     return 0;
 }

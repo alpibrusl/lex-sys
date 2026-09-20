@@ -197,8 +197,13 @@ pub enum Stmt {
         value: ExprId,
     },
     /// `x = e;`
+    /// `x = e;` and `r.f = e;` — the left side is a *place*, not just a name.
+    ///
+    /// Which expressions are places is the checker's question, not the
+    /// parser's: it parses an expression and then sees an `=`, the same way
+    /// it does not decide which names are types.
     Assign {
-        name: Symbol,
+        place: ExprId,
         value: ExprId,
     },
     /// `let Point { x, y } = p;`
