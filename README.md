@@ -4,7 +4,7 @@ A **systems dialect carrying Lex's philosophy**: native compilation, no GC, line
 ownership and capability-typed effects unified into one resource system, fully
 defined behaviour, and a canonical content-addressable AST designed in from day one.
 
-> **Status: M1 complete, M2 complete, M3 started.** A bootstrap compiler takes a
+> **Status: M1 complete, M2 complete, M3 complete.** A bootstrap compiler takes a
 > `.ls` file to a real native executable, and CI proves it on **linux-x86_64
 > and darwin-aarch64**. The language has a type system: `int` and `bool`,
 > structs, enums with exhaustive pattern matching, and monomorphised generics.
@@ -61,6 +61,19 @@ and requires every hash to survive.
 > truncating — and a byte slice crosses to C as a pointer and a separate
 > length, so `write(fd, ptr, len)` is expressible. That is
 > [`docs/strings.md`](docs/strings.md), settled before any code existed.
+>
+> **And it reads and writes files.** `Fs(prefix)` is a capability carrying a
+> path, narrowed the way every other capability is — except that a path
+> prefix extends at a `/`, so `/tmp` contains `/tmp/a` and pointedly does
+> not contain `/tmpevil`. The effect labels carry the prefix, so a row says
+> *which part of the filesystem* a function touches. The operations are
+> builtins rather than `extern fn` on purpose: an `extern` would be gated by
+> `Ffi("libc")`, and then `Fs` would be decoration. A path outside the
+> granted prefix traps, a path containing `..` traps rather than being
+> normalised, and a missing file is `-1`. That is
+> [`docs/filesystem.md`](docs/filesystem.md), which is also honest about
+> what `Fs` is not: not a sandbox, because `Ffi("libc")` plus an `extern`
+> reaches any path. What it is, is authority visible in the types.
 >
 > **Still missing:** a general heap and the escape hatches (§9). Do not
 > mistake this for a usable language yet.
@@ -149,12 +162,13 @@ cargo run -p lex-sys -- run examples/tour.ls
 # M3 arithmetic: 6 1
 # M3 slice: 3 1 4 1 5 -> 14
 # M3 string: hello (5 bytes, e is 101)
+# M3 file: on disk (7)
 ```
 
 `examples/tour.ls` is the shortest honest answer to "what can this language
 do": one section per feature, in the order the milestones added them.
 
-Two programs rather than a tour:
+Programs rather than a tour:
 
 ```sh
 cargo run -p lex-sys -- run examples/pipeline.ls
@@ -172,6 +186,21 @@ in an arena; the overrun is computed by libc through a capability that names
 libc and nothing else; and printing needs the console capability `main` was
 handed. Delete any one of those and it stops compiling.
 
+`examples/lines.ls` is the M3 acceptance criterion: a small log tool that
+writes a log, reads it back off disk, counts and filters it, writes a
+report, and reads the report back to print it. Four file operations, one
+`Fs` capability narrowed once in `main`, and a row on every frame that
+carries it — nothing in that program can touch a path outside `/tmp`, and
+not by convention: `report` could not be *written* to do it, because its
+row would have to say so and its capability cannot be widened to match.
+
+```sh
+cargo run -p lex-sys -- run examples/lines.ls
+# lines 6
+# errors 2
+# longest 15
+```
+
 `examples/wordcount.ls` is `wc` over an embedded document — the first
 program here that is mostly text processing rather than demonstration, with
 a whole-word search that is two slices compared a byte at a time, which is
@@ -188,7 +217,7 @@ bindings, structs, enums with exhaustive `match`, generics over both,
 `res`/`val` modes with exactly-once linearity and destructuring `let`,
 shared and unique borrows with lexical regions, exact effect rows,
 capabilities, narrowing, capability-gated foreign calls, arenas, checked
-arithmetic, slices, and strings.
+arithmetic, slices, strings, and file IO through a path-carrying capability.
 
 ```
 res struct Ticket { serial: int }
@@ -341,9 +370,18 @@ restored at block exit; `r_inner <= r_outer` holds exactly when the outer
 block encloses the inner one, which is a walk up a stack; and escape is an
 occurs-check over one type.
 
-**What does not, yet:** a general heap, and file IO — which needs an `Fs`
-capability, listed as waiting since §8.1 of the M2 document. That is the
-last mile between here and the epic's M3 acceptance: a real CLI tool.
+File IO closed the last mile to M3's acceptance criterion, and it needed no
+new mechanism either: `Fs(prefix)` is the capability §8.1 of the M2 document
+listed as waiting, narrowed by the same prefix extension `Ffi` uses, and the
+operations are two builtins that take it. What was genuinely new was two
+decisions rather than any machinery — that the operations must *not* be
+`extern fn`, or `Ffi("libc")` would subsume them, and that a path outside
+the granted prefix traps while a path containing `..` is refused rather than
+normalised. See [`docs/filesystem.md`](docs/filesystem.md).
+
+**What does not, yet:** a general heap, the escape hatches of §9, and
+command-line arguments — which are another thing the runtime hands over,
+and which need a capability question answered first.
 
 Every example declares what it prints in its own header, and a test walks
 `examples/` and checks them, so an example that stops matching the language
@@ -398,6 +436,7 @@ carry them exists now, while it is cheap.
 | [`docs/linearity-and-effects.md`](docs/linearity-and-effects.md) | The M2 gate: linear ownership, capability-typed effects, how they unify, and 23 must-reject fixtures written out as the conformance suite | settled; §3 through §8 implemented |
 | [`docs/bootstrap.md`](docs/bootstrap.md) | What M0 settled: bootstrap host (Rust), extension (`.ls`), the M0 surface, what is scaffolding and what replaces it | written |
 | [`docs/canonical-ast.md`](docs/canonical-ast.md) | Canonicalisation rules and per-unit identity: what is hashed, and what a hash is allowed to change with | written, implemented |
+| [`docs/filesystem.md`](docs/filesystem.md) | The `Fs(prefix)` capability, why the operations are builtins rather than `extern fn`, the runtime path check and why `..` is refused | **settled and built** — the last mile to M3's acceptance criterion; §7's must-reject suite is enforced |
 | `docs/memory-model.md` | Regions, escape, the escape hatches and their cost | not written — §5 and §6 settled and built regions and escape; what remains is §9's escape hatches, which M3 needs |
 | [`docs/defined-behaviour.md`](docs/defined-behaviour.md) | Every place C and Rust leave behaviour open, and what we define it to | **written and enforced** — overflow traps, evaluation order is left to right, and §9 names the fixture behind each rule |
 | [`docs/strings.md`](docs/strings.md) | What a string is: bytes rather than an encoding, `byte` as storage rather than arithmetic, packed layout, literals and the static region | **settled and built** — gated M3's last item; §9's must-reject suite is enforced |
@@ -417,7 +456,7 @@ M0–M3 with acceptance criteria, sequencing, risks and open decisions.
 | **M0** — native hello world ([#3](https://github.com/alpibrusl/lex-sys/issues/3)) | Lexer, parser, AST, IR, Cranelift backend, a real executable | **done** — green on both targets |
 | **M1** — typed core | Type checker, `bool`, structs, ADTs with exhaustiveness, monomorphised generics. No linearity, no effects — deliberately | **done** |
 | **M2** — the actual thesis ([#2](https://github.com/alpibrusl/lex-sys/issues/2)) | Linear ownership, effect rows and capability-passing as **one** system | **complete** — §3 through §8 of the design document, every must-reject fixture enforced |
-| **M3** — minimal but real | Slices and strings, arenas, libc FFI, settled overflow semantics, canonical printer, per-unit identity | **every listed item is in.** What the acceptance criterion still wants is file IO, which needs an `Fs` capability |
+| **M3** — minimal but real | Slices and strings, arenas, libc FFI, settled overflow semantics, canonical printer, per-unit identity, file IO through `Fs` | **complete.** `examples/lines.ls` is the acceptance criterion: a tool that reads and writes files, counts and filters, and whose authority to do any of it is one narrowed capability |
 
 Deliberately excluded from "minimal": borrow checker, traits, `comptime`, own
 optimiser, incremental compilation, LSP, async. Each is "yes, later" — saying

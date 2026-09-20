@@ -468,7 +468,7 @@ pub struct Ast {
 /// rather than "first appearance", which is still a deterministic function
 /// of the source. Nothing downstream notices, because a hash encodes a
 /// name's *text* and never its index (`docs/canonical-ast.md` §4.1).
-pub const PRELUDE: &[&str] = &["World", "Io", "Split", "io", "Ffi", "ffi", "L"];
+pub const PRELUDE: &[&str] = &["World", "Io", "Split", "io", "Ffi", "ffi", "L", "Fs", "fs", "P"];
 
 impl Ast {
     /// An AST whose interner already knows the prelude's names.

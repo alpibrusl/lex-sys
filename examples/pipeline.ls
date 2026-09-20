@@ -170,7 +170,9 @@ fn run[&f, &i](libc: &f Ffi("libc"), io: &!i Io, budget: int) -> [io, ffi("libc"
 fn main(world: World) -> [] int {
     // §8.2: the one place authority enters a program. `split` consumes the
     // `World`, and there is no other way to obtain a capability.
-    let Split { io, ffi } = split(world);
+    let Split { io, ffi, fs } = split(world);
+    // This program touches no files, so that authority ends here.
+    release(fs);
     // §7.4: attenuation, one way only. From here this program reaches libc
     // and no other library, whatever the rest of it does.
     let libc = narrow(ffi, "libc");

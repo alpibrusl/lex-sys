@@ -12,7 +12,9 @@
 extern fn labs[&f](ffi: &f Ffi("libc"), n: int) -> [] int;
 
 fn main(world: World) -> [] int {
-    let Split { io, ffi } = split(world);
+    let Split { io, ffi, fs } = split(world);
+    // This program touches no files, so that authority ends here.
+    release(fs);
     release(io);
     let libc = narrow(ffi, "libc");
     var n = 0;

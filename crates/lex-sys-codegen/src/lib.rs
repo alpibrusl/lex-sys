@@ -710,6 +710,177 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
         at
     }
 
+    /// The longest path a file operation will build, including the NUL.
+    ///
+    /// A fixed buffer because the path is copied onto the stack to be
+    /// NUL-terminated — C wants a terminator and a slice does not carry one
+    /// (`docs/strings.md` §6). A longer path traps rather than being cut
+    /// short, because a silently truncated path names a different file.
+    fn checked_path(&mut self, prefix: &str, path: &[Value]) -> Value {
+        const PATH_MAX: i64 = 4096;
+        let pointer = self.pointer;
+        let (source, length) = (path[0], path[1]);
+
+        // Room for the bytes and the NUL.
+        let too_long =
+            self.builder.ins().icmp_imm(IntCC::UnsignedGreaterThanOrEqual, length, PATH_MAX);
+        self.builder.ins().trapnz(too_long, TrapCode::HEAP_OUT_OF_BOUNDS);
+
+        // A path shorter than the prefix cannot start with it.
+        let short =
+            self.builder.ins().icmp_imm(IntCC::UnsignedLessThan, length, prefix.len() as i64);
+        self.builder.ins().trapnz(short, TrapCode::HEAP_OUT_OF_BOUNDS);
+
+        let slot = self.builder.create_sized_stack_slot(StackSlotData::new(
+            StackSlotKind::ExplicitSlot,
+            PATH_MAX as u32,
+            0,
+        ));
+        let buffer = self.builder.ins().stack_addr(pointer, slot, 0);
+
+        // The prefix the capability was narrowed to, as data to compare
+        // against. It is known at compile time; the path is not, which is
+        // the whole reason this check is here rather than in the checker
+        // (`docs/filesystem.md` §4).
+        let expected = self.bytes(prefix)[0];
+
+        // One pass: copy the byte, check it against the prefix while we are
+        // still inside it, and refuse `..` anywhere at all.
+        let header = self.builder.create_block();
+        let body = self.builder.create_block();
+        let done = self.builder.create_block();
+        let cursor = self.temporary(types::I64);
+        let previous = self.temporary(types::I8);
+        let zero = self.builder.ins().iconst(types::I64, 0);
+        let none = self.builder.ins().iconst(types::I8, 0);
+        self.builder.def_var(cursor, zero);
+        self.builder.def_var(previous, none);
+        self.builder.ins().jump(header, &[]);
+
+        self.builder.switch_to_block(header);
+        let i = self.builder.use_var(cursor);
+        let more = self.builder.ins().icmp(IntCC::UnsignedLessThan, i, length);
+        self.builder.ins().brif(more, body, &[], done, &[]);
+
+        self.builder.switch_to_block(body);
+        self.builder.seal_block(body);
+        let i = self.builder.use_var(cursor);
+        let at = self.builder.ins().iadd(source, i);
+        let byte = self.builder.ins().load(types::I8, MemFlags::trusted(), at, 0);
+        let into = self.builder.ins().iadd(buffer, i);
+        self.builder.ins().store(MemFlags::trusted(), byte, into, 0);
+
+        // `..` is refused rather than normalised (§4.1): normalising is a
+        // security function with its own design, and a prefix check that
+        // quietly admits `/tmp/../etc` would be the dishonest third option.
+        let dot = self.builder.ins().icmp_imm(IntCC::Equal, byte, i64::from(b'.'));
+        let prior = self.builder.use_var(previous);
+        let prior_dot = self.builder.ins().icmp_imm(IntCC::Equal, prior, i64::from(b'.'));
+        let traversal = self.builder.ins().band(dot, prior_dot);
+        self.builder.ins().trapnz(traversal, TrapCode::HEAP_OUT_OF_BOUNDS);
+        self.builder.def_var(previous, byte);
+
+        // Inside the prefix, the bytes have to match. A path outside what
+        // the capability granted is a broken promise, so it traps rather
+        // than returning -1.
+        let inside = self.builder.ins().icmp_imm(IntCC::UnsignedLessThan, i, prefix.len() as i64);
+        let want_at = self.builder.ins().iadd(expected, i);
+        let want = self.builder.ins().load(types::I8, MemFlags::trusted(), want_at, 0);
+        let differs = self.builder.ins().icmp(IntCC::NotEqual, byte, want);
+        let escaped = self.builder.ins().band(inside, differs);
+        self.builder.ins().trapnz(escaped, TrapCode::HEAP_OUT_OF_BOUNDS);
+
+        let next = self.builder.ins().iadd_imm(i, 1);
+        self.builder.def_var(cursor, next);
+        self.builder.ins().jump(header, &[]);
+        self.builder.seal_block(header);
+
+        self.builder.switch_to_block(done);
+        self.builder.seal_block(done);
+        let end = self.builder.ins().iadd(buffer, length);
+        self.builder.ins().store(MemFlags::trusted(), none, end, 0);
+
+        // The bytes match, which is not yet the same as being inside the
+        // directory: `/tmp` does not contain `/tmpevil` (§1). The path
+        // either *is* the granted name or continues from it at a `/`, and
+        // the NUL is already stored, so the byte one past a path of exactly
+        // the prefix's length reads as zero rather than as rubbish.
+        if !prefix.is_empty() && !prefix.ends_with('/') {
+            let at = self.builder.ins().iadd_imm(buffer, prefix.len() as i64);
+            let byte = self.builder.ins().load(types::I8, MemFlags::trusted(), at, 0);
+            let separator = self.builder.ins().icmp_imm(IntCC::Equal, byte, i64::from(b'/'));
+            let ended = self.builder.ins().icmp_imm(IntCC::Equal, byte, 0);
+            let boundary = self.builder.ins().bor(separator, ended);
+            self.builder.ins().trapz(boundary, TrapCode::HEAP_OUT_OF_BOUNDS);
+        }
+        buffer
+    }
+
+    /// `fs_read` and `fs_write` (`docs/filesystem.md` §3).
+    ///
+    /// The backend reaches libc itself rather than the program declaring an
+    /// `extern fn`, because an `extern` would be gated by `Ffi("libc")` and
+    /// then the FFI capability would open any path, with `Fs` contributing
+    /// nothing (§2).
+    fn file_op(&mut self, write: bool, prefix: &str, args: &[Expr]) -> Vec<Value> {
+        let pointer = self.pointer;
+        // The capability is zero-sized and stops here; the two slices do not.
+        let path = self.expr(&args[1]);
+        let bytes = self.expr(&args[2]);
+        let path = self.checked_path(prefix, &path);
+
+        // `O_CREAT` and `O_TRUNC` are not the same numbers on Linux and
+        // darwin, which is exactly the kind of thing a language with
+        // defined behaviour should not be guessing at.
+        let darwin = matches!(
+            self.module.isa().triple().operating_system,
+            target_lexicon::OperatingSystem::Darwin(_) | target_lexicon::OperatingSystem::MacOSX(_)
+        );
+        let (flags, mode) = match (write, darwin) {
+            (false, _) => (0, 0),
+            (true, true) => (1 | 0x200 | 0x400, 0o644),
+            (true, false) => (1 | 0o100 | 0o1000, 0o644),
+        };
+
+        let open = self.libc_fn("open", &[pointer, types::I32, types::I32], &[types::I32]);
+        let open = self.module.declare_func_in_func(open, self.builder.func);
+        let flags = self.builder.ins().iconst(types::I32, flags);
+        let mode = self.builder.ins().iconst(types::I32, mode);
+        let call = self.builder.ins().call(open, &[path, flags, mode]);
+        let fd = self.builder.inst_results(call)[0];
+
+        // A missing file is an ordinary outcome, not a broken promise, so
+        // it is `-1` rather than a trap (§3).
+        let failed = self.builder.create_block();
+        let opened = self.builder.create_block();
+        let merge = self.builder.create_block();
+        self.builder.append_block_param(merge, types::I64);
+        let bad = self.builder.ins().icmp_imm(IntCC::SignedLessThan, fd, 0);
+        self.builder.ins().brif(bad, failed, &[], opened, &[]);
+
+        self.builder.switch_to_block(failed);
+        self.builder.seal_block(failed);
+        let minus_one = self.builder.ins().iconst(types::I64, -1);
+        self.builder.ins().jump(merge, &[minus_one.into()]);
+
+        self.builder.switch_to_block(opened);
+        self.builder.seal_block(opened);
+        let name = if write { "write" } else { "read" };
+        let transfer = self.libc_fn(name, &[types::I32, pointer, types::I64], &[types::I64]);
+        let transfer = self.module.declare_func_in_func(transfer, self.builder.func);
+        let call = self.builder.ins().call(transfer, &[fd, bytes[0], bytes[1]]);
+        let moved = self.builder.inst_results(call)[0];
+
+        let close = self.libc_fn("close", &[types::I32], &[types::I32]);
+        let close = self.module.declare_func_in_func(close, self.builder.func);
+        self.builder.ins().call(close, &[fd]);
+        self.builder.ins().jump(merge, &[moved.into()]);
+
+        self.builder.switch_to_block(merge);
+        self.builder.seal_block(merge);
+        vec![self.builder.block_params(merge)[0]]
+    }
+
     /// A string literal: its bytes into read-only data, and the two leaves
     /// a slice is made of pointing at them (`docs/strings.md` §4).
     ///
@@ -1142,6 +1313,10 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
                 let text = text.clone();
                 self.bytes(&text)
             }
+            Expr::FileOp { write, prefix, args } => {
+                let (write, prefix, args) = (*write, prefix.clone(), args.clone());
+                self.file_op(write, &prefix, &args)
+            }
             Expr::FieldRef { base, def, args, index } => {
                 let address = self.scalar(base);
                 let TypeInfo::Struct { fields, .. } = self.program.type_info(*def) else {
@@ -1324,6 +1499,11 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
                     Callee::Builtin(Builtin::IntOf) => {
                         vec![self.builder.ins().uextend(types::I64, args[0])]
                     }
+                    // Both are lowered as `Expr::FileOp`, which carries the
+                    // prefix the backend checks against.
+                    Callee::Builtin(Builtin::FsRead | Builtin::FsWrite) => {
+                        unreachable!("a file operation is lowered as `Expr::FileOp`")
+                    }
                     Callee::Builtin(Builtin::PutChar) => {
                         let f = self.module.declare_func_in_func(self.putchar, self.builder.func);
                         let arg = self.builder.ins().ireduce(types::I32, args[0]);
@@ -1420,7 +1600,7 @@ mod tests {
 
     const SOURCE: &str = "fn shout[&i](io: &!i Io) -> [io] int { return putchar(io, 33); } \
                           fn main(world: World) -> [] int { \
-                              let Split { io, ffi } = split(world); release(ffi); \
+                              let Split { io, ffi, fs } = split(world); release(fs); release(ffi); \
                               var status = 0; \
                               borrow mut io as &!i in { status = shout(i); } \
                               release(io); \
@@ -1540,7 +1720,7 @@ mod tests {
         const FOREIGN: &str = "\
             extern fn labs[&f](ffi: &f Ffi(\"libc\"), n: int) -> [ffi(\"libc\")] int; \
             fn main(world: World) -> [] int { \
-                let Split { io, ffi } = split(world); release(io); \
+                let Split { io, ffi, fs } = split(world); release(fs); release(io); \
                 let libc = narrow(ffi, \"libc\"); var n = 0; \
                 borrow libc as &f in { n = labs(f, 0 - 7); } \
                 release(libc); return n - 7; \

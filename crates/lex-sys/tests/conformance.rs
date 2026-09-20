@@ -265,7 +265,7 @@ fn byte_of_traps_outside_a_byte_rather_than_truncating() {
             &source,
             format!(
                 "fn main(world: World) -> [] int {{\n\
-                     let Split {{ io, ffi }} = split(world); release(ffi); release(io);\n\
+                     let Split {{ io, ffi, fs }} = split(world); release(fs); release(ffi); release(io);\n\
                      return int_of(byte_of({value}));\n\
                  }}\n"
             ),
@@ -305,7 +305,7 @@ fn indexing_past_a_slice_traps_rather_than_reading_on() {
             &source,
             format!(
                 "fn main(world: World) -> [] int {{\n\
-                     let Split {{ io, ffi }} = split(world); release(ffi); release(io);\n\
+                     let Split {{ io, ffi, fs }} = split(world); release(fs); release(ffi); release(io);\n\
                      var n = 0;\n\
                      region a {{ let xs = alloc_slice[a](3, 7); n = xs[{index}]; }}\n\
                      return n;\n\
@@ -340,7 +340,7 @@ fn integer_overflow_traps_rather_than_wrapping() {
     std::fs::write(
         &source,
         "fn main(world: World) -> [] int {\n\
-             let Split { io, ffi } = split(world); release(ffi); release(io);\n\
+             let Split { io, ffi, fs } = split(world); release(fs); release(ffi); release(io);\n\
              var n = 9223372036854775807;\n\
              return n + 1;\n\
          }\n",
@@ -374,7 +374,7 @@ fn exhausting_an_arena_traps_rather_than_running_past_the_chunk() {
         &source,
         "struct Node { value: int }\n\
          fn main(world: World) -> [] int {\n\
-             let Split { io, ffi } = split(world); release(ffi); release(io);\n\
+             let Split { io, ffi, fs } = split(world); release(fs); release(ffi); release(io);\n\
              region a {\n\
                  var i = 0;\n\
                  while i < 20000 {\n\
@@ -409,7 +409,7 @@ fn division_by_zero_traps_rather_than_being_undefined() {
         &source,
         "fn divide(a: int, b: int) -> [] int { return a / b; }\n\
          fn main(world: World) -> [] int {\n\
-             let Split { io, ffi } = split(world); release(ffi);\n\
+             let Split { io, ffi, fs } = split(world); release(fs); release(ffi);\n\
              release(io);\n\
              return divide(1, 0);\n\
          }\n",
@@ -428,6 +428,168 @@ fn division_by_zero_traps_rather_than_being_undefined() {
     // process dies rather than continuing with nonsense (#1).
     assert!(!run.status.success(), "division by zero should not succeed");
     assert_eq!(run.status.code(), None, "the process should be killed by a signal, not exit");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_path_outside_the_granted_prefix_traps() {
+    // `docs/filesystem.md` §4. The prefix lives in the type and is known at
+    // compile time; the path is a runtime slice, because a program that
+    // could not name a file at run time could not be a tool. So the check
+    // happens where the path is, and a path outside what the capability
+    // granted *traps* -- it is not a missing file, it is a program doing
+    // something its own type said it would not.
+    let dir = scratch("fs-outside-prefix");
+    let source = dir.join("outside.ls");
+    std::fs::write(
+        &source,
+        "fn main(world: World) -> [] int {\n\
+             let Split { io, ffi, fs } = split(world); release(ffi); release(io);\n\
+             let tmp = narrow(fs, \"/tmp/lex-sys-granted\");\n\
+             var read = 0;\n\
+             region a {\n\
+                 let buffer = alloc_slice[a](16, byte_of(0));\n\
+                 borrow tmp as &f in {\n\
+                     read = fs_read(f, \"/etc/hostname\", buffer);\n\
+                 }\n\
+             }\n\
+             release(tmp);\n\
+             return read;\n\
+         }\n",
+    )
+    .expect("a writable fixture");
+
+    let exe = dir.join("outside");
+    let build = Command::new(BIN)
+        .args(["build".as_ref(), source.as_os_str(), "-o".as_ref(), exe.as_os_str()])
+        .output()
+        .expect("the compiler runs");
+    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+
+    let run = Command::new(&exe).output().expect("the compiled program runs");
+    assert!(!run.status.success(), "a path outside the prefix should not succeed");
+    assert_eq!(run.status.code(), None, "the process should be killed by a signal, not exit");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_path_containing_dot_dot_traps() {
+    // §4.1. A prefix check on bytes is defeated by `/tmp/../etc/passwd`,
+    // and there are two honest answers: normalise the path, or refuse it.
+    // Normalisation is a security function with a long history of being got
+    // wrong and needs its own design, symlinks included -- so M3 refuses,
+    // visibly, rather than shipping a check that quietly does not hold.
+    let dir = scratch("fs-dot-dot");
+    let source = dir.join("traversal.ls");
+    std::fs::write(
+        &source,
+        "fn main(world: World) -> [] int {\n\
+             let Split { io, ffi, fs } = split(world); release(ffi); release(io);\n\
+             let tmp = narrow(fs, \"/tmp\");\n\
+             var read = 0;\n\
+             region a {\n\
+                 let buffer = alloc_slice[a](16, byte_of(0));\n\
+                 borrow tmp as &f in {\n\
+                     read = fs_read(f, \"/tmp/../etc/hostname\", buffer);\n\
+                 }\n\
+             }\n\
+             release(tmp);\n\
+             return read;\n\
+         }\n",
+    )
+    .expect("a writable fixture");
+
+    let exe = dir.join("traversal");
+    let build = Command::new(BIN)
+        .args(["build".as_ref(), source.as_os_str(), "-o".as_ref(), exe.as_os_str()])
+        .output()
+        .expect("the compiler runs");
+    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+
+    let run = Command::new(&exe).output().expect("the compiled program runs");
+    assert!(!run.status.success(), "a path containing `..` should not succeed");
+    assert_eq!(run.status.code(), None, "the process should be killed by a signal, not exit");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_sibling_of_the_granted_directory_traps() {
+    // §1, at run time this time. `/tmp/lex-sys-granted` does not contain
+    // `/tmp/lex-sys-granted-elsewhere`, however many bytes the two names
+    // share. The compile-time refusal (`tests/reject/fs_sibling_prefix.ls`)
+    // covers the same rule for the *prefix*; this covers it for the path,
+    // which is the half nobody can see before the program runs.
+    let dir = scratch("fs-sibling");
+    let source = dir.join("sibling.ls");
+    std::fs::write(
+        &source,
+        "fn main(world: World) -> [] int {\n\
+             let Split { io, ffi, fs } = split(world); release(ffi); release(io);\n\
+             let tmp = narrow(fs, \"/tmp/lex-sys-granted\");\n\
+             var read = 0;\n\
+             region a {\n\
+                 let buffer = alloc_slice[a](16, byte_of(0));\n\
+                 borrow tmp as &f in {\n\
+                     read = fs_read(f, \"/tmp/lex-sys-granted-elsewhere\", buffer);\n\
+                 }\n\
+             }\n\
+             release(tmp);\n\
+             return read;\n\
+         }\n",
+    )
+    .expect("a writable fixture");
+
+    let exe = dir.join("sibling");
+    let build = Command::new(BIN)
+        .args(["build".as_ref(), source.as_os_str(), "-o".as_ref(), exe.as_os_str()])
+        .output()
+        .expect("the compiler runs");
+    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+
+    let run = Command::new(&exe).output().expect("the compiled program runs");
+    assert!(!run.status.success(), "a sibling of the granted directory should not succeed");
+    assert_eq!(run.status.code(), None, "the process should be killed by a signal, not exit");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_missing_file_is_minus_one_rather_than_a_trap() {
+    // §3. The distinction `defined-behaviour.md` draws everywhere: `-1` for
+    // an outcome a program should handle, a trap for a broken promise. A
+    // file that is not there is the first kind.
+    let dir = scratch("fs-missing");
+    let source = dir.join("missing.ls");
+    std::fs::write(
+        &source,
+        "fn main(world: World) -> [] int {\n\
+             let Split { io, ffi, fs } = split(world); release(ffi); release(io);\n\
+             let tmp = narrow(fs, \"/tmp/lex-sys-not-here\");\n\
+             var read = 0;\n\
+             region a {\n\
+                 let buffer = alloc_slice[a](16, byte_of(0));\n\
+                 borrow tmp as &f in {\n\
+                     read = fs_read(f, \"/tmp/lex-sys-not-here/at-all\", buffer);\n\
+                 }\n\
+             }\n\
+             release(tmp);\n\
+             return 0 - read;\n\
+         }\n",
+    )
+    .expect("a writable fixture");
+
+    let exe = dir.join("missing");
+    let build = Command::new(BIN)
+        .args(["build".as_ref(), source.as_os_str(), "-o".as_ref(), exe.as_os_str()])
+        .output()
+        .expect("the compiler runs");
+    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+
+    let run = Command::new(&exe).output().expect("the compiled program runs");
+    assert_eq!(run.status.code(), Some(1), "a missing file should return -1, not trap");
 
     let _ = std::fs::remove_dir_all(&dir);
 }

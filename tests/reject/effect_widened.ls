@@ -10,7 +10,9 @@
 // the one direction attenuation does not have.
 
 fn main(world: World) -> [] int {
-    let Split { io, ffi } = split(world);
+    let Split { io, ffi, fs } = split(world);
+    // This program touches no files, so that authority ends here.
+    release(fs);
     release(io);
 
     let crypto = narrow(ffi, "libcrypto");

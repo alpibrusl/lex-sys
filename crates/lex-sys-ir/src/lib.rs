@@ -50,7 +50,8 @@ pub struct FuncId(pub u32);
 pub const PRELUDE_WORLD: usize = 0;
 pub const PRELUDE_IO: usize = 1;
 pub const PRELUDE_FFI: usize = 2;
-pub const PRELUDE_SPLIT: usize = 3;
+pub const PRELUDE_FS: usize = 3;
+pub const PRELUDE_SPLIT: usize = 4;
 
 /// The library an unnarrowed `Ffi` names: none of them yet.
 ///
@@ -235,6 +236,21 @@ pub enum Builtin {
     /// `int_of(b: byte) -> [] int` — widen a byte, which is always defined
     /// and always lands in 0..255.
     IntOf,
+    /// `fs_read(fs, path, into) -> [fs_read(p)] int` — read a whole file.
+    ///
+    /// `docs/filesystem.md` §2: a builtin rather than an `extern fn`,
+    /// because an `extern` would be gated by `Ffi("libc")` and then holding
+    /// the *FFI* capability would open any path, with `Fs` contributing
+    /// nothing. The authority that guards the filesystem has to be the one
+    /// that names it, so the backend reaches libc itself, the way `putchar`
+    /// and the arena already do.
+    ///
+    /// Returns the byte count, or `-1` if the file could not be read: a
+    /// missing file is an ordinary outcome, not a broken promise. A path
+    /// *outside* the capability's prefix is the broken promise, and traps.
+    FsRead,
+    /// `fs_write(fs, path, bytes) -> [fs_write(p)] int` — write a whole file.
+    FsWrite,
     /// `len(s: &r [T]) -> [] int` — how many elements a slice has.
     ///
     /// Checked at the call site rather than through a written signature,
@@ -256,6 +272,8 @@ impl Builtin {
         Builtin::Len,
         Builtin::ByteOf,
         Builtin::IntOf,
+        Builtin::FsRead,
+        Builtin::FsWrite,
     ];
 
     pub fn name(self) -> &'static str {
@@ -270,6 +288,8 @@ impl Builtin {
             Builtin::Len => "len",
             Builtin::ByteOf => "byte_of",
             Builtin::IntOf => "int_of",
+            Builtin::FsRead => "fs_read",
+            Builtin::FsWrite => "fs_write",
         }
     }
 
@@ -331,6 +351,10 @@ impl Builtin {
                 (vec![Type::Int, Type::Int], Type::Int)
             }
             Builtin::Len => (Vec::new(), Type::Int),
+            // Both are checked at the call site: the prefix in the
+            // capability's type is what decides the row, and a fixed
+            // signature cannot say that.
+            Builtin::FsRead | Builtin::FsWrite => (Vec::new(), Type::Unit),
             Builtin::ByteOf => (vec![Type::Int], Type::Byte),
             Builtin::IntOf => (vec![Type::Byte], Type::Int),
             // Both are checked at the call site rather than here, because a
@@ -451,6 +475,16 @@ pub enum Expr {
         base: Box<Expr>,
         index: Box<Expr>,
         element: Type,
+    },
+    /// `fs_read(fs, path, into)` or `fs_write(fs, path, bytes)`.
+    ///
+    /// The prefix the capability was narrowed to travels with the node,
+    /// because the backend emits the check against it and the type it came
+    /// from is gone by then (`docs/filesystem.md` §4).
+    FileOp {
+        write: bool,
+        prefix: String,
+        args: Vec<Expr>,
     },
     /// A string literal's bytes (`docs/strings.md` §4). Lowered to a
     /// read-only data object plus the two leaves a slice is made of.
@@ -828,7 +862,7 @@ fn reaches(defs: &[TypeDef], from: usize, target: usize, seen: &mut [bool]) -> b
 /// is a claim worth a test rather than a comment.
 pub fn leaf_free(ty: &Type) -> bool {
     matches!(ty, Type::Named(def, _)
-        if matches!(def.0 as usize, PRELUDE_WORLD | PRELUDE_IO | PRELUDE_FFI))
+        if matches!(def.0 as usize, PRELUDE_WORLD | PRELUDE_IO | PRELUDE_FFI | PRELUDE_FS))
 }
 
 /// Is this one of the prelude's capability types?
@@ -839,7 +873,7 @@ pub fn leaf_free(ty: &Type) -> bool {
 /// out. So a capability has no literal form, and the only `Io` in existence
 /// is the one the runtime handed to `main` inside a `World`.
 fn is_capability(def: DefId) -> bool {
-    matches!(def.0 as usize, PRELUDE_WORLD | PRELUDE_IO | PRELUDE_FFI | PRELUDE_SPLIT)
+    matches!(def.0 as usize, PRELUDE_WORLD | PRELUDE_IO | PRELUDE_FFI | PRELUDE_FS | PRELUDE_SPLIT)
 }
 
 /// Is this a capability whose only consumer is `release`?
@@ -849,7 +883,28 @@ fn is_capability(def: DefId) -> bool {
 /// authority without naming the function that knows how (§4.1) — and for
 /// `World` and `Io`, which carry no fields, it would do it silently.
 fn released_only(def: DefId) -> bool {
-    matches!(def.0 as usize, PRELUDE_WORLD | PRELUDE_IO | PRELUDE_FFI)
+    matches!(def.0 as usize, PRELUDE_WORLD | PRELUDE_IO | PRELUDE_FFI | PRELUDE_FS)
+}
+
+/// Does `target` name something *inside* `prefix` (`docs/filesystem.md` §1)?
+///
+/// A path prefix is not a byte prefix. `/tmp` contains `/tmp/a`, and it does
+/// not contain `/tmpevil` — the two share five bytes and nothing else. So an
+/// extension has to land on a separator, at compile time when `narrow` is
+/// checked and again at run time when a path is handed to an operation.
+///
+/// The empty prefix contains everything, which is what makes the capability
+/// `split` hands out the root of the lattice rather than a special case.
+pub fn extends_path(prefix: &str, target: &str) -> bool {
+    if !target.starts_with(prefix) {
+        return false;
+    }
+    // Nothing left to separate: `/tmp/a` narrowed to itself, or a prefix
+    // that already ends at a boundary.
+    prefix.is_empty()
+        || prefix.ends_with('/')
+        || target.len() == prefix.len()
+        || target.as_bytes()[prefix.len()] == b'/'
 }
 
 /// What owning a value of this type authorises outright (§8.2).
@@ -878,10 +933,12 @@ fn discharged_by(defs: &[TypeDef], ty: &Type) -> Effects {
         // saying something stronger.
         PRELUDE_WORLD => {
             let mut all = Effects::plain(["io"]);
-            all.union(&Effects::new([Label {
-                name: "ffi".to_owned(),
-                argument: Some(FFI_ROOT.to_owned()),
-            }]));
+            for name in ["ffi", "fs_read", "fs_write"] {
+                all.union(&Effects::new([Label {
+                    name: name.to_owned(),
+                    argument: Some(FFI_ROOT.to_owned()),
+                }]));
+            }
             all
         }
         // Owning an `Ffi("libc")` discharges `ffi("libc")`, and owning the
@@ -891,6 +948,16 @@ fn discharged_by(defs: &[TypeDef], ty: &Type) -> Effects {
             Some(Type::Lit(library)) => {
                 Effects::new([Label { name: "ffi".to_owned(), argument: Some(library.clone()) }])
             }
+            _ => Effects::pure(),
+        },
+        // Owning an `Fs(prefix)` discharges reading *and* writing below it:
+        // both are things its holder can reach without asking anyone
+        // (`docs/filesystem.md` §1).
+        PRELUDE_FS => match args.first() {
+            Some(Type::Lit(prefix)) => Effects::new([
+                Label { name: "fs_read".to_owned(), argument: Some(prefix.clone()) },
+                Label { name: "fs_write".to_owned(), argument: Some(prefix.clone()) },
+            ]),
             _ => Effects::pure(),
         },
         _ => Effects::pure(),
@@ -916,16 +983,20 @@ fn prelude_types(ast: &Ast, unifier: &mut Unifier) -> Vec<TypeDef> {
     let world = symbol("World");
     let io = symbol("Io");
     let ffi = symbol("Ffi");
+    let fs = symbol("Fs");
     let split = symbol("Split");
     let library = symbol("L");
+    let prefix = symbol("P");
     // The *field* is `io`; the type it holds is `Io`. Two different names,
     // and interning them separately is what keeps them so.
     let io_field = symbol("io");
     let ffi_field = symbol("ffi");
+    let fs_field = symbol("fs");
 
     let world_def = unifier.declare("World");
     let io_def = unifier.declare("Io");
     let ffi_def = unifier.declare("Ffi");
+    let fs_def = unifier.declare("Fs");
     let split_def = unifier.declare("Split");
 
     vec![
@@ -957,7 +1028,18 @@ fn prelude_types(ast: &Ast, unifier: &mut Unifier) -> Vec<TypeDef> {
             kind: DefKind::Struct(Vec::new()),
             span,
         },
-        // `res` by inference, because it holds two.
+        // `docs/filesystem.md` §1: the same shape as `Ffi`, pointed at a
+        // different kind of name. `Fs("/var")` narrows to
+        // `Fs("/var/log/app")` by §7.4's prefix extension, and never back.
+        TypeDef {
+            name: fs,
+            def: fs_def,
+            generics: vec![prefix],
+            declared_mode: Some(Mode::Res),
+            kind: DefKind::Struct(Vec::new()),
+            span,
+        },
+        // `res` by inference, because it holds three.
         TypeDef {
             name: split,
             def: split_def,
@@ -968,6 +1050,9 @@ fn prelude_types(ast: &Ast, unifier: &mut Unifier) -> Vec<TypeDef> {
                 // Unnarrowed: the root authority to call out, which names no
                 // library until someone narrows it to one.
                 (ffi_field, Type::Named(ffi_def, vec![Type::Lit(FFI_ROOT.to_owned())])),
+                // Likewise unnarrowed: authority over no path until someone
+                // narrows it to one.
+                (fs_field, Type::Named(fs_def, vec![Type::Lit(FFI_ROOT.to_owned())])),
             ]),
             span,
         },
@@ -1492,6 +1577,11 @@ fn settle_expr(expr: &mut Expr, unifier: &Unifier) {
         }
         Expr::Len(inner) => settle_expr(inner, unifier),
         Expr::Bytes(_) => {}
+        Expr::FileOp { args, .. } => {
+            for arg in args {
+                settle_expr(arg, unifier);
+            }
+        }
         Expr::FieldRef { base, args, .. } => {
             settle_expr(base, unifier);
             for arg in args.iter_mut() {
@@ -2101,10 +2191,11 @@ impl<'a> FnLowering<'a> {
                 span,
             ));
         };
-        if def.0 as usize != PRELUDE_FFI {
+        let which = def.0 as usize;
+        if which != PRELUDE_FFI && which != PRELUDE_FS {
             return Err(Diagnostic::new(
                 format!(
-                    "`{}` carries no value to narrow; `Ffi` is the capability that names one",
+                    "`{}` carries no value to narrow; `Ffi` and `Fs` are the capabilities that name one",
                     self.unifier.display(&resolved)
                 ),
                 span,
@@ -2124,6 +2215,18 @@ impl<'a> FnLowering<'a> {
                 span,
             ));
         }
+        // A path prefix extends at a separator or not at all. `/tmp` is not
+        // a prefix of `/tmpevil` in any sense a filesystem would recognise,
+        // and a textual check that said otherwise would hand a program the
+        // directory next door. `Ffi` has no separator and no such case.
+        if which == PRELUDE_FS && !extends_path(current, &target) {
+            return Err(Diagnostic::new(
+                format!(
+                    "`{current}` cannot be narrowed to `{target}`: a path prefix extends at a `/`, and `{target}` is a different name that merely starts with the same bytes"
+                ),
+                span,
+            ));
+        }
         if &target == current {
             return Err(Diagnostic::new(
                 format!("this narrows `{current}` to itself, which grants nothing new"),
@@ -2131,12 +2234,12 @@ impl<'a> FnLowering<'a> {
             ));
         }
 
-        Ok((value, Type::Named(DefId(PRELUDE_FFI as u32), vec![Type::Lit(target)])))
+        Ok((value, Type::Named(DefId(which as u32), vec![Type::Lit(target)])))
     }
 
     /// The prelude's type ids, in the order `prelude_types` declared them.
     fn prelude(&self) -> Vec<DefId> {
-        self.defs[..4].iter().map(|d| d.def).collect()
+        self.defs[..5].iter().map(|d| d.def).collect()
     }
 
     /// Does `outer` outlive `inner` (§5.2)?
@@ -2838,6 +2941,88 @@ impl<'a> FnLowering<'a> {
         Ok((
             Expr::Alloc { arena: self.arena_of(id), ty: resolved, value: Box::new(lowered) },
             reference,
+        ))
+    }
+
+    /// `fs_read(fs, path, into)` and `fs_write(fs, path, bytes)`.
+    ///
+    /// Checked here rather than through a written signature because the row
+    /// depends on what the capability was narrowed to: an `Fs("/tmp")`
+    /// performs `fs_read("/tmp")`, and a fixed signature has nowhere to put
+    /// the prefix.
+    fn file_op(
+        &mut self,
+        op: Builtin,
+        args: &[ExprId],
+        span: Span,
+    ) -> Result<(Expr, Type), Diagnostic> {
+        let [capability, path, buffer] = args else {
+            return Err(Diagnostic::new(
+                format!(
+                    "`{}` takes 3 arguments -- the capability, the path and the bytes -- but {} were given",
+                    op.name(),
+                    args.len()
+                ),
+                span,
+            ));
+        };
+
+        let capability_span = self.ast.expr_span(*capability);
+        let (fs_value, fs_ty) = self.expr(*capability)?;
+        let prefix = self.granted_prefix(&fs_ty, capability_span)?;
+
+        let bytes = Type::Ref {
+            unique: false,
+            region: self.unifier.fresh_region(),
+            inner: Box::new(Type::Slice(Box::new(Type::Byte))),
+        };
+        let path_span = self.ast.expr_span(*path);
+        let (path_value, path_ty) = self.expr(*path)?;
+        self.expect_type(&bytes, &path_ty, path_span)?;
+
+        // `fs_read` fills the buffer, so it needs a unique one; `fs_write`
+        // only reads what it is handed.
+        let buffer_span = self.ast.expr_span(*buffer);
+        let (buffer_value, buffer_ty) = self.expr(*buffer)?;
+        let wanted = Type::Ref {
+            unique: op == Builtin::FsRead,
+            region: self.unifier.fresh_region(),
+            inner: Box::new(Type::Slice(Box::new(Type::Byte))),
+        };
+        self.expect_type(&wanted, &buffer_ty, buffer_span)?;
+
+        let label = if op == Builtin::FsRead { "fs_read" } else { "fs_write" };
+        self.performed.union(&Effects::new([Label {
+            name: label.to_owned(),
+            argument: Some(prefix.clone()),
+        }]));
+
+        Ok((
+            Expr::FileOp {
+                write: op == Builtin::FsWrite,
+                prefix,
+                args: vec![fs_value, path_value, buffer_value],
+            },
+            Type::Int,
+        ))
+    }
+
+    /// The path prefix a borrowed `Fs` was narrowed to.
+    fn granted_prefix(&mut self, ty: &Type, span: Span) -> Result<String, Diagnostic> {
+        let resolved = self.unifier.resolve(ty);
+        if let Type::Ref { inner, .. } = &resolved
+            && let Type::Named(def, args) = self.unifier.resolve(inner)
+            && def.0 as usize == PRELUDE_FS
+            && let Some(Type::Lit(prefix)) = args.first()
+        {
+            return Ok(prefix.clone());
+        }
+        Err(Diagnostic::new(
+            format!(
+                "`{}` is not a borrowed `Fs`; reading or writing a file is reached through the capability that names the path it may touch",
+                self.unifier.display(&resolved)
+            ),
+            span,
         ))
     }
 
@@ -3546,6 +3731,9 @@ impl<'a> FnLowering<'a> {
                 }
                 if Builtin::from_name(text) == Some(Builtin::Len) {
                     return self.len(args, span);
+                }
+                if let Some(op @ (Builtin::FsRead | Builtin::FsWrite)) = Builtin::from_name(text) {
+                    return self.file_op(op, args, span);
                 }
                 let (params, ret) = if let Some(builtin) = Builtin::from_name(text) {
                     // A builtin's region parameters are instantiated exactly
@@ -4517,7 +4705,7 @@ mod capability_tests {
 
     /// Enough of a program to have authority in it.
     const MAIN: &str = " fn main(world: World) -> [] int { \
-        let Split { io, ffi } = split(world); release(ffi); release(io); return 0; }";
+        let Split { io, ffi, fs } = split(world); release(fs); release(ffi); release(io); return 0; }";
 
     fn refused(src: &str) -> String {
         lower_src(src).expect_err("this should be refused").message
@@ -4549,7 +4737,7 @@ mod capability_tests {
         accepted(&format!("fn f() -> [] int {{ return 0; }}{MAIN}"));
 
         let leaked = refused(
-            "fn main(world: World) -> [] int { let Split { io, ffi } = split(world); release(ffi); return 0; }",
+            "fn main(world: World) -> [] int { let Split { io, ffi, fs } = split(world); release(fs); release(ffi); return 0; }",
         );
         assert!(leaked.contains("still live"), "{leaked}");
 
@@ -4561,7 +4749,7 @@ mod capability_tests {
     fn a_released_capability_cannot_be_used_again() {
         let message = refused(
             "fn greet[&i](io: &!i Io) -> [io] int { return putchar(io, 65); } \
-             fn main(world: World) -> [] int { let Split { io, ffi } = split(world); release(ffi); \
+             fn main(world: World) -> [] int { let Split { io, ffi, fs } = split(world); release(fs); release(ffi); \
              release(io); borrow mut io as &!i in { greet(i); } return 0; }",
         );
         assert!(message.contains("nothing left to borrow"), "{message}");
@@ -4570,7 +4758,7 @@ mod capability_tests {
     #[test]
     fn a_capability_is_destroyed_by_release_not_by_destructuring() {
         let message = refused(
-            "fn main(world: World) -> [] int { let Split { io, ffi } = split(world); release(ffi); \
+            "fn main(world: World) -> [] int { let Split { io, ffi, fs } = split(world); release(fs); release(ffi); \
              let Io { } = io; return 0; }",
         );
         assert!(message.contains("destroyed by `release`"), "{message}");
@@ -4583,7 +4771,7 @@ mod capability_tests {
         // that is visible in the parameter list rather than in the row.
         let program = accepted(
             "fn greet[&i](io: &!i Io) -> [io] int { return putchar(io, 65); } \
-             fn main(world: World) -> [] int { let Split { io, ffi } = split(world); release(ffi); \
+             fn main(world: World) -> [] int { let Split { io, ffi, fs } = split(world); release(fs); release(ffi); \
              borrow mut io as &!i in { greet(i); } release(io); return 0; }",
         );
         let main = program.func(program.find("main").expect("main"));
@@ -5101,14 +5289,14 @@ mod foreign_tests {
     /// A `main` that takes the authority it is given and gives it back, for
     /// the cases whose subject is a declaration rather than a body.
     const MAIN: &str = " fn main(world: World) -> [] int { \
-        let Split { io, ffi } = split(world); release(ffi); release(io); return 0; }";
+        let Split { io, ffi, fs } = split(world); release(fs); release(ffi); release(io); return 0; }";
 
     /// A `main` that narrows to libc, runs `body` inside the borrow, and
     /// gives everything back.
     fn with_libc(body: &str) -> String {
         format!(
             "{LABS} fn main(world: World) -> [] int {{ \
-             let Split {{ io, ffi }} = split(world); release(io); \
+             let Split {{ io, ffi, fs }} = split(world); release(fs); release(io); \
              let libc = narrow(ffi, \"libc\"); var n = 0; \
              borrow libc as &f in {{ {body} }} \
              release(libc); return n; }}"
@@ -5121,7 +5309,7 @@ mod foreign_tests {
         // is the only place a foreign signature is written.
         let message = refused(
             "extern fn labs(n: int) -> [ffi(\"libc\")] int; \
-             fn main(world: World) -> [] int { let Split { io, ffi } = split(world); \
+             fn main(world: World) -> [] int { let Split { io, ffi, fs } = split(world); release(fs); \
              release(ffi); release(io); return labs(0); }",
         );
         assert!(message.contains("holds no capability that authorises it"), "{message}");
@@ -5179,7 +5367,7 @@ mod foreign_tests {
         // §7.4: prefix extension, and `libc` is a prefix of `libcrypto`, so
         // the capability over `libcrypto` is the narrower of the two.
         let message = refused(
-            "fn main(world: World) -> [] int { let Split { io, ffi } = split(world); \
+            "fn main(world: World) -> [] int { let Split { io, ffi, fs } = split(world); release(fs); \
              release(io); let crypto = narrow(ffi, \"libcrypto\"); \
              let wider = narrow(crypto, \"libc\"); release(wider); return 0; }",
         );
@@ -5189,7 +5377,7 @@ mod foreign_tests {
     #[test]
     fn narrowing_to_the_same_thing_is_refused() {
         let message = refused(
-            "fn main(world: World) -> [] int { let Split { io, ffi } = split(world); \
+            "fn main(world: World) -> [] int { let Split { io, ffi, fs } = split(world); release(fs); \
              release(io); let a = narrow(ffi, \"libc\"); let b = narrow(a, \"libc\"); \
              release(b); return 0; }",
         );
@@ -5201,7 +5389,7 @@ mod foreign_tests {
         // The point of the whole section: after narrowing there is no way
         // back to what was narrowed, because it was spent.
         let message = refused(
-            "fn main(world: World) -> [] int { let Split { io, ffi } = split(world); \
+            "fn main(world: World) -> [] int { let Split { io, ffi, fs } = split(world); release(fs); \
              release(io); let libc = narrow(ffi, \"libc\"); release(libc); \
              let libm = narrow(ffi, \"libm\"); release(libm); return 0; }",
         );
@@ -5211,7 +5399,7 @@ mod foreign_tests {
     #[test]
     fn a_borrowed_capability_cannot_be_narrowed() {
         let message = refused(
-            "fn main(world: World) -> [] int { let Split { io, ffi } = split(world); \
+            "fn main(world: World) -> [] int { let Split { io, ffi, fs } = split(world); release(fs); \
              release(io); borrow ffi as &f in { let libc = narrow(f, \"libc\"); release(libc); } \
              release(ffi); return 0; }",
         );
@@ -5234,7 +5422,7 @@ mod foreign_tests {
             "{LABS} \
              fn size[&f](ffi: &f Ffi(\"libc\"), n: int) -> [ffi(\"libc\")] int \
              {{ return labs(ffi, n); }} \
-             fn main(world: World) -> [] int {{ let Split {{ io, ffi }} = split(world); \
+             fn main(world: World) -> [] int {{ let Split {{ io, ffi, fs }} = split(world); release(fs); \
              release(io); let libc = narrow(ffi, \"libc\"); var n = 0; \
              borrow libc as &f in {{ n = size(f, 0 - 7); }} release(libc); return n - 7; }}"
         ));
@@ -5853,6 +6041,65 @@ mod linearity_tests {
         .expect("accepted");
         let copies = program.funcs.iter().filter(|f| f.name.starts_with("size")).count();
         assert_eq!(copies, 1, "{:?}", program.funcs.iter().map(|f| &f.name).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn a_path_prefix_extends_at_a_separator() {
+        // `docs/filesystem.md` §1.1. The distinction a byte comparison
+        // cannot make, and the one a filesystem cares about.
+        assert!(crate::extends_path("/tmp", "/tmp/a"));
+        assert!(crate::extends_path("/tmp", "/tmp"), "a capability may name one file");
+        assert!(crate::extends_path("/tmp/", "/tmp/a"), "the prefix already ends at a boundary");
+        assert!(crate::extends_path("", "/anywhere"), "the root contains everything");
+
+        assert!(!crate::extends_path("/tmp", "/tmpevil"), "the directory next door");
+        assert!(
+            !crate::extends_path("/tmp/a", "/tmp"),
+            "widening is the one direction there is not"
+        );
+        assert!(!crate::extends_path("/tmp", "/var/log"));
+    }
+
+    #[test]
+    fn a_filesystem_capability_narrows_like_a_foreign_one() {
+        // `Fs` is the second capability carrying a value, over the same
+        // `narrow`: the type records where it may reach, and two different
+        // prefixes are two different types.
+        let program = check(
+            "fn main(world: World) -> [] int {              let Split { io, ffi, fs } = split(world); release(ffi); release(io);              let tmp = narrow(fs, \"/tmp\"); let app = narrow(tmp, \"/tmp/app\");              return release(app); }",
+        )
+        .expect("accepted");
+        assert!(program.funcs.iter().any(|f| f.name == "main"));
+    }
+
+    #[test]
+    fn a_filesystem_capability_cannot_step_sideways() {
+        let message = refused(
+            "fn main(world: World) -> [] int {              let Split { io, ffi, fs } = split(world); release(ffi); release(io);              let tmp = narrow(fs, \"/tmp\"); let evil = narrow(tmp, \"/tmpevil\");              return release(evil); }",
+        );
+        assert!(message.contains("a path prefix extends at a `/`"), "{message}");
+    }
+
+    #[test]
+    fn a_file_operation_needs_the_capability_that_names_a_path() {
+        // §2: the authority that guards the filesystem has to be the one
+        // that names the filesystem, which is why the operations are
+        // builtins rather than `extern fn` gated by `Ffi("libc")`.
+        let message = refused(
+            "fn main(world: World) -> [] int {              let Split { io, ffi, fs } = split(world); release(ffi); release(fs);              var n = 0; region a { let b = alloc_slice[a](4, byte_of(0));              borrow mut io as &!i in { n = fs_read(i, \"/tmp/x\", b); } }              release(io); return n; }",
+        );
+        assert!(message.contains("is not a borrowed `Fs`"), "{message}");
+    }
+
+    #[test]
+    fn a_file_operations_row_carries_the_prefix() {
+        // §1: the label is `fs_read("/tmp")`, not `fs_read`. A row that
+        // dropped the prefix would take away the thing the prefix is for.
+        let message = refused(
+            "fn peek[&f, &b](fs: &f Fs(\"/tmp\"), into: &!b [byte]) -> [] int {              return fs_read(fs, \"/tmp/x\", into); }              fn main(world: World) -> [] int { let Split { io, ffi, fs } = split(world); \
+             release(ffi); release(fs); return release(io); }",
+        );
+        assert!(message.contains("fs_read(\"/tmp\")"), "{message}");
     }
 
     #[test]

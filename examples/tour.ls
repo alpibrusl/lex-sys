@@ -19,6 +19,7 @@
 //~ STDOUT M3 arithmetic: 6 1
 //~ STDOUT M3 slice: 3 1 4 1 5 -> 14
 //~ STDOUT M3 string: hello (5 bytes, e is 101)
+//~ STDOUT M3 file: on disk (7)
 //~ EXIT 0
 
 // ---------------------------------------------------------------- output ---
@@ -695,18 +696,75 @@ fn m3_string[&i](io: &!i Io) -> [io] int {
     return newline(io);
 }
 
+// ----------------------------------------------------- M3: the filesystem ----
+// M3's last mile, and an *application* of §8 rather than a new idea
+// (`docs/filesystem.md`).
+//
+// `Fs(prefix)` is a capability carrying a path, narrowed by the same prefix
+// extension `Ffi` uses -- except that a path prefix extends at a `/`, so
+// `/tmp` contains `/tmp/a` and pointedly does not contain `/tmpevil`. The
+// effect labels carry the prefix too, which is why the row below says
+// `fs_read("/tmp")` and not `fs_read`: a caller learns which part of the
+// filesystem this touches without opening the body.
+//
+// The operations are **builtins, not `extern fn`** (§2). An `extern` would
+// be gated by `Ffi("libc")`, and then holding the FFI capability would open
+// any path while `Fs` contributed nothing. The authority that guards the
+// filesystem has to be the one that names the filesystem.
+//
+// Two checks are runtime rules, because the prefix is in the type and the
+// path is a value: a path outside the granted prefix traps, and a path
+// containing `..` traps rather than being normalised (§4.1). A missing file
+// is `-1` -- an outcome, not a broken promise.
+//
+// What `Fs` does *not* do is sandbox: a program holding `Ffi("libc")` can
+// declare `extern fn open`. The claim is that authority is visible in the
+// types, and that `main` chooses. `examples/lines.ls` is the whole tool.
+
+fn m3_file[&f, &i](
+    fs: &f Fs("/tmp"),
+    io: &!i Io,
+) -> [fs_read("/tmp"), fs_write("/tmp"), io] int {
+    write_all(io, "M3 file:"); space(io);
+
+    let wrote = fs_write(fs, "/tmp/lex-sys-tour.txt", "on disk");
+
+    var status = 0;
+    region a {
+        // The buffer is longer than the file: the *read* decides how many
+        // bytes there are, not the buffer.
+        let buffer = alloc_slice[a](32, byte_of(0));
+        let read = fs_read(fs, "/tmp/lex-sys-tour.txt", buffer);
+        var n = 0;
+        while n < read {
+            putchar(io, int_of(buffer[n]));
+            n = n + 1;
+        }
+        space(io); putchar(io, 40);                       // " ("
+        print_nat(io, wrote);
+        putchar(io, 41);                                  // ")"
+        status = read;
+    }
+    newline(io);
+    return status - 7;
+}
+
 fn main(world: World) -> [] int {
     // §8.2: the runtime hands over exactly one `World`, and `split` consumes
     // it. There is no other way to obtain a capability.
-    let Split { io, ffi } = split(world);
-    // §7.4: attenuation, and the one narrowing in this program. From here
-    // the foreign authority in this file reaches libc and no other library.
+    let Split { io, ffi, fs } = split(world);
+    // §7.4: attenuation, and the two narrowings in this program. From here
+    // the foreign authority in this file reaches libc and no other library,
+    // and its filesystem authority reaches `/tmp` and nowhere else. Neither
+    // can be widened again, by this function or any it calls.
     let libc = narrow(ffi, "libc");
+    let tmp = narrow(fs, "/tmp");
 
     var status = 0;
     // Threaded by borrow, not by move: a callee should not consume its
     // caller's authority.
     borrow libc as &f in {
+        borrow tmp as &t in {
         borrow mut io as &!i in {
             status = run(i);
             m2_capability(i);
@@ -715,12 +773,15 @@ fn main(world: World) -> [] int {
             m3_arithmetic(i);
             m3_slice(i);
             m3_string(i);
+            m3_file(t, i);
+        }
         }
     }
 
     // Both are resources, so both are destroyed exactly once. A program that
     // forgets either does not compile.
     release(libc);
+    release(tmp);
     release(io);
     return status;
 }

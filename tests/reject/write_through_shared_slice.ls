@@ -14,7 +14,9 @@ fn clobber[&r](xs: &r [int]) -> [] int {
 }
 
 fn main(world: World) -> [] int {
-    let Split { io, ffi } = split(world);
+    let Split { io, ffi, fs } = split(world);
+    // This program touches no files, so that authority ends here.
+    release(fs);
     release(ffi);
     release(io);
     return 0;
