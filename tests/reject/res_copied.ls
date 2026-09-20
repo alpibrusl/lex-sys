@@ -9,10 +9,10 @@ struct Pair {
     b: File,
 }
 
-fn twice(f: File) -> Pair {
+fn twice(f: File) -> [] Pair {
     return Pair { a: f, b: f };
 }
 
-fn main() -> int {
+fn main() -> [] int {
     return 0;
 }

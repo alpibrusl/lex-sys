@@ -9,6 +9,6 @@ val struct Wrapper {
     f: File,
 }
 
-fn main() -> int {
+fn main() -> [] int {
     return 0;
 }

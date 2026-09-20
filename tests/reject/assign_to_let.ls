@@ -1,6 +1,6 @@
 //~ ERROR immutable
 
-fn main() -> int {
+fn main() -> [] int {
     let x = 1;
     x = 2;
     return x;

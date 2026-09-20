@@ -11,17 +11,17 @@ struct Bytes {
     len: int,
 }
 
-fn len_of[&r](b: &r Bytes) -> int {
+fn len_of[&r](b: &r Bytes) -> [] int {
     return b.len;
 }
 
 // `src <= dst`: whatever `src` is, `dst` outlives it. The call site
 // discharges that with the same lookup the body would use.
-fn merged[&dst, &src where src <= dst](d: &dst Bytes, s: &src Bytes) -> int {
+fn merged[&dst, &src where src <= dst](d: &dst Bytes, s: &src Bytes) -> [] int {
     return len_of(d) * 10 + len_of(s);
 }
 
-fn main() -> int {
+fn main() -> [io] int {
     let big = Bytes { len: 1 };
     let small = Bytes { len: 2 };
 

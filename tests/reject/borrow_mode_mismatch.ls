@@ -5,7 +5,7 @@
 
 struct Counter { n: int }
 
-fn main() -> int {
+fn main() -> [] int {
     let c = Counter { n: 1 };
     borrow mut c as &r in {
         return 0;

@@ -1,5 +1,5 @@
 //~ ERROR `count` is not bound here
 
-fn main() -> int {
+fn main() -> [] int {
     return count;
 }

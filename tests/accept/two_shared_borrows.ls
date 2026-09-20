@@ -11,11 +11,11 @@ struct Bytes {
     len: int,
 }
 
-fn len_of[&r](b: &r Bytes) -> int {
+fn len_of[&r](b: &r Bytes) -> [] int {
     return b.len;
 }
 
-fn main() -> int {
+fn main() -> [io] int {
     let buf = Bytes { len: 3 };
 
     borrow buf as &a in {

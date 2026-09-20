@@ -21,6 +21,8 @@
 //! 3. **The branch join is a real operation.** [`terminates`] is that join for
 //!    control flow today; M2 adds a live set to the same shape.
 
+use std::fmt;
+
 use lex_sys_syntax::ast::{
     self, Ast, Block, Expr as AstExpr, ExprId, Item, Stmt as AstStmt, StmtId, Symbol, TypeExpr,
     TypeId,
@@ -42,6 +44,62 @@ pub struct Slot(pub u32);
 /// Index into [`Program::funcs`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct FuncId(pub u32);
+
+/// An effect row: a canonically ordered set of labels
+/// (`docs/linearity-and-effects.md` §7.1).
+///
+/// A *set*, not a row: no duplicates and no row variables. Duplicates buy
+/// handlers and masking, M2 has none, so they would be a cost with no
+/// purchase — and a canonical order is what makes a signature hashable,
+/// which per-unit identity is made of.
+///
+/// Ordered by the label's text rather than by interner index, because an
+/// index is a fact about which names a *file* happened to mention first and
+/// a hash must not depend on that.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Default)]
+pub struct Effects(Vec<String>);
+
+impl Effects {
+    pub fn pure() -> Self {
+        Effects(Vec::new())
+    }
+
+    /// Canonicalise whatever was written: sorted, deduplicated.
+    pub fn new(labels: impl IntoIterator<Item = String>) -> Self {
+        let mut labels: Vec<String> = labels.into_iter().collect();
+        labels.sort();
+        labels.dedup();
+        Effects(labels)
+    }
+
+    pub fn labels(&self) -> &[String] {
+        &self.0
+    }
+
+    pub fn is_pure(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// One of the two operations §7.1 says are needed: union, to compute a
+    /// body's effects.
+    pub fn union(&mut self, other: &Effects) {
+        self.0.extend(other.0.iter().cloned());
+        self.0.sort();
+        self.0.dedup();
+    }
+
+    /// The other: subset, to check a call against a declaration. Linear in
+    /// the number of labels, which is small and statically bounded.
+    pub fn missing_from<'a>(&'a self, other: &Effects) -> Option<&'a str> {
+        self.0.iter().find(|l| !other.0.contains(l)).map(String::as_str)
+    }
+}
+
+impl fmt::Display for Effects {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "[{}]", self.0.join(", "))
+    }
+}
 
 /// Functions the compiler provides rather than the program defining them.
 ///
@@ -73,6 +131,18 @@ impl Builtin {
     pub fn signature(self) -> (Vec<Type>, Type) {
         match self {
             Builtin::PutChar => (vec![Type::Int], Type::Int),
+        }
+    }
+
+    /// What performing this builtin costs a caller's row.
+    ///
+    /// `putchar` writes to the console, so it performs `io`. This is the
+    /// *grounding* of the whole system: every `io` in every row above it
+    /// traces back here, because a label nothing performs can never appear
+    /// in an exact row (§7.3).
+    pub fn effects(self) -> Effects {
+        match self {
+            Builtin::PutChar => Effects::new(["io".to_owned()]),
         }
     }
 
@@ -251,6 +321,8 @@ pub struct Arm {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Func {
     pub name: String,
+    /// The declared row, checked exact against what the body performs.
+    pub effects: Effects,
     pub n_params: u32,
     /// One entry per slot, parameters first. The backend reads these to pick a
     /// machine type, so every slot's type is resolved before it gets here.
@@ -329,6 +401,10 @@ pub fn terminates(body: &[Stmt]) -> bool {
 /// A function's signature: what a caller is checked against, and all a caller
 /// is ever checked against.
 struct Signature {
+    /// The declared effect row (§7.2): written at the boundary, never
+    /// inferred across one. A caller is checked against this and never
+    /// against the body that justifies it.
+    effects: Effects,
     /// Region parameters, in declaration order; `Region::Param(i)` is the
     /// `i`th. Not part of monomorphisation: see `lower_function`.
     regions: Vec<Symbol>,
@@ -666,6 +742,7 @@ pub fn lower(ast: &Ast) -> Result<Program, Diagnostic> {
             generics: decl.generics.clone(),
             regions: decl.regions.clone(),
             outlives,
+            effects: Effects::new(decl.effects.iter().map(|e| ast.name_of(*e).to_owned())),
             params,
             ret,
             item: index,
@@ -860,6 +937,7 @@ fn lower_function(
         generics: args.to_vec(),
         scopes: vec![Vec::new()],
         slots: Vec::new(),
+        performed: Effects::pure(),
         region_params: signature
             .regions
             .iter()
@@ -884,6 +962,7 @@ fn lower_function(
     let mut body = f.block(&decl.body)?;
     let mut slots = f.slots.clone();
     let escapes = f.escaped_slot();
+    let performed = f.performed.clone();
     let trace = f.trace.finish();
 
     // §5 rule 4, over every binding rather than only the ones that return: a
@@ -944,6 +1023,30 @@ fn lower_function(
         ));
     }
 
+    // §7.3: the row is exact, or it is decoration. Both directions are
+    // errors, and the over-wide one is not a warning -- an inexact row means
+    // `[]` no longer means pure, which costs examples-as-tests and costs a
+    // signature hash that means anything.
+    let declared = &signature.effects;
+    if let Some(label) = performed.missing_from(declared) {
+        return Err(Diagnostic::new(
+            format!(
+                "`{}` performs `{label}`, which its row {declared} does not declare; narrow the body or widen the row",
+                ast.name_of(decl.name)
+            ),
+            ast.item_span(ast::ItemId(signature.item as u32)),
+        ));
+    }
+    if let Some(label) = declared.missing_from(&performed) {
+        return Err(Diagnostic::new(
+            format!(
+                "`{}` declares `{label}` but never performs it; a row is exact or it is decoration",
+                ast.name_of(decl.name)
+            ),
+            ast.item_span(ast::ItemId(signature.item as u32)),
+        ));
+    }
+
     if !terminates(&body) {
         return Err(Diagnostic::new(
             format!("function `{}` can finish without returning a value", ast.name_of(decl.name)),
@@ -953,6 +1056,7 @@ fn lower_function(
 
     Ok(Func {
         name: instance_name(ast.name_of(decl.name), args, unifier),
+        effects: signature.effects.clone(),
         n_params: decl.params.len() as u32,
         slots,
         ret,
@@ -1132,6 +1236,10 @@ struct FnLowering<'a> {
     generics: Vec<Type>,
     scopes: Vec<Vec<Binding>>,
     slots: Vec<Type>,
+    /// Every effect the body performs, unioned as the walk finds calls
+    /// (§7.2: "inside a body there is nothing to infer but a union over the
+    /// calls, which is a fold").
+    performed: Effects,
     /// The region parameters of this function, so a written `&r` in the body
     /// resolves to the same `Region::Param` the signature used...
     region_params: Vec<(Symbol, Region)>,
@@ -2266,6 +2374,19 @@ impl<'a> FnLowering<'a> {
                 // is ever checked against, generic or not.
                 let mut instantiate: Option<(usize, Vec<Type>)> = None;
                 let mut region_args: Vec<Region> = Vec::new();
+                // §7.2: a body's row is a union over its calls. Taken here,
+                // at the one place a call is resolved, so there is no second
+                // walk that could disagree about what the body does.
+                let performed = match Builtin::from_name(text) {
+                    Some(builtin) => builtin.effects(),
+                    None => self
+                        .signatures
+                        .iter()
+                        .find(|sig| sig.name == *callee)
+                        .map(|sig| sig.effects.clone())
+                        .unwrap_or_default(),
+                };
+                self.performed.union(&performed);
                 let (params, ret) = if let Some(builtin) = Builtin::from_name(text) {
                     builtin.signature()
                 } else {
@@ -2412,7 +2533,7 @@ mod tests {
 
     #[test]
     fn parameters_take_the_first_slots() {
-        let f = main_fn("fn f(a: int, b: int) -> int { let c = a + b; return c; }");
+        let f = main_fn("fn f(a: int, b: int) -> [] int { let c = a + b; return c; }");
         assert_eq!(f.n_params, 2);
         assert_eq!(f.n_slots(), 3);
         assert_eq!(
@@ -2430,149 +2551,153 @@ mod tests {
 
     #[test]
     fn functions_are_visible_before_they_are_defined() {
-        let p = lower_src("fn f() -> int { return g(); } fn g() -> int { return 1; }").unwrap();
+        let p =
+            lower_src("fn f() -> [] int { return g(); } fn g() -> [] int { return 1; }").unwrap();
         assert_eq!(p.funcs.len(), 2);
         assert_eq!(p.find("g"), Some(FuncId(1)));
     }
 
     #[test]
     fn an_inner_block_may_shadow() {
-        let f =
-            main_fn("fn f() -> int { let x = 1; if true { let x = 2; putchar(x); } return x; }");
+        let f = main_fn(
+            "fn f() -> [io] int { let x = 1; if true { let x = 2; putchar(x); } return x; }",
+        );
         assert_eq!(f.n_slots(), 2);
     }
 
     #[test]
     fn rebinding_in_the_same_block_is_refused() {
         assert!(
-            error("fn f() -> int { let x = 1; let x = 2; return x; }").contains("already bound")
+            error("fn f() -> [] int { let x = 1; let x = 2; return x; }").contains("already bound")
         );
     }
 
     #[test]
     fn an_initialiser_cannot_see_its_own_binding() {
-        assert!(error("fn f() -> int { let x = x; return x; }").contains("not bound"));
+        assert!(error("fn f() -> [] int { let x = x; return x; }").contains("not bound"));
     }
 
     #[test]
     fn assigning_to_a_let_is_refused() {
-        assert!(error("fn f() -> int { let x = 1; x = 2; return x; }").contains("immutable"));
+        assert!(error("fn f() -> [] int { let x = 1; x = 2; return x; }").contains("immutable"));
     }
 
     #[test]
     fn assigning_to_a_parameter_is_refused() {
-        assert!(error("fn f(a: int) -> int { a = 1; return a; }").contains("immutable"));
+        assert!(error("fn f(a: int) -> [] int { a = 1; return a; }").contains("immutable"));
     }
 
     #[test]
     fn assigning_to_a_var_is_allowed() {
-        assert!(lower_src("fn f() -> int { var x = 1; x = 2; return x; }").is_ok());
+        assert!(lower_src("fn f() -> [] int { var x = 1; x = 2; return x; }").is_ok());
     }
 
     #[test]
     fn unknown_names_are_refused() {
-        assert!(error("fn f() -> int { return nope; }").contains("not bound"));
-        assert!(error("fn f() -> int { return nope(); }").contains("not a function"));
+        assert!(error("fn f() -> [] int { return nope; }").contains("not bound"));
+        assert!(error("fn f() -> [] int { return nope(); }").contains("not a function"));
     }
 
     #[test]
     fn arity_is_checked_for_functions_and_builtins() {
         assert!(
-            error("fn g(a: int) -> int { return a; } fn f() -> int { return g(); }")
+            error("fn g(a: int) -> [] int { return a; } fn f() -> [] int { return g(); }")
                 .contains("takes 1 argument")
         );
-        assert!(error("fn f() -> int { return putchar(); }").contains("takes 1 argument"));
+        assert!(error("fn f() -> [] int { return putchar(); }").contains("takes 1 argument"));
     }
 
     #[test]
     fn a_function_is_not_a_value() {
         assert!(
-            error("fn g() -> int { return 1; } fn f() -> int { return g; }")
+            error("fn g() -> [] int { return 1; } fn f() -> [] int { return g; }")
                 .contains("no function values")
         );
     }
 
     #[test]
     fn a_local_is_not_callable() {
-        assert!(error("fn f() -> int { let g = 1; return g(); }").contains("not a function"));
+        assert!(error("fn f() -> [] int { let g = 1; return g(); }").contains("not a function"));
     }
 
     #[test]
     fn duplicate_definitions_are_refused() {
         assert!(
-            error("fn f() -> int { return 1; } fn f() -> int { return 2; }")
+            error("fn f() -> [] int { return 1; } fn f() -> [] int { return 2; }")
                 .contains("defined twice")
         );
-        assert!(error("fn f(a: int, a: int) -> int { return a; }").contains("bound twice"));
+        assert!(error("fn f(a: int, a: int) -> [] int { return a; }").contains("bound twice"));
     }
 
     #[test]
     fn builtins_cannot_be_redefined() {
-        assert!(error("fn putchar(c: int) -> int { return c; }").contains("builtin"));
+        assert!(error("fn putchar(c: int) -> [] int { return c; }").contains("builtin"));
     }
 
     // ---- control flow --------------------------------------------------
 
     #[test]
     fn every_path_must_return() {
-        assert!(error("fn f() -> int { let x = 1; }").contains("without returning"));
-        assert!(error("fn f() -> int { if true { return 1; } }").contains("without returning"));
-        assert!(lower_src("fn f() -> int { if true { return 1; } else { return 2; } }").is_ok());
+        assert!(error("fn f() -> [] int { let x = 1; }").contains("without returning"));
+        assert!(error("fn f() -> [] int { if true { return 1; } }").contains("without returning"));
+        assert!(lower_src("fn f() -> [] int { if true { return 1; } else { return 2; } }").is_ok());
         // Conservative on purpose: a loop never counts as a terminator.
-        assert!(error("fn f() -> int { while true { } }").contains("without returning"));
+        assert!(error("fn f() -> [] int { while true { } }").contains("without returning"));
     }
 
     #[test]
     fn code_after_a_return_is_refused() {
-        assert!(error("fn f() -> int { return 1; return 2; }").contains("unreachable"));
+        assert!(error("fn f() -> [] int { return 1; return 2; }").contains("unreachable"));
     }
 
     // ---- types ---------------------------------------------------------
 
     #[test]
     fn slot_types_are_recorded_for_the_backend() {
-        let f = main_fn("fn f(a: int, b: bool) -> int { let c = b; let d = a; return d; }");
+        let f = main_fn("fn f(a: int, b: bool) -> [] int { let c = b; let d = a; return d; }");
         assert_eq!(f.slots, vec![Type::Int, Type::Bool, Type::Bool, Type::Int]);
         assert_eq!(f.ret, Type::Int);
     }
 
     #[test]
     fn a_let_takes_its_type_from_its_initialiser() {
-        let f = main_fn("fn f() -> bool { let x = 1 < 2; return x; }");
+        let f = main_fn("fn f() -> [] bool { let x = 1 < 2; return x; }");
         assert_eq!(f.slots, vec![Type::Bool]);
     }
 
     #[test]
     fn an_annotation_must_agree_with_the_initialiser() {
         assert!(
-            error("fn f() -> int { let x: int = true; return x; }")
+            error("fn f() -> [] int { let x: int = true; return x; }")
                 .contains("expected `int`, found `bool`")
         );
-        assert!(lower_src("fn f() -> bool { let x: bool = true; return x; }").is_ok());
+        assert!(lower_src("fn f() -> [] bool { let x: bool = true; return x; }").is_ok());
     }
 
     #[test]
     fn a_condition_must_be_a_bool() {
         assert!(
-            error("fn f() -> int { if 1 { return 0; } return 1; }")
+            error("fn f() -> [] int { if 1 { return 0; } return 1; }")
                 .contains("expected `bool`, found `int`")
         );
         assert!(
-            error("fn f() -> int { while 1 { } return 1; }")
+            error("fn f() -> [] int { while 1 { } return 1; }")
                 .contains("expected `bool`, found `int`")
         );
     }
 
     #[test]
     fn return_must_match_the_signature() {
-        assert!(error("fn f() -> int { return true; }").contains("expected `int`, found `bool`"));
-        assert!(error("fn f() -> bool { return 1; }").contains("expected `bool`, found `int`"));
+        assert!(
+            error("fn f() -> [] int { return true; }").contains("expected `int`, found `bool`")
+        );
+        assert!(error("fn f() -> [] bool { return 1; }").contains("expected `bool`, found `int`"));
     }
 
     #[test]
     fn an_argument_must_match_the_parameter() {
         assert!(
-            error("fn f() -> int { return putchar(true); }")
+            error("fn f() -> [] int { return putchar(true); }")
                 .contains("expected `int`, found `bool`")
         );
     }
@@ -2580,46 +2705,46 @@ mod tests {
     #[test]
     fn an_assignment_must_match_the_binding() {
         assert!(
-            error("fn f() -> int { var x = 1; x = true; return x; }")
+            error("fn f() -> [] int { var x = 1; x = true; return x; }")
                 .contains("expected `int`, found `bool`")
         );
     }
 
     #[test]
     fn arithmetic_is_for_ints_and_logic_is_for_bools() {
-        assert!(error("fn f() -> int { return true + true; }").contains("expected `int`"));
-        assert!(error("fn f() -> bool { return 1 && 2; }").contains("expected `bool`"));
-        assert!(error("fn f() -> int { return -true; }").contains("expected `int`"));
-        assert!(error("fn f() -> bool { return !1; }").contains("expected `bool`"));
+        assert!(error("fn f() -> [] int { return true + true; }").contains("expected `int`"));
+        assert!(error("fn f() -> [] bool { return 1 && 2; }").contains("expected `bool`"));
+        assert!(error("fn f() -> [] int { return -true; }").contains("expected `int`"));
+        assert!(error("fn f() -> [] bool { return !1; }").contains("expected `bool`"));
     }
 
     #[test]
     fn a_comparison_yields_a_bool() {
-        let f = main_fn("fn f() -> bool { return 1 < 2; }");
+        let f = main_fn("fn f() -> [] bool { return 1 < 2; }");
         assert_eq!(f.ret, Type::Bool);
         // ...and ordering is for ints only.
-        assert!(error("fn f() -> bool { return true < false; }").contains("expected `int`"));
+        assert!(error("fn f() -> [] bool { return true < false; }").contains("expected `int`"));
     }
 
     #[test]
     fn equality_compares_two_values_of_the_same_type() {
-        assert!(lower_src("fn f() -> bool { return 1 == 2; }").is_ok());
-        assert!(lower_src("fn f() -> bool { return true == false; }").is_ok());
-        assert!(error("fn f() -> bool { return 1 == true; }").contains("expected `int`"));
+        assert!(lower_src("fn f() -> [] bool { return 1 == 2; }").is_ok());
+        assert!(lower_src("fn f() -> [] bool { return true == false; }").is_ok());
+        assert!(error("fn f() -> [] bool { return 1 == true; }").contains("expected `int`"));
     }
 
     #[test]
     fn unknown_types_are_refused_where_they_are_written() {
-        assert!(error("fn f() -> i32 { return 0; }").contains("unknown type `i32`"));
-        assert!(error("fn f(a: i32) -> int { return 0; }").contains("unknown type `i32`"));
+        assert!(error("fn f() -> [] i32 { return 0; }").contains("unknown type `i32`"));
+        assert!(error("fn f(a: i32) -> [] int { return 0; }").contains("unknown type `i32`"));
         assert!(
-            error("fn f() -> int { let x: i32 = 1; return x; }").contains("unknown type `i32`")
+            error("fn f() -> [] int { let x: i32 = 1; return x; }").contains("unknown type `i32`")
         );
     }
 
     #[test]
     fn a_primitive_takes_no_type_arguments() {
-        assert!(error("fn f() -> int[bool] { return 0; }").contains("takes no type arguments"));
+        assert!(error("fn f() -> [] int[bool] { return 0; }").contains("takes no type arguments"));
     }
 
     // ---- structs -------------------------------------------------------
@@ -2628,7 +2753,8 @@ mod tests {
     fn a_struct_literal_is_reordered_into_declaration_order() {
         // Written y-then-x; the IR holds x-then-y, so the backend never has
         // to consult a field name.
-        let f = main_fn("struct P { x: int, y: bool } fn f() -> P { return P { y: true, x: 7 }; }");
+        let f =
+            main_fn("struct P { x: int, y: bool } fn f() -> [] P { return P { y: true, x: 7 }; }");
         let Stmt::Return(Expr::Struct { fields, .. }) = &f.body[0] else { panic!("{:?}", f.body) };
         assert_eq!(fields[0], Expr::Int(7));
         assert_eq!(fields[1], Expr::Bool(true));
@@ -2636,7 +2762,7 @@ mod tests {
 
     #[test]
     fn a_field_access_becomes_an_index() {
-        let f = main_fn("struct P { x: int, y: int } fn f(p: P) -> int { return p.y; }");
+        let f = main_fn("struct P { x: int, y: int } fn f(p: P) -> [] int { return p.y; }");
         let Stmt::Return(Expr::Field { index, .. }) = &f.body[0] else { panic!() };
         assert_eq!(*index, 1);
     }
@@ -2645,19 +2771,19 @@ mod tests {
     fn a_struct_literal_must_give_every_field_exactly_once() {
         let decl = "struct P { x: int, y: int } ";
         assert!(
-            error(&format!("{decl}fn f() -> P {{ return P {{ x: 1 }}; }}"))
+            error(&format!("{decl}fn f() -> [] P {{ return P {{ x: 1 }}; }}"))
                 .contains("missing field `y`")
         );
         assert!(
-            error(&format!("{decl}fn f() -> P {{ return P {{ x: 1, y: 2, z: 3 }}; }}"))
+            error(&format!("{decl}fn f() -> [] P {{ return P {{ x: 1, y: 2, z: 3 }}; }}"))
                 .contains("has no field `z`")
         );
         assert!(
-            error(&format!("{decl}fn f() -> P {{ return P {{ x: 1, x: 2, y: 3 }}; }}"))
+            error(&format!("{decl}fn f() -> [] P {{ return P {{ x: 1, x: 2, y: 3 }}; }}"))
                 .contains("given twice")
         );
         assert!(
-            error(&format!("{decl}fn f() -> P {{ return P {{ x: true, y: 2 }}; }}"))
+            error(&format!("{decl}fn f() -> [] P {{ return P {{ x: true, y: 2 }}; }}"))
                 .contains("expected `int`, found `bool`")
         );
     }
@@ -2665,16 +2791,18 @@ mod tests {
     #[test]
     fn fields_are_checked_against_the_declaration() {
         assert!(
-            error("struct P { x: int } fn f(p: P) -> int { return p.z; }")
+            error("struct P { x: int } fn f(p: P) -> [] int { return p.z; }")
                 .contains("`P` has no field `z`")
         );
-        assert!(error("fn f() -> int { let x = 1; return x.y; }").contains("`int` has no fields"));
+        assert!(
+            error("fn f() -> [] int { let x = 1; return x.y; }").contains("`int` has no fields")
+        );
     }
 
     #[test]
     fn structs_may_nest_and_be_passed_by_value() {
         let p = lower_src(
-            "struct P { x: int } struct L { a: P, b: P }              fn mid(l: L) -> int { return (l.a.x + l.b.x) / 2; }              fn f() -> int { return mid(L { a: P { x: 1 }, b: P { x: 3 } }); }",
+            "struct P { x: int } struct L { a: P, b: P }              fn mid(l: L) -> [] int { return (l.a.x + l.b.x) / 2; }              fn f() -> [] int { return mid(L { a: P { x: 1 }, b: P { x: 3 } }); }",
         );
         assert!(p.is_ok(), "{:?}", p.err());
     }
@@ -2685,15 +2813,16 @@ mod tests {
         // the mutual case, because the check is reachability rather than a
         // look at one field.
         assert!(
-            error("struct N { next: N } fn f() -> int { return 0; }").contains("contains itself")
+            error("struct N { next: N } fn f() -> [] int { return 0; }")
+                .contains("contains itself")
         );
         assert!(
-            error("struct A { b: B } struct B { a: A } fn f() -> int { return 0; }")
+            error("struct A { b: B } struct B { a: A } fn f() -> [] int { return 0; }")
                 .contains("contains itself")
         );
         // ...but two fields of the same struct type are perfectly finite.
         assert!(
-            lower_src("struct P { x: int } struct L { a: P, b: P } fn f() -> int { return 0; }")
+            lower_src("struct P { x: int } struct L { a: P, b: P } fn f() -> [] int { return 0; }")
                 .is_ok()
         );
     }
@@ -2701,29 +2830,30 @@ mod tests {
     #[test]
     fn struct_declarations_are_checked_for_duplicates() {
         assert!(
-            error("struct P { x: int } struct P { y: int } fn f() -> int { return 0; }")
+            error("struct P { x: int } struct P { y: int } fn f() -> [] int { return 0; }")
                 .contains("declared twice")
         );
         assert!(
-            error("struct P { x: int, x: bool } fn f() -> int { return 0; }")
+            error("struct P { x: int, x: bool } fn f() -> [] int { return 0; }")
                 .contains("field `x` is declared twice")
         );
         assert!(
-            error("struct int { x: int } fn f() -> int { return 0; }").contains("built-in type")
+            error("struct int { x: int } fn f() -> [] int { return 0; }").contains("built-in type")
         );
     }
 
     #[test]
     fn a_struct_may_mention_one_declared_later() {
         assert!(
-            lower_src("struct A { b: B } struct B { x: int } fn f() -> int { return 0; }").is_ok()
+            lower_src("struct A { b: B } struct B { x: int } fn f() -> [] int { return 0; }")
+                .is_ok()
         );
     }
 
     #[test]
     fn structs_are_not_compared_with_equality() {
         assert!(
-            error("struct P { x: int } fn f(a: P, b: P) -> bool { return a == b; }")
+            error("struct P { x: int } fn f(a: P, b: P) -> [] bool { return a == b; }")
                 .contains("cannot be compared")
         );
     }
@@ -2734,7 +2864,7 @@ mod tests {
 
     #[test]
     fn a_variant_becomes_an_index_and_a_payload() {
-        let f = main_fn(&format!("{SHAPE}fn f() -> Shape {{ return Shape::Rect(2, 3); }}"));
+        let f = main_fn(&format!("{SHAPE}fn f() -> [] Shape {{ return Shape::Rect(2, 3); }}"));
         let Stmt::Return(Expr::Enum { variant, payload, .. }) = &f.body[0] else { panic!() };
         assert_eq!(*variant, 2);
         assert_eq!(payload, &vec![Expr::Int(2), Expr::Int(3)]);
@@ -2743,7 +2873,7 @@ mod tests {
     #[test]
     fn a_match_must_cover_every_variant() {
         let message = error(&format!(
-            "{SHAPE}fn f(s: Shape) -> int {{ match s {{ Shape::Empty => {{ return 0; }} }} }}"
+            "{SHAPE}fn f(s: Shape) -> [] int {{ match s {{ Shape::Empty => {{ return 0; }} }} }}"
         ));
         assert!(message.contains("does not cover"), "{message}");
         assert!(message.contains("`Shape::Circle`"), "{message}");
@@ -2754,7 +2884,7 @@ mod tests {
     fn a_wildcard_covers_the_rest() {
         assert!(
             lower_src(&format!(
-                "{SHAPE}fn f(s: Shape) -> int {{ match s {{ Shape::Empty => {{ return 0; }} _ => {{ return 1; }} }} }}"
+                "{SHAPE}fn f(s: Shape) -> [] int {{ match s {{ Shape::Empty => {{ return 0; }} _ => {{ return 1; }} }} }}"
             ))
             .is_ok()
         );
@@ -2765,7 +2895,7 @@ mod tests {
         // Every variant is already matched, so the `_` can never run. Saying
         // so is worth more than silently allowing dead code.
         let message = error(&format!(
-            "{SHAPE}fn f(s: Shape) -> int {{ match s {{              Shape::Empty => {{ return 0; }} Shape::Circle(r) => {{ return r; }}              Shape::Rect(w, h) => {{ return w * h; }} _ => {{ return 9; }} }} }}"
+            "{SHAPE}fn f(s: Shape) -> [] int {{ match s {{              Shape::Empty => {{ return 0; }} Shape::Circle(r) => {{ return r; }}              Shape::Rect(w, h) => {{ return w * h; }} _ => {{ return 9; }} }} }}"
         ));
         assert!(message.contains("already matched"), "{message}");
     }
@@ -2773,7 +2903,7 @@ mod tests {
     #[test]
     fn arms_after_a_wildcard_are_refused() {
         let message = error(&format!(
-            "{SHAPE}fn f(s: Shape) -> int {{ match s {{ _ => {{ return 0; }} Shape::Empty => {{ return 1; }} }} }}"
+            "{SHAPE}fn f(s: Shape) -> [] int {{ match s {{ _ => {{ return 0; }} Shape::Empty => {{ return 1; }} }} }}"
         ));
         assert!(message.contains("unreachable"), "{message}");
     }
@@ -2781,7 +2911,7 @@ mod tests {
     #[test]
     fn a_variant_may_not_be_matched_twice() {
         let message = error(&format!(
-            "{SHAPE}fn f(s: Shape) -> int {{ match s {{              Shape::Empty => {{ return 0; }} Shape::Empty => {{ return 1; }} _ => {{ return 2; }} }} }}"
+            "{SHAPE}fn f(s: Shape) -> [] int {{ match s {{              Shape::Empty => {{ return 0; }} Shape::Empty => {{ return 1; }} _ => {{ return 2; }} }} }}"
         ));
         assert!(message.contains("matched twice"), "{message}");
     }
@@ -2789,11 +2919,11 @@ mod tests {
     #[test]
     fn payload_arity_is_checked_when_building_and_when_matching() {
         assert!(
-            error(&format!("{SHAPE}fn f() -> Shape {{ return Shape::Rect(1); }}"))
+            error(&format!("{SHAPE}fn f() -> [] Shape {{ return Shape::Rect(1); }}"))
                 .contains("carries 2 values, but 1 was given")
         );
         let message = error(&format!(
-            "{SHAPE}fn f(s: Shape) -> int {{ match s {{ Shape::Rect(w) => {{ return w; }} _ => {{ return 0; }} }} }}"
+            "{SHAPE}fn f(s: Shape) -> [] int {{ match s {{ Shape::Rect(w) => {{ return w; }} _ => {{ return 0; }} }} }}"
         ));
         assert!(message.contains("the pattern binds 1"), "{message}");
     }
@@ -2804,13 +2934,13 @@ mod tests {
         // returning it from a `bool` one is not.
         assert!(
             lower_src(&format!(
-                "{SHAPE}fn f(s: Shape) -> int {{ match s {{ Shape::Circle(r) => {{ return r; }} _ => {{ return 0; }} }} }}"
+                "{SHAPE}fn f(s: Shape) -> [] int {{ match s {{ Shape::Circle(r) => {{ return r; }} _ => {{ return 0; }} }} }}"
             ))
             .is_ok()
         );
         assert!(
             error(&format!(
-                "{SHAPE}fn f(s: Shape) -> bool {{ match s {{ Shape::Circle(r) => {{ return r; }} _ => {{ return true; }} }} }}"
+                "{SHAPE}fn f(s: Shape) -> [] bool {{ match s {{ Shape::Circle(r) => {{ return r; }} _ => {{ return true; }} }} }}"
             ))
             .contains("expected `bool`, found `int`")
         );
@@ -2820,7 +2950,7 @@ mod tests {
     fn two_arms_may_bind_the_same_name_at_different_types() {
         assert!(
             lower_src(
-                "enum E { A(int), B(bool) }                  fn f(e: E) -> int { match e { E::A(v) => { return v; } E::B(v) => { if v { return 1; } return 0; } } }"
+                "enum E { A(int), B(bool) }                  fn f(e: E) -> [] int { match e { E::A(v) => { return v; } E::B(v) => { if v { return 1; } return 0; } } }"
             )
             .is_ok()
         );
@@ -2831,7 +2961,7 @@ mod tests {
         // No trailing `return` needed: the match itself covers every path.
         assert!(
             lower_src(&format!(
-                "{SHAPE}fn f(s: Shape) -> int {{ match s {{                  Shape::Empty => {{ return 0; }} Shape::Circle(r) => {{ return r; }}                  Shape::Rect(w, h) => {{ return w * h; }} }} }}"
+                "{SHAPE}fn f(s: Shape) -> [] int {{ match s {{                  Shape::Empty => {{ return 0; }} Shape::Circle(r) => {{ return r; }}                  Shape::Rect(w, h) => {{ return w * h; }} }} }}"
             ))
             .is_ok()
         );
@@ -2840,11 +2970,11 @@ mod tests {
     #[test]
     fn only_enums_are_matched() {
         assert!(
-            error("fn f() -> int { match 1 { _ => { return 0; } } }")
+            error("fn f() -> [] int { match 1 { _ => { return 0; } } }")
                 .contains("`int` cannot be matched")
         );
         assert!(
-            error("struct P { x: int } fn f(p: P) -> int { match p { _ => { return 0; } } }")
+            error("struct P { x: int } fn f(p: P) -> [] int { match p { _ => { return 0; } } }")
                 .contains("is a struct, not an enum")
         );
     }
@@ -2852,28 +2982,28 @@ mod tests {
     #[test]
     fn an_enum_that_contains_itself_is_refused() {
         assert!(
-            error("enum List { Nil, Cons(int, List) } fn f() -> int { return 0; }")
+            error("enum List { Nil, Cons(int, List) } fn f() -> [] int { return 0; }")
                 .contains("contains itself")
         );
     }
 
     #[test]
     fn an_enum_needs_at_least_one_variant() {
-        assert!(error("enum Void { } fn f() -> int { return 0; }").contains("has no variants"));
+        assert!(error("enum Void { } fn f() -> [] int { return 0; }").contains("has no variants"));
     }
 
     #[test]
     fn structs_and_enums_are_not_interchangeable() {
         assert!(
-            error("struct P { x: int } fn f() -> int { let p = P::x(1); return 0; }")
+            error("struct P { x: int } fn f() -> [] int { let p = P::x(1); return 0; }")
                 .contains("is a struct, not an enum")
         );
         assert!(
-            error("enum E { A } fn f() -> int { let e = E { x: 1 }; return 0; }")
+            error("enum E { A } fn f() -> [] int { let e = E { x: 1 }; return 0; }")
                 .contains("is an enum, not a struct")
         );
         assert!(
-            error("enum E { A(int) } fn f(e: E) -> int { return e.x; }")
+            error("enum E { A(int) } fn f(e: E) -> [] int { return e.x; }")
                 .contains("read by matching on it")
         );
     }
@@ -2890,7 +3020,7 @@ mod tests {
     #[test]
     fn a_generic_function_is_copied_once_per_instantiation() {
         let names = names(
-            "fn id[T](x: T) -> T { return x; }              fn main() -> int { if id(true) { return id(1); } return id(2); }",
+            "fn id[T](x: T) -> [] T { return x; }              fn main() -> [] int { if id(true) { return id(1); } return id(2); }",
         );
         // One copy per type, not per call: `id(1)` and `id(2)` share theirs.
         assert_eq!(names, ["id$bool", "id$int", "main"]);
@@ -2898,7 +3028,8 @@ mod tests {
 
     #[test]
     fn a_generic_function_nobody_calls_is_emitted_nowhere() {
-        let names = names("fn unused[T](x: T) -> T { return x; } fn main() -> int { return 0; }");
+        let names =
+            names("fn unused[T](x: T) -> [] T { return x; } fn main() -> [] int { return 0; }");
         assert_eq!(names, ["main"]);
     }
 
@@ -2907,8 +3038,10 @@ mod tests {
         // The point of checking rigidly: an error in a generic function does
         // not wait for someone to instantiate it.
         assert!(
-            error("fn unused[T](x: T) -> int { return true; } fn main() -> int { return 0; }")
-                .contains("expected `int`, found `bool`")
+            error(
+                "fn unused[T](x: T) -> [] int { return true; } fn main() -> [] int { return 0; }"
+            )
+            .contains("expected `int`, found `bool`")
         );
     }
 
@@ -2916,19 +3049,19 @@ mod tests {
     fn a_type_parameter_is_rigid_inside_the_body() {
         // `T` is not `int`, however every instantiation so far might be.
         let message =
-            error("fn bad[T](x: T) -> T { return x + 1; } fn main() -> int { return 0; }");
+            error("fn bad[T](x: T) -> [] T { return x + 1; } fn main() -> [] int { return 0; }");
         assert!(message.contains("expected `T`"), "{message}");
     }
 
     #[test]
     fn type_arguments_are_inferred_from_the_arguments() {
         assert!(
-            lower_src("fn id[T](x: T) -> T { return x; } fn main() -> int { return id(1); }")
+            lower_src("fn id[T](x: T) -> [] T { return x; } fn main() -> [] int { return id(1); }")
                 .is_ok()
         );
         assert!(
             error(
-                "fn same[T](a: T, b: T) -> T { return a; }                  fn main() -> int { return same(1, true); }"
+                "fn same[T](a: T, b: T) -> [] T { return a; }                  fn main() -> [] int { return same(1, true); }"
             )
             .contains("expected `int`, found `bool`")
         );
@@ -2937,7 +3070,7 @@ mod tests {
     #[test]
     fn a_type_argument_the_arguments_do_not_settle_is_refused() {
         let message = error(
-            "enum Opt[T] { None, Some(T) }              fn make[T]() -> Opt[T] { return Opt::None; }              fn main() -> int { let x = make(); return 0; }",
+            "enum Opt[T] { None, Some(T) }              fn make[T]() -> [] Opt[T] { return Opt::None; }              fn main() -> [] int { let x = make(); return 0; }",
         );
         assert!(message.contains("cannot tell what `T` is"), "{message}");
     }
@@ -2946,13 +3079,13 @@ mod tests {
     fn a_generic_struct_substitutes_its_arguments_into_field_types() {
         assert!(
             lower_src(
-                "struct Pair[A, B] { first: A, second: B }                  fn main() -> int { let p = Pair { first: 1, second: true };                  if p.second { return p.first; } return 0; }"
+                "struct Pair[A, B] { first: A, second: B }                  fn main() -> [] int { let p = Pair { first: 1, second: true };                  if p.second { return p.first; } return 0; }"
             )
             .is_ok()
         );
         assert!(
             error(
-                "struct Pair[A, B] { first: A, second: B }                  fn main() -> int { let p = Pair { first: 1, second: true }; return p.second; }"
+                "struct Pair[A, B] { first: A, second: B }                  fn main() -> [] int { let p = Pair { first: 1, second: true }; return p.second; }"
             )
             .contains("expected `int`, found `bool`")
         );
@@ -2962,14 +3095,14 @@ mod tests {
     fn a_generic_enum_substitutes_its_arguments_into_payloads() {
         assert!(
             lower_src(
-                "enum Opt[T] { None, Some(T) }                  fn f(o: Opt[int]) -> int { match o { Opt::None => { return 0; } Opt::Some(v) => { return v; } } }"
+                "enum Opt[T] { None, Some(T) }                  fn f(o: Opt[int]) -> [] int { match o { Opt::None => { return 0; } Opt::Some(v) => { return v; } } }"
             )
             .is_ok()
         );
         // The binding is an `int` here, so returning it as a `bool` is wrong.
         assert!(
             error(
-                "enum Opt[T] { None, Some(T) }                  fn f(o: Opt[int]) -> bool { match o { Opt::None => { return true; } Opt::Some(v) => { return v; } } }"
+                "enum Opt[T] { None, Some(T) }                  fn f(o: Opt[int]) -> [] bool { match o { Opt::None => { return true; } Opt::Some(v) => { return v; } } }"
             )
             .contains("expected `bool`, found `int`")
         );
@@ -2980,13 +3113,13 @@ mod tests {
         // Nothing in `Opt::None` says what `T` is; the annotation does.
         assert!(
             lower_src(
-                "enum Opt[T] { None, Some(T) }                  fn main() -> int { let x: Opt[int] = Opt::None; return 0; }"
+                "enum Opt[T] { None, Some(T) }                  fn main() -> [] int { let x: Opt[int] = Opt::None; return 0; }"
             )
             .is_ok()
         );
         assert!(
             error(
-                "enum Opt[T] { None, Some(T) } fn main() -> int { let x = Opt::None; return 0; }"
+                "enum Opt[T] { None, Some(T) } fn main() -> [] int { let x = Opt::None; return 0; }"
             )
             .contains("cannot tell what type")
         );
@@ -2996,25 +3129,25 @@ mod tests {
     fn type_argument_counts_are_checked() {
         assert!(
             error(
-                "struct Pair[A, B] { first: A, second: B }                  fn f(p: Pair[int]) -> int { return p.first; }"
+                "struct Pair[A, B] { first: A, second: B }                  fn f(p: Pair[int]) -> [] int { return p.first; }"
             )
             .contains("takes 2 type arguments, but 1 was given")
         );
         assert!(
-            error("fn f(x: int[bool]) -> int { return 0; }").contains("takes no type arguments")
+            error("fn f(x: int[bool]) -> [] int { return 0; }").contains("takes no type arguments")
         );
         assert!(
-            error("fn f[T](x: T[int]) -> int { return 0; }")
+            error("fn f[T](x: T[int]) -> [] int { return 0; }")
                 .contains("type parameter `T` takes no type arguments")
         );
     }
 
     #[test]
     fn type_parameter_names_are_checked() {
-        assert!(error("fn f[T, T](x: T) -> T { return x; }").contains("declared twice"));
-        assert!(error("fn f[int](x: int) -> int { return x; }").contains("built-in type"));
+        assert!(error("fn f[T, T](x: T) -> [] T { return x; }").contains("declared twice"));
+        assert!(error("fn f[int](x: int) -> [] int { return x; }").contains("built-in type"));
         assert!(
-            error("struct S[A, A] { x: A } fn main() -> int { return 0; }")
+            error("struct S[A, A] { x: A } fn main() -> [] int { return 0; }")
                 .contains("declared twice")
         );
     }
@@ -3024,8 +3157,132 @@ mod tests {
         // `g`'s body returns a bool, and its signature says int. The call in
         // `f` is checked against the signature, so the error is reported in
         // `g` -- a caller never learns anything from a callee's body.
-        let message = error("fn g() -> int { return true; } fn f() -> int { return g(); }");
+        let message = error("fn g() -> [] int { return true; } fn f() -> [] int { return g(); }");
         assert!(message.contains("expected `int`, found `bool`"), "{message}");
+    }
+}
+
+/// Effect rows: `docs/linearity-and-effects.md` §7.
+#[cfg(test)]
+mod effect_tests {
+    use super::tests::lower_src;
+    use super::{Effects, Program};
+
+    fn refused(src: &str) -> String {
+        lower_src(src).expect_err("this should be refused").message
+    }
+
+    fn accepted(src: &str) -> Program {
+        lower_src(src).expect("this should be accepted")
+    }
+
+    #[test]
+    fn a_row_is_a_canonically_ordered_set() {
+        // §7.1: no duplicates, and an order that does not depend on which
+        // label a file happened to mention first.
+        let a = Effects::new(["io".to_owned(), "fs".to_owned(), "io".to_owned()]);
+        let b = Effects::new(["fs".to_owned(), "io".to_owned()]);
+        assert_eq!(a, b);
+        assert_eq!(a.labels(), ["fs", "io"]);
+        assert_eq!(a.to_string(), "[fs, io]");
+    }
+
+    #[test]
+    fn union_and_subset_are_the_only_operations_needed() {
+        let mut row = Effects::pure();
+        assert!(row.is_pure());
+        row.union(&Effects::new(["io".to_owned()]));
+        row.union(&Effects::new(["io".to_owned(), "fs".to_owned()]));
+        assert_eq!(row.labels(), ["fs", "io"]);
+        assert_eq!(row.missing_from(&Effects::new(["fs".to_owned(), "io".to_owned()])), None);
+        assert_eq!(row.missing_from(&Effects::new(["io".to_owned()])), Some("fs"));
+    }
+
+    #[test]
+    fn a_call_widens_the_callers_row() {
+        let message = refused(
+            "fn quiet() -> [] int { putchar(65); return 0; } \
+             fn main() -> [] int { return 0; }",
+        );
+        assert!(message.contains("performs `io`"), "{message}");
+    }
+
+    #[test]
+    fn an_over_wide_row_is_an_error_not_a_warning() {
+        let message = refused("fn f() -> [io] int { return 1; } fn main() -> [] int { return 0; }");
+        assert!(message.contains("never performs it"), "{message}");
+    }
+
+    #[test]
+    fn a_row_is_transitive() {
+        let message = refused(
+            "fn shout() -> [io] int { return putchar(33); } \
+             fn caller() -> [] int { return shout(); } fn main() -> [] int { return 0; }",
+        );
+        assert!(message.contains("`caller` performs `io`"), "{message}");
+        accepted(
+            "fn shout() -> [io] int { return putchar(33); } \
+             fn caller() -> [io] int { return shout(); } fn main() -> [io] int { return caller(); }",
+        );
+    }
+
+    #[test]
+    fn an_ungrounded_label_can_never_be_exact() {
+        // No registry of legal labels, and none needed: nothing performs
+        // `telepathy`, so no exact row can contain it.
+        let message =
+            refused("fn f() -> [telepathy] int { return 1; } fn main() -> [] int { return 0; }");
+        assert!(message.contains("declares `telepathy`"), "{message}");
+    }
+
+    #[test]
+    fn a_duplicate_label_is_the_same_row() {
+        accepted(
+            "fn f() -> [io, io] int { return putchar(33); } \
+             fn main() -> [io] int { return f(); }",
+        );
+    }
+
+    #[test]
+    fn a_pure_helper_inside_an_effectful_body_adds_nothing() {
+        accepted(
+            "fn double(n: int) -> [] int { return n * 2; } \
+             fn main() -> [io] int { return putchar(double(20)); }",
+        );
+    }
+
+    #[test]
+    fn an_effect_in_a_branch_still_counts() {
+        // The row is a union over the calls the body contains, not over the
+        // ones a particular run reaches. Anything else would need to know
+        // which branch is taken.
+        let message = refused(
+            "fn f(c: bool) -> [] int { if c { putchar(65); } return 0; } \
+             fn main() -> [] int { return 0; }",
+        );
+        assert!(message.contains("performs `io`"), "{message}");
+    }
+
+    #[test]
+    fn a_generic_functions_row_is_not_per_instantiation() {
+        // Rows live on signatures, so monomorphisation does not touch them:
+        // one row however many copies the backend emits.
+        let program = accepted(
+            "fn id[T](x: T) -> [] T { return x; } \
+             fn main() -> [io] int { return putchar(id(65)) - 65; }",
+        );
+        let copies: Vec<&str> =
+            program.funcs.iter().map(|f| f.name.as_str()).filter(|n| n.starts_with("id")).collect();
+        assert_eq!(copies.len(), 1, "{copies:?}");
+        let id = program.func(program.find(copies[0]).expect("id"));
+        assert!(id.effects.is_pure(), "{}", id.effects);
+    }
+
+    #[test]
+    fn the_row_reaches_the_lowered_function() {
+        let program = accepted("fn main() -> [io] int { return putchar(65) - 65; }");
+        let main = program.func(program.find("main").expect("main"));
+        assert_eq!(main.effects.labels(), ["io"]);
     }
 }
 
@@ -3039,8 +3296,8 @@ mod linearity_tests {
     /// things every case below needs.
     const PRELUDE: &str = "\
         res struct File { fd: int } \
-        fn open(n: int) -> File { return File { fd: n }; } \
-        fn close(f: File) -> int { let File { fd } = f; return fd; } ";
+        fn open(n: int) -> [] File { return File { fd: n }; } \
+        fn close(f: File) -> [] int { let File { fd } = f; return fd; } ";
 
     fn check(body: &str) -> Result<Program, Diagnostic> {
         lower_src(&format!("{PRELUDE}{body}"))
@@ -3056,14 +3313,14 @@ mod linearity_tests {
 
     #[test]
     fn a_res_value_consumed_once_is_accepted() {
-        accepted("fn main() -> int { return close(open(1)); }");
+        accepted("fn main() -> [] int { return close(open(1)); }");
     }
 
     #[test]
     fn a_res_value_used_twice_is_refused() {
         let message = refused(
             "struct Pair { a: File, b: File } \
-             fn main() -> int { let f = open(1); let p = Pair { a: f, b: f }; return 0; }",
+             fn main() -> [] int { let f = open(1); let p = Pair { a: f, b: f }; return 0; }",
         );
         assert!(message.contains("already been consumed"), "{message}");
     }
@@ -3071,26 +3328,26 @@ mod linearity_tests {
     #[test]
     fn a_res_value_used_after_a_move_is_refused() {
         let message =
-            refused("fn main() -> int { let f = open(1); let a = close(f); return close(f); }");
+            refused("fn main() -> [] int { let f = open(1); let a = close(f); return close(f); }");
         assert!(message.contains("already been consumed"), "{message}");
     }
 
     #[test]
     fn a_res_value_live_at_a_return_is_refused() {
-        let message = refused("fn main() -> int { let f = open(1); return 0; }");
+        let message = refused("fn main() -> [] int { let f = open(1); return 0; }");
         assert!(message.contains("consumed on every path"), "{message}");
     }
 
     #[test]
     fn a_res_value_live_at_the_end_of_a_block_is_refused() {
-        let message = refused("fn main() -> int { if true { let f = open(1); } return 0; }");
+        let message = refused("fn main() -> [] int { if true { let f = open(1); } return 0; }");
         assert!(message.contains("still live at the end of this block"), "{message}");
     }
 
     #[test]
     fn branches_must_agree_about_what_is_live() {
         let message = refused(
-            "fn main() -> int { let f = open(1); if true { let a = close(f); } return 0; }",
+            "fn main() -> [] int { let f = open(1); if true { let a = close(f); } return 0; }",
         );
         assert!(message.contains("branches disagree about `f`"), "{message}");
     }
@@ -3098,7 +3355,7 @@ mod linearity_tests {
     #[test]
     fn branches_that_agree_are_accepted() {
         accepted(
-            "fn main() -> int { let f = open(1); \
+            "fn main() -> [] int { let f = open(1); \
              if true { let a = close(f); } else { let b = close(f); } return 0; }",
         );
     }
@@ -3108,7 +3365,7 @@ mod linearity_tests {
         // A `return` is not at the merge point, so it takes no part in the
         // join. Without that, §4.1's own accepting example would be refused.
         accepted(
-            "fn main() -> int { let f = open(1); \
+            "fn main() -> [] int { let f = open(1); \
              if true { return close(f); } return close(f); }",
         );
     }
@@ -3118,13 +3375,15 @@ mod linearity_tests {
         // The `then` arm declares and consumes `f`; the empty `else` never
         // sees it. That is not a disagreement -- a binding declared inside an
         // arm dies with the arm, and its own block already checked it.
-        accepted("fn main() -> int { if true { let f = open(1); let a = close(f); } return 0; }");
+        accepted(
+            "fn main() -> [] int { if true { let f = open(1); let a = close(f); } return 0; }",
+        );
     }
 
     #[test]
     fn a_loop_may_not_consume_an_outer_binding() {
         let message = refused(
-            "fn main() -> int { let f = open(1); var i = 0; \
+            "fn main() -> [] int { let f = open(1); var i = 0; \
              while i < 2 { let a = close(f); i = i + 1; } return 0; }",
         );
         assert!(message.contains("consumed inside this loop"), "{message}");
@@ -3133,7 +3392,7 @@ mod linearity_tests {
     #[test]
     fn a_loop_that_consumes_what_it_creates_is_accepted() {
         accepted(
-            "fn main() -> int { var i = 0; \
+            "fn main() -> [] int { var i = 0; \
              while i < 2 { let f = open(i); let a = close(f); i = i + 1; } return 0; }",
         );
     }
@@ -3143,8 +3402,8 @@ mod linearity_tests {
         // `&&` does not evaluate its right operand when the left decides, so
         // a consumption there happens on one path only.
         let message = refused(
-            "fn spend(f: File) -> bool { let a = close(f); return true; } \
-             fn main() -> int { let f = open(1); \
+            "fn spend(f: File) -> [] bool { let a = close(f); return true; } \
+             fn main() -> [] int { let f = open(1); \
              let b = false && spend(f); return 0; }",
         );
         assert!(message.contains("branches disagree"), "{message}");
@@ -3152,33 +3411,33 @@ mod linearity_tests {
 
     #[test]
     fn a_res_value_cannot_be_discarded() {
-        let message = refused("fn main() -> int { open(1); return 0; }");
+        let message = refused("fn main() -> [] int { open(1); return 0; }");
         assert!(message.contains("cannot be discarded"), "{message}");
     }
 
     #[test]
     fn a_val_value_may_be_discarded() {
-        accepted("fn main() -> int { close(open(1)); return 0; }");
+        accepted("fn main() -> [] int { close(open(1)); return 0; }");
     }
 
     #[test]
     fn a_field_cannot_be_read_out_of_a_res_value() {
         let message =
-            refused("fn main() -> int { let f = open(1); let n = f.fd; return close(f); }");
+            refused("fn main() -> [] int { let f = open(1); let n = f.fd; return close(f); }");
         assert!(message.contains("a field cannot be read out of it"), "{message}");
     }
 
     #[test]
     fn assigning_over_a_live_res_binding_is_refused() {
         let message =
-            refused("fn main() -> int { var f = open(1); f = open(2); return close(f); }");
+            refused("fn main() -> [] int { var f = open(1); f = open(2); return close(f); }");
         assert!(message.contains("would discard the `res` value"), "{message}");
     }
 
     #[test]
     fn assigning_over_a_spent_res_binding_is_accepted() {
         accepted(
-            "fn main() -> int { var f = open(1); let a = close(f); f = open(2); \
+            "fn main() -> [] int { var f = open(1); let a = close(f); f = open(2); \
              return close(f); }",
         );
     }
@@ -3187,8 +3446,8 @@ mod linearity_tests {
     fn a_wildcard_arm_may_not_swallow_a_res_scrutinee() {
         let message = refused(
             "enum Slot { Empty, Full(File) } \
-             fn size(s: Slot) -> int { match s { Slot::Empty => { return 0; } \
-             _ => { return 1; } } } fn main() -> int { return 0; }",
+             fn size(s: Slot) -> [] int { match s { Slot::Empty => { return 0; } \
+             _ => { return 1; } } } fn main() -> [] int { return 0; }",
         );
         assert!(message.contains("the value matched here is `res`"), "{message}");
     }
@@ -3197,8 +3456,8 @@ mod linearity_tests {
     fn an_ignored_res_payload_is_refused() {
         let message = refused(
             "enum Slot { Empty, Full(File) } \
-             fn size(s: Slot) -> int { match s { Slot::Empty => { return 0; } \
-             Slot::Full(_) => { return 1; } } } fn main() -> int { return 0; }",
+             fn size(s: Slot) -> [] int { match s { Slot::Empty => { return 0; } \
+             Slot::Full(_) => { return 1; } } } fn main() -> [] int { return 0; }",
         );
         assert!(message.contains("this payload is `res`"), "{message}");
     }
@@ -3207,8 +3466,8 @@ mod linearity_tests {
     fn an_ignored_val_payload_is_accepted() {
         accepted(
             "enum Slot { Empty, Full(int) } \
-             fn size(s: Slot) -> int { match s { Slot::Empty => { return 0; } \
-             Slot::Full(_) => { return 1; } } } fn main() -> int { return 0; }",
+             fn size(s: Slot) -> [] int { match s { Slot::Empty => { return 0; } \
+             Slot::Full(_) => { return 1; } } } fn main() -> [] int { return 0; }",
         );
     }
 
@@ -3216,31 +3475,31 @@ mod linearity_tests {
     fn mode_is_inferred_from_members() {
         let message = refused(
             "struct Holder { f: File } \
-             fn main() -> int { let h = Holder { f: open(1) }; return 0; }",
+             fn main() -> [] int { let h = Holder { f: open(1) }; return 0; }",
         );
         assert!(message.contains("consumed on every path"), "{message}");
     }
 
     #[test]
     fn a_val_declaration_may_not_hold_a_res_member() {
-        let message = refused("val struct Wrapper { f: File } fn main() -> int { return 0; }");
+        let message = refused("val struct Wrapper { f: File } fn main() -> [] int { return 0; }");
         assert!(message.contains("declared `val`, but it holds"), "{message}");
     }
 
     #[test]
     fn a_val_declaration_of_val_members_is_accepted() {
-        accepted("val struct Point { x: int, y: int } fn main() -> int { return 0; }");
+        accepted("val struct Point { x: int, y: int } fn main() -> [] int { return 0; }");
     }
 
     #[test]
     fn a_generic_type_takes_its_mode_from_its_arguments() {
         // `Held[int]` is `val` and may be dropped; `Held[File]` is `res`.
         accepted(
-            "struct Held[T] { value: T } fn main() -> int { let h = Held { value: 1 }; return 0; }",
+            "struct Held[T] { value: T } fn main() -> [] int { let h = Held { value: 1 }; return 0; }",
         );
         let message = refused(
             "struct Held[T] { value: T } \
-             fn main() -> int { let h = Held { value: open(1) }; return 0; }",
+             fn main() -> [] int { let h = Held { value: open(1) }; return 0; }",
         );
         assert!(message.contains("consumed on every path"), "{message}");
     }
@@ -3251,17 +3510,19 @@ mod linearity_tests {
         // is `val` (§3). The copy at `File` is where it fails, and the
         // message says which copy.
         let message = refused(
-            "fn sink[T](x: T) -> int { return 0; } fn main() -> int { return sink(open(1)); }",
+            "fn sink[T](x: T) -> [] int { return 0; } fn main() -> [] int { return sink(open(1)); }",
         );
         assert!(message.contains("instantiated at `File`"), "{message}");
-        accepted("fn sink[T](x: T) -> int { return 0; } fn main() -> int { return sink(1); }");
+        accepted(
+            "fn sink[T](x: T) -> [] int { return 0; } fn main() -> [] int { return sink(1); }",
+        );
     }
 
     #[test]
     fn destructuring_consumes_the_whole_and_produces_the_parts() {
         accepted(
             "struct Pair { a: File, b: File } \
-             fn main() -> int { let p = Pair { a: open(1), b: open(2) }; \
+             fn main() -> [] int { let p = Pair { a: open(1), b: open(2) }; \
              let Pair { a, b } = p; return close(a) + close(b); }",
         );
     }
@@ -3270,7 +3531,7 @@ mod linearity_tests {
     fn a_destructured_part_carries_its_own_obligation() {
         let message = refused(
             "struct Pair { a: File, b: File } \
-             fn main() -> int { let p = Pair { a: open(1), b: open(2) }; \
+             fn main() -> [] int { let p = Pair { a: open(1), b: open(2) }; \
              let Pair { a, b } = p; return close(a); }",
         );
         assert!(message.contains("consumed on every path"), "{message}");
@@ -3280,7 +3541,7 @@ mod linearity_tests {
     fn a_partial_destructuring_is_refused() {
         let message = refused(
             "struct Pair { a: File, b: File } \
-             fn main() -> int { let p = Pair { a: open(1), b: open(2) }; \
+             fn main() -> [] int { let p = Pair { a: open(1), b: open(2) }; \
              let Pair { a } = p; return close(a); }",
         );
         assert!(message.contains("takes the whole value apart"), "{message}");
@@ -3288,9 +3549,10 @@ mod linearity_tests {
 
     #[test]
     fn destructuring_names_the_declared_fields() {
-        let message = refused("fn main() -> int { let File { handle } = open(1); return handle; }");
+        let message =
+            refused("fn main() -> [] int { let File { handle } = open(1); return handle; }");
         assert!(message.contains("has no field `handle`"), "{message}");
-        let message = refused("fn main() -> int { let Missing { x } = open(1); return x; }");
+        let message = refused("fn main() -> [] int { let Missing { x } = open(1); return x; }");
         assert!(message.contains("is not a struct"), "{message}");
     }
 
@@ -3300,8 +3562,8 @@ mod linearity_tests {
         // parts come out of it.
         let program = check(
             "struct Pair { a: int, b: int } \
-             fn make() -> Pair { return Pair { a: 1, b: 2 }; } \
-             fn main() -> int { let Pair { a, b } = make(); return a + b; }",
+             fn make() -> [] Pair { return Pair { a: 1, b: 2 }; } \
+             fn main() -> [] int { let Pair { a, b } = make(); return a + b; }",
         )
         .expect("accepted");
         let main = program.func(program.find("main").expect("main"));
@@ -3313,7 +3575,7 @@ mod linearity_tests {
     fn an_enum_may_be_declared_res() {
         let message = refused(
             "res enum Handle { Closed, Open(int) } \
-             fn main() -> int { let h = Handle::Closed; return 0; }",
+             fn main() -> [] int { let h = Handle::Closed; return 0; }",
         );
         assert!(message.contains("consumed on every path"), "{message}");
     }
@@ -3330,15 +3592,15 @@ mod linearity_tests {
         // a different rule doing its job.
         accepted(
             "struct C { n: int } \
-             fn main() -> int { let c = C { n: 1 }; borrow c as &r in { return r.n - 1; } }",
+             fn main() -> [] int { let c = C { n: 1 }; borrow c as &r in { return r.n - 1; } }",
         );
     }
 
     #[test]
     fn a_shared_borrow_reads_without_consuming() {
         accepted(
-            "fn size[&p](h: &p File) -> int { return h.fd; } \
-             fn main() -> int { let f = open(1); \
+            "fn size[&p](h: &p File) -> [] int { return h.fd; } \
+             fn main() -> [] int { let f = open(1); \
              borrow f as &r in { let n = size(r); } return close(f); }",
         );
     }
@@ -3348,18 +3610,18 @@ mod linearity_tests {
         // The owned value refuses `f.fd` (a part read without taking the
         // whole apart); the reference is exactly how that read is spelled.
         accepted(
-            "fn main() -> int { let f = open(1); \
+            "fn main() -> [] int { let f = open(1); \
              borrow f as &r in { let n = r.fd; } return close(f); }",
         );
         let message =
-            refused("fn main() -> int { let f = open(1); let n = f.fd; return close(f); }");
+            refused("fn main() -> [] int { let f = open(1); let n = f.fd; return close(f); }");
         assert!(message.contains("a field cannot be read out of it"), "{message}");
     }
 
     #[test]
     fn a_frozen_binding_cannot_be_moved() {
         let message = refused(
-            "fn main() -> int { let f = open(1); \
+            "fn main() -> [] int { let f = open(1); \
              borrow f as &r in { let a = close(f); } return 0; }",
         );
         assert!(message.contains("frozen by an enclosing `borrow`"), "{message}");
@@ -3368,7 +3630,7 @@ mod linearity_tests {
     #[test]
     fn a_frozen_binding_cannot_be_assigned_to() {
         let message = refused(
-            "struct C { n: int } fn main() -> int { var c = C { n: 1 }; \
+            "struct C { n: int } fn main() -> [] int { var c = C { n: 1 }; \
              borrow c as &r in { c = C { n: 2 }; } return 0; }",
         );
         assert!(message.contains("cannot be assigned to"), "{message}");
@@ -3377,7 +3639,7 @@ mod linearity_tests {
     #[test]
     fn a_consumed_value_has_nothing_left_to_borrow() {
         let message = refused(
-            "fn main() -> int { let f = open(1); let a = close(f); \
+            "fn main() -> [] int { let f = open(1); let a = close(f); \
              borrow f as &r in { return a; } }",
         );
         assert!(message.contains("nothing left to borrow"), "{message}");
@@ -3386,7 +3648,7 @@ mod linearity_tests {
     #[test]
     fn the_freeze_lifts_when_the_block_closes() {
         accepted(
-            "fn main() -> int { let f = open(1); \
+            "fn main() -> [] int { let f = open(1); \
              borrow f as &r in { let n = r.fd; } return close(f); }",
         );
     }
@@ -3397,8 +3659,8 @@ mod linearity_tests {
         // thaw the outer one -- which is why the checker counts rather than
         // flags.
         accepted(
-            "fn size[&p](h: &p File) -> int { return h.fd; } \
-             fn main() -> int { let f = open(1); \
+            "fn size[&p](h: &p File) -> [] int { return h.fd; } \
+             fn main() -> [] int { let f = open(1); \
              borrow f as &a in { borrow f as &b in { let n = size(a) + size(b); } \
              let m = size(a); } return close(f); }",
         );
@@ -3407,9 +3669,9 @@ mod linearity_tests {
     #[test]
     fn a_reference_may_not_outlive_its_region() {
         let message = refused(
-            "fn escape[&q](f: File, fallback: &q File) -> &q File { \
+            "fn escape[&q](f: File, fallback: &q File) -> [] &q File { \
              borrow f as &r in { return r; } return fallback; } \
-             fn main() -> int { return 0; }",
+             fn main() -> [] int { return 0; }",
         );
         assert!(message.contains("may not outlive its region"), "{message}");
     }
@@ -3421,7 +3683,7 @@ mod linearity_tests {
         // is checked over every binding and not only over what leaves.
         let message = refused(
             "enum Holder[T] { Empty, Full(T) } \
-             fn main() -> int { let f = open(1); let hole = Holder::Empty; \
+             fn main() -> [] int { let f = open(1); let hole = Holder::Empty; \
              borrow f as &r in { let used: Holder[&r File] = hole; } return close(f); }",
         );
         assert!(message.contains("would hold a reference into `r`"), "{message}");
@@ -3429,18 +3691,19 @@ mod linearity_tests {
 
     #[test]
     fn a_region_must_be_in_scope_where_it_is_written() {
-        let message =
-            refused("fn escape(f: File) -> &r File { return f; } fn main() -> int { return 0; }");
+        let message = refused(
+            "fn escape(f: File) -> [] &r File { return f; } fn main() -> [] int { return 0; }",
+        );
         assert!(message.contains("is not a region in scope"), "{message}");
     }
 
     #[test]
     fn sibling_regions_do_not_outlive_each_other() {
         let message = refused(
-            "fn same[&p](a: &p File, b: &p File) -> int { return 0; } \
-             fn u(x: File, y: File) -> int { \
+            "fn same[&p](a: &p File, b: &p File) -> [] int { return 0; } \
+             fn u(x: File, y: File) -> [] int { \
              borrow x as &a in { borrow y as &b in { let n = same(a, b); } } \
-             return close(x) + close(y); } fn main() -> int { return 0; }",
+             return close(x) + close(y); } fn main() -> [] int { return 0; }",
         );
         assert!(message.contains("does not outlive"), "{message}");
     }
@@ -3448,19 +3711,19 @@ mod linearity_tests {
     #[test]
     fn an_outer_reference_is_usable_in_an_inner_block() {
         accepted(
-            "fn size[&p](h: &p File) -> int { return h.fd; } \
-             fn u(x: File, y: File) -> int { \
+            "fn size[&p](h: &p File) -> [] int { return h.fd; } \
+             fn u(x: File, y: File) -> [] int { \
              borrow x as &a in { borrow y as &b in { let n = size(a) + size(b); } } \
-             return close(x) + close(y); } fn main() -> int { return 0; }",
+             return close(x) + close(y); } fn main() -> [] int { return 0; }",
         );
     }
 
     #[test]
     fn a_declared_outlives_is_checked_at_the_call_site() {
-        const OUTER_FIRST: &str = "fn copy_into[&dst, &src where src <= dst](d: &dst File, s: &src File) -> int { return 0; } \
-             fn u(x: File, y: File) -> int { \
+        const OUTER_FIRST: &str = "fn copy_into[&dst, &src where src <= dst](d: &dst File, s: &src File) -> [] int { return 0; } \
+             fn u(x: File, y: File) -> [] int { \
              borrow x as &outer in { borrow y as &inner in { let n = copy_into(PAIR); } } \
-             return close(x) + close(y); } fn main() -> int { return 0; }";
+             return close(x) + close(y); } fn main() -> [] int { return 0; }";
         // `dst` is the outer block, which does outlive the inner `src`.
         accepted(&OUTER_FIRST.replace("PAIR", "outer, inner"));
         // And the other way round, which does not.
@@ -3471,7 +3734,7 @@ mod linearity_tests {
     #[test]
     fn a_where_clause_names_the_declarations_own_regions() {
         let message = refused(
-            "fn f[&a where b <= a](x: &a File) -> int { return 0; } fn main() -> int { return 0; }",
+            "fn f[&a where b <= a](x: &a File) -> [] int { return 0; } fn main() -> [] int { return 0; }",
         );
         assert!(message.contains("is not a region parameter"), "{message}");
     }
@@ -3479,10 +3742,11 @@ mod linearity_tests {
     #[test]
     fn region_and_type_parameters_do_not_collide() {
         let message =
-            refused("fn f[T, &T](x: T) -> int { return 0; } fn main() -> int { return 0; }");
+            refused("fn f[T, &T](x: T) -> [] int { return 0; } fn main() -> [] int { return 0; }");
         assert!(message.contains("both a type parameter and a region parameter"), "{message}");
-        let message =
-            refused("fn f[&r, &r](x: &r File) -> int { return 0; } fn main() -> int { return 0; }");
+        let message = refused(
+            "fn f[&r, &r](x: &r File) -> [] int { return 0; } fn main() -> [] int { return 0; }",
+        );
         assert!(message.contains("region parameter `r` is declared twice"), "{message}");
     }
 
@@ -3491,7 +3755,7 @@ mod linearity_tests {
         // §5 rule 3. A reference to a `res` value is still `val`, which is
         // sound because the referent is frozen for the whole region.
         accepted(
-            "fn main() -> int { let f = open(1); \
+            "fn main() -> [] int { let f = open(1); \
              borrow f as &r in { let a = r; let b = r; let n = a.fd + b.fd; } \
              return close(f); }",
         );
@@ -3501,7 +3765,7 @@ mod linearity_tests {
     fn a_unique_borrow_locks_its_referent() {
         // §5 rule 2: nothing else may touch it at all, not even a read.
         let message = refused(
-            "struct C { n: int } fn main() -> int { var c = C { n: 1 }; \
+            "struct C { n: int } fn main() -> [] int { var c = C { n: 1 }; \
              borrow mut c as &!r in { let peek = c; } return 0; }",
         );
         assert!(message.contains("nothing else may read it"), "{message}");
@@ -3510,7 +3774,7 @@ mod linearity_tests {
     #[test]
     fn there_is_at_most_one_unique_borrow() {
         let message = refused(
-            "struct C { n: int } fn main() -> int { var c = C { n: 1 }; \
+            "struct C { n: int } fn main() -> [] int { var c = C { n: 1 }; \
              borrow mut c as &!a in { borrow mut c as &!b in { return 0; } } }",
         );
         assert!(message.contains("already uniquely borrowed"), "{message}");
@@ -3519,7 +3783,7 @@ mod linearity_tests {
     #[test]
     fn a_frozen_value_cannot_be_borrowed_uniquely() {
         let message = refused(
-            "struct C { n: int } fn main() -> int { var c = C { n: 1 }; \
+            "struct C { n: int } fn main() -> [] int { var c = C { n: 1 }; \
              borrow c as &s in { borrow mut c as &!u in { return 0; } } }",
         );
         assert!(message.contains("cannot be borrowed uniquely"), "{message}");
@@ -3528,7 +3792,7 @@ mod linearity_tests {
     #[test]
     fn a_unique_borrow_releases_its_lock_at_the_end_of_the_block() {
         accepted(
-            "struct C { n: int } fn main() -> int { var c = C { n: 1 }; \
+            "struct C { n: int } fn main() -> [] int { var c = C { n: 1 }; \
              borrow mut c as &!a in { a.n = 2; } \
              borrow mut c as &!b in { b.n = 3; } return c.n - 3; }",
         );
@@ -3541,7 +3805,7 @@ mod linearity_tests {
         // and reading it back per copy would lose one of them, which is why
         // there is a single buffer per block rather than one per reference.
         accepted(
-            "struct C { n: int } fn main() -> int { var c = C { n: 0 }; \
+            "struct C { n: int } fn main() -> [] int { var c = C { n: 0 }; \
              borrow mut c as &!r in { let a = r; let b = r; a.n = 3; b.n = b.n + 4; } \
              return c.n - 7; }",
         );
@@ -3550,7 +3814,7 @@ mod linearity_tests {
     #[test]
     fn a_shared_reference_may_not_be_written_through() {
         let message = refused(
-            "struct C { n: int } fn main() -> int { var c = C { n: 1 }; \
+            "struct C { n: int } fn main() -> [] int { var c = C { n: 1 }; \
              borrow c as &r in { r.n = 2; } return 0; }",
         );
         assert!(message.contains("shared reference"), "{message}");
@@ -3559,7 +3823,7 @@ mod linearity_tests {
     #[test]
     fn a_field_of_an_owned_local_is_not_a_place() {
         let message = refused(
-            "struct C { n: int } fn main() -> int { var c = C { n: 1 }; c.n = 2; return 0; }",
+            "struct C { n: int } fn main() -> [] int { var c = C { n: 1 }; c.n = 2; return 0; }",
         );
         assert!(message.contains("assign the whole value instead"), "{message}");
     }
@@ -3570,8 +3834,8 @@ mod linearity_tests {
         // silent drop §4 refuses however it is spelled.
         let message = refused(
             "struct Holder { f: File } \
-             fn set[&r](h: &!r Holder) -> int { h.f = open(2); return 0; } \
-             fn main() -> int { return 0; }",
+             fn set[&r](h: &!r Holder) -> [] int { h.f = open(2); return 0; } \
+             fn main() -> [] int { return 0; }",
         );
         assert!(message.contains("cannot be discarded"), "{message}");
     }
@@ -3582,8 +3846,8 @@ mod linearity_tests {
         // is emitted once however many regions call it. A *type* parameter
         // still copies.
         let program = check(
-            "fn size[&p](h: &p File) -> int { return h.fd; } \
-             fn main() -> int { let f = open(1); \
+            "fn size[&p](h: &p File) -> [] int { return h.fd; } \
+             fn main() -> [] int { let f = open(1); \
              borrow f as &a in { let x = size(a); } \
              borrow f as &b in { let y = size(b); } return close(f); }",
         )
@@ -3596,7 +3860,7 @@ mod linearity_tests {
     fn the_linearity_check_says_where() {
         // Every rule here reports at a span the programmer wrote, not at the
         // enclosing function: the trace carries spans precisely so it can.
-        let source = format!("{PRELUDE}fn main() -> int {{ let f = open(1); return 0; }}");
+        let source = format!("{PRELUDE}fn main() -> [] int {{ let f = open(1); return 0; }}");
         let error = lower_src(&source).expect_err("refused");
         assert!(source[error.span.start as usize..error.span.end as usize].starts_with("return"));
     }

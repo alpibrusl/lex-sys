@@ -966,8 +966,8 @@ mod tests {
     use lex_sys_syntax::parse;
     use object::{Object, ObjectSymbol, SymbolKind};
 
-    const SOURCE: &str = "fn shout() -> int { return putchar(33); } \
-                          fn main() -> int { return shout(); }";
+    const SOURCE: &str = "fn shout() -> [io] int { return putchar(33); } \
+                          fn main() -> [io] int { return shout(); }";
 
     /// The two targets to check: this host's architecture, once per binary
     /// format, paired with the symbol prefix that format calls for.
@@ -1048,8 +1048,8 @@ mod tests {
     fn a_borrow_lowers_on_every_target() {
         const BORROWING: &str = "\
             struct Wide { a: int, b: bool, c: int } \
-            fn look[&r](w: &r Wide) -> int { return w.a + w.c; } \
-            fn main() -> int { let w = Wide { a: 1, b: true, c: 2 }; \
+            fn look[&r](w: &r Wide) -> [] int { return w.a + w.c; } \
+            fn main() -> [] int { let w = Wide { a: 1, b: true, c: 2 }; \
             borrow w as &r in { return look(r) - 3; } }";
         for (triple, _) in targets() {
             let ast = parse(BORROWING).expect("should parse");

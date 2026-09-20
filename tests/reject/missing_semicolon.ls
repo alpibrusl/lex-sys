@@ -1,5 +1,5 @@
 //~ ERROR expected `;`
 
-fn main() -> int {
+fn main() -> [] int {
     return 0
 }

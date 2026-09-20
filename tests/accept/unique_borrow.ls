@@ -16,12 +16,12 @@ struct Counter {
 }
 
 // Region-polymorphic over a unique reference, and it writes through it.
-fn bump[&r](c: &!r Counter) -> int {
+fn bump[&r](c: &!r Counter) -> [] int {
     c.n = c.n + c.step;
     return c.n;
 }
 
-fn main() -> int {
+fn main() -> [io] int {
     var c = Counter { n: 1, step: 2 };
 
     borrow mut c as &!r in {

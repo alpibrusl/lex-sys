@@ -12,17 +12,17 @@ res struct File {
     fd: int,
 }
 
-fn open(fd: int) -> File {
+fn open(fd: int) -> [] File {
     return File { fd: fd };
 }
 
-fn close(f: File) -> int {
+fn close(f: File) -> [] int {
     let File { fd } = f;
     return fd;
 }
 
 // Both arms consume: the join agrees that `f` is spent.
-fn either(f: File, flag: bool) -> int {
+fn either(f: File, flag: bool) -> [] int {
     if flag {
         return close(f);
     } else {
@@ -33,7 +33,7 @@ fn either(f: File, flag: bool) -> int {
 
 // One arm consumes and returns; the other falls through with `f` still live
 // and consumes it after. Divergence is what lets these disagree.
-fn take(f: File, flag: bool) -> int {
+fn take(f: File, flag: bool) -> [] int {
     if flag {
         return close(f) + 2;
     }
@@ -46,7 +46,7 @@ enum Slot {
     Full(File),
 }
 
-fn drain(s: Slot) -> int {
+fn drain(s: Slot) -> [] int {
     match s {
         Slot::Empty => {
             return 0;
@@ -57,7 +57,7 @@ fn drain(s: Slot) -> int {
     }
 }
 
-fn main() -> int {
+fn main() -> [io] int {
     putchar(48 + either(open(5), true));
     putchar(48 + either(open(2), false));
     putchar(48 + take(open(5), true));

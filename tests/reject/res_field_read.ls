@@ -6,16 +6,16 @@
 
 res struct File { fd: int }
 
-fn close(f: File) -> int {
+fn close(f: File) -> [] int {
     let File { fd } = f;
     return fd;
 }
 
-fn peek(f: File) -> int {
+fn peek(f: File) -> [] int {
     let n = f.fd;
     return close(f);
 }
 
-fn main() -> int {
+fn main() -> [] int {
     return 0;
 }

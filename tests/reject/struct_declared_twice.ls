@@ -3,6 +3,6 @@
 struct Point { x: int }
 struct Point { y: int }
 
-fn main() -> int {
+fn main() -> [] int {
     return 0;
 }

@@ -1,5 +1,5 @@
 //~ ERROR no `main` function
 
-fn helper() -> int {
+fn helper() -> [] int {
     return 0;
 }

@@ -119,13 +119,16 @@ impl<'a> Parser<'a> {
         }
         self.expect(TokenKind::RParen)?;
 
-        // M0 has no unit type, so every function states a return type.
+        // M0 has no unit type, so every function states a return type, and
+        // §7.2 says it states its effect row too -- `[]` for pure. A type
+        // never starts with `[`, so there is nothing to disambiguate.
         self.expect(TokenKind::Arrow)?;
+        let effects = self.effect_row()?;
         let ret = self.type_expr()?;
 
         let (body, end) = self.block()?;
         Ok(self.ast.push_item(
-            Item::Fn(FnDecl { name, generics, regions, outlives, params, ret, body }),
+            Item::Fn(FnDecl { name, generics, regions, outlives, params, effects, ret, body }),
             start.to(end),
         ))
     }
@@ -201,6 +204,24 @@ impl<'a> Parser<'a> {
                 .err("a type declaration has no region parameters; only a function can take one"));
         }
         Ok(generics)
+    }
+
+    /// `[io, fs]` between `->` and the return type -- §7's effect row.
+    ///
+    /// Labels are plain identifiers here. Which ones mean anything is not the
+    /// parser's question: a label nothing grounds can never be performed, so
+    /// §7.3 refuses it without a registry of legal names.
+    fn effect_row(&mut self) -> Result<Vec<Symbol>, Diagnostic> {
+        self.expect(TokenKind::LBracket)?;
+        let mut effects = Vec::new();
+        while self.peek().kind != TokenKind::RBracket {
+            effects.push(self.ident()?);
+            if !self.eat(TokenKind::Comma) {
+                break;
+            }
+        }
+        self.expect(TokenKind::RBracket)?;
+        Ok(effects)
     }
 
     /// `[T, &r, &s where s <= r]` after a declaration's name, or nothing.
@@ -701,7 +722,7 @@ mod tests {
 
     #[test]
     fn parses_a_function_with_params() {
-        let (ast, decl) = one_fn("fn add(a: int, b: int) -> int { return a + b; }");
+        let (ast, decl) = one_fn("fn add(a: int, b: int) -> [] int { return a + b; }");
         assert_eq!(ast.name_of(decl.name), "add");
         assert_eq!(decl.params.len(), 2);
         assert_eq!(ast.name_of(ast.ty(decl.ret).head().expect("a named type")), "int");
@@ -710,7 +731,7 @@ mod tests {
 
     #[test]
     fn multiplication_binds_tighter_than_addition() {
-        let (ast, decl) = one_fn("fn f() -> int { return 1 + 2 * 3; }");
+        let (ast, decl) = one_fn("fn f() -> [] int { return 1 + 2 * 3; }");
         let Stmt::Return(e) = ast.stmt(decl.body.stmts[0]) else { panic!() };
         let Expr::Binary { op, rhs, .. } = ast.expr(*e) else { panic!() };
         assert_eq!(*op, BinOp::Add);
@@ -720,7 +741,7 @@ mod tests {
     #[test]
     fn logical_operators_bind_loosest_of_all() {
         // `a < b && c < d` is `(a < b) && (c < d)`, and `||` is looser still.
-        let (ast, decl) = one_fn("fn f() -> bool { return 1 < 2 && 3 < 4 || false; }");
+        let (ast, decl) = one_fn("fn f() -> [] bool { return 1 < 2 && 3 < 4 || false; }");
         let Stmt::Return(e) = ast.stmt(decl.body.stmts[0]) else { panic!() };
         let Expr::Binary { op: BinOp::Or, lhs, .. } = ast.expr(*e) else { panic!() };
         let Expr::Binary { op: BinOp::And, lhs: inner, .. } = ast.expr(*lhs) else { panic!() };
@@ -729,7 +750,7 @@ mod tests {
 
     #[test]
     fn comparison_binds_looser_than_arithmetic() {
-        let (ast, decl) = one_fn("fn f() -> int { return 1 + 2 < 4; }");
+        let (ast, decl) = one_fn("fn f() -> [] int { return 1 + 2 < 4; }");
         let Stmt::Return(e) = ast.stmt(decl.body.stmts[0]) else { panic!() };
         let Expr::Binary { op, lhs, .. } = ast.expr(*e) else { panic!() };
         assert_eq!(*op, BinOp::Lt);
@@ -738,7 +759,7 @@ mod tests {
 
     #[test]
     fn subtraction_is_left_associative() {
-        let (ast, decl) = one_fn("fn f() -> int { return 10 - 3 - 2; }");
+        let (ast, decl) = one_fn("fn f() -> [] int { return 10 - 3 - 2; }");
         let Stmt::Return(e) = ast.stmt(decl.body.stmts[0]) else { panic!() };
         let Expr::Binary { op: BinOp::Sub, lhs, .. } = ast.expr(*e) else { panic!() };
         assert!(matches!(ast.expr(*lhs), Expr::Binary { op: BinOp::Sub, .. }));
@@ -746,8 +767,8 @@ mod tests {
 
     #[test]
     fn parentheses_leave_no_node_behind() {
-        let with = parse("fn f() -> int { return (1 + 2); }").unwrap();
-        let without = parse("fn f() -> int { return 1 + 2; }").unwrap();
+        let with = parse("fn f() -> [] int { return (1 + 2); }").unwrap();
+        let without = parse("fn f() -> [] int { return 1 + 2; }").unwrap();
         // Canonical shape: grouping is formatting, so the arenas match exactly.
         assert_eq!(with.exprs, without.exprs);
         assert_eq!(with.stmts, without.stmts);
@@ -755,8 +776,8 @@ mod tests {
 
     #[test]
     fn layout_does_not_change_the_arenas() {
-        let a = parse("fn f() -> int { return 1+2; }").unwrap();
-        let b = parse("fn f()  ->  int {\n    // sum\n    return 1 + 2;\n}\n").unwrap();
+        let a = parse("fn f() -> [] int { return 1+2; }").unwrap();
+        let b = parse("fn f()  -> [] int {\n    // sum\n    return 1 + 2;\n}\n").unwrap();
         assert_eq!(a.exprs, b.exprs);
         assert_eq!(a.stmts, b.stmts);
         assert_eq!(a.items, b.items);
@@ -765,7 +786,7 @@ mod tests {
     #[test]
     fn else_if_becomes_a_nested_block() {
         let (ast, decl) =
-            one_fn("fn f() -> int { if 1 { return 1; } else if 2 { return 2; } return 0; }");
+            one_fn("fn f() -> [] int { if 1 { return 1; } else if 2 { return 2; } return 0; }");
         let Stmt::If { else_block: Some(block), .. } = ast.stmt(decl.body.stmts[0]) else {
             panic!()
         };
@@ -775,28 +796,28 @@ mod tests {
 
     #[test]
     fn assignment_is_a_statement_not_an_expression() {
-        let (ast, decl) = one_fn("fn f() -> int { var x = 1; x = 2; return x; }");
+        let (ast, decl) = one_fn("fn f() -> [] int { var x = 1; x = 2; return x; }");
         assert!(matches!(ast.stmt(decl.body.stmts[1]), Stmt::Assign { .. }));
-        assert!(parse("fn f() -> int { var x = 1; return (x = 2); }").is_err());
+        assert!(parse("fn f() -> [] int { var x = 1; return (x = 2); }").is_err());
     }
 
     #[test]
     fn negative_literals_are_single_nodes() {
-        let (ast, decl) = one_fn("fn f() -> int { return -9223372036854775808; }");
+        let (ast, decl) = one_fn("fn f() -> [] int { return -9223372036854775808; }");
         let Stmt::Return(e) = ast.stmt(decl.body.stmts[0]) else { panic!() };
         assert_eq!(ast.expr(*e), &Expr::Int(i64::MIN));
     }
 
     #[test]
     fn an_oversized_literal_is_refused() {
-        let err = parse("fn f() -> int { return 9223372036854775808; }").unwrap_err();
+        let err = parse("fn f() -> [] int { return 9223372036854775808; }").unwrap_err();
         assert!(err.message.contains("does not fit"), "{}", err.message);
-        assert!(parse("fn f() -> int { return -9223372036854775809; }").is_err());
+        assert!(parse("fn f() -> [] int { return -9223372036854775809; }").is_err());
     }
 
     #[test]
     fn underscores_separate_digits() {
-        let (ast, decl) = one_fn("fn f() -> int { return 1_000_000; }");
+        let (ast, decl) = one_fn("fn f() -> [] int { return 1_000_000; }");
         let Stmt::Return(e) = ast.stmt(decl.body.stmts[0]) else { panic!() };
         assert_eq!(ast.expr(*e), &Expr::Int(1_000_000));
     }
@@ -806,14 +827,14 @@ mod tests {
         // The parser does not know which types exist. `i32` is a perfectly good
         // type *expression*; that it names nothing is for the checker to say,
         // which is also the only place that knows what the names mean.
-        let (ast, decl) = one_fn("fn f() -> i32 { return 0; }");
+        let (ast, decl) = one_fn("fn f() -> [] i32 { return 0; }");
         assert_eq!(ast.name_of(ast.ty(decl.ret).head().expect("a named type")), "i32");
-        assert_eq!(ast.type_span(decl.ret), crate::span::Span::new(10, 13));
+        assert_eq!(ast.type_span(decl.ret), crate::span::Span::new(13, 16));
     }
 
     #[test]
     fn a_type_may_take_arguments() {
-        let (ast, decl) = one_fn("fn f() -> Pair[int, bool] { return 0; }");
+        let (ast, decl) = one_fn("fn f() -> [] Pair[int, bool] { return 0; }");
         let ret = ast.ty(decl.ret);
         assert_eq!(ast.name_of(ret.head().expect("a named type")), "Pair");
         let args: Vec<&str> =
@@ -823,7 +844,7 @@ mod tests {
 
     #[test]
     fn booleans_are_literals() {
-        let (ast, decl) = one_fn("fn f() -> bool { return !true; }");
+        let (ast, decl) = one_fn("fn f() -> [] bool { return !true; }");
         let Stmt::Return(e) = ast.stmt(decl.body.stmts[0]) else { panic!() };
         let Expr::Unary { op: UnOp::Not, operand } = ast.expr(*e) else { panic!() };
         assert_eq!(ast.expr(*operand), &Expr::Bool(true));
@@ -831,7 +852,7 @@ mod tests {
 
     #[test]
     fn an_omitted_annotation_is_left_for_the_checker() {
-        let (ast, decl) = one_fn("fn f() -> int { let x: int = 1; let y = 2; return x + y; }");
+        let (ast, decl) = one_fn("fn f() -> [] int { let x: int = 1; let y = 2; return x + y; }");
         let Stmt::Let { ty: Some(_), .. } = ast.stmt(decl.body.stmts[0]) else { panic!() };
         let Stmt::Let { ty: None, .. } = ast.stmt(decl.body.stmts[1]) else { panic!() };
     }
@@ -843,13 +864,13 @@ mod tests {
 
     #[test]
     fn an_unclosed_block_is_refused() {
-        let err = parse("fn f() -> int { return 0;").unwrap_err();
+        let err = parse("fn f() -> [] int { return 0;").unwrap_err();
         assert!(err.message.contains("end of file"), "{}", err.message);
     }
 
     #[test]
     fn a_trailing_comma_in_a_call_is_allowed() {
-        let (ast, decl) = one_fn("fn f() -> int { return g(1, 2,); }");
+        let (ast, decl) = one_fn("fn f() -> [] int { return g(1, 2,); }");
         let Stmt::Return(e) = ast.stmt(decl.body.stmts[0]) else { panic!() };
         let Expr::Call { args, .. } = ast.expr(*e) else { panic!() };
         assert_eq!(args.len(), 2);
@@ -871,7 +892,7 @@ mod tests {
     #[test]
     fn parses_a_struct_literal_and_field_access() {
         let (ast, decl) =
-            one_fn("fn f() -> int { let p = Point { x: 1, y: 2 }; return p.x + p.y; }");
+            one_fn("fn f() -> [] int { let p = Point { x: 1, y: 2 }; return p.x + p.y; }");
         let Stmt::Let { value, .. } = ast.stmt(decl.body.stmts[0]) else { panic!() };
         let Expr::StructLit { name, fields } = ast.expr(*value) else { panic!() };
         assert_eq!(ast.name_of(*name), "Point");
@@ -886,7 +907,7 @@ mod tests {
     #[test]
     fn field_access_binds_tighter_than_any_operator() {
         // `-p.x` negates the field, not the struct.
-        let (ast, decl) = one_fn("fn f() -> int { return -p.x; }");
+        let (ast, decl) = one_fn("fn f() -> [] int { return -p.x; }");
         let Stmt::Return(e) = ast.stmt(decl.body.stmts[0]) else { panic!() };
         let Expr::Unary { op: UnOp::Neg, operand } = ast.expr(*e) else { panic!() };
         assert!(matches!(ast.expr(*operand), Expr::Field { .. }));
@@ -895,19 +916,20 @@ mod tests {
     #[test]
     fn a_condition_does_not_swallow_the_body_as_a_struct_literal() {
         // `if p { }` is a condition and a body, not a literal `p { }`.
-        let (ast, decl) = one_fn("fn f() -> int { if p { return 1; } return 0; }");
+        let (ast, decl) = one_fn("fn f() -> [] int { if p { return 1; } return 0; }");
         let Stmt::If { cond, .. } = ast.stmt(decl.body.stmts[0]) else { panic!() };
         assert!(matches!(ast.expr(*cond), Expr::Name(_)));
 
         // Parentheses are how you say you meant the literal.
-        let (ast, decl) = one_fn("fn f() -> int { if (P { b: true }).b { return 1; } return 0; }");
+        let (ast, decl) =
+            one_fn("fn f() -> [] int { if (P { b: true }).b { return 1; } return 0; }");
         let Stmt::If { cond, .. } = ast.stmt(decl.body.stmts[0]) else { panic!() };
         assert!(matches!(ast.expr(*cond), Expr::Field { .. }));
     }
 
     #[test]
     fn a_struct_literal_is_allowed_again_inside_brackets() {
-        let (ast, decl) = one_fn("fn f() -> int { if g(P { x: 1 }) { return 1; } return 0; }");
+        let (ast, decl) = one_fn("fn f() -> [] int { if g(P { x: 1 }) { return 1; } return 0; }");
         let Stmt::If { cond, .. } = ast.stmt(decl.body.stmts[0]) else { panic!() };
         let Expr::Call { args, .. } = ast.expr(*cond) else { panic!() };
         assert!(matches!(ast.expr(args[0]), Expr::StructLit { .. }));
@@ -935,7 +957,7 @@ mod tests {
 
     #[test]
     fn a_mode_belongs_to_a_type_declaration() {
-        let err = parse("res fn f() -> int { return 0; }").unwrap_err();
+        let err = parse("res fn f() -> [] int { return 0; }").unwrap_err();
         assert!(err.message.contains("expected `struct` or `enum`"), "{}", err.message);
     }
 
@@ -950,7 +972,7 @@ mod tests {
 
     #[test]
     fn a_let_may_destructure() {
-        let (ast, decl) = one_fn("fn f(p: P) -> int { let P { x, y } = p; return x + y; }");
+        let (ast, decl) = one_fn("fn f(p: P) -> [] int { let P { x, y } = p; return x + y; }");
         let Stmt::Destructure { struct_name, fields, value } = ast.stmt(decl.body.stmts[0]) else {
             panic!("expected a destructuring `let`")
         };
@@ -962,13 +984,13 @@ mod tests {
 
     #[test]
     fn a_destructuring_let_is_not_a_var() {
-        let err = parse("fn f(p: P) -> int { var P { x } = p; return x; }").unwrap_err();
+        let err = parse("fn f(p: P) -> [] int { var P { x } = p; return x; }").unwrap_err();
         assert!(err.message.contains("write `let`, not `var`"), "{}", err.message);
     }
 
     #[test]
     fn an_ordinary_let_is_still_an_ordinary_let() {
-        let (ast, decl) = one_fn("fn f() -> int { let x = P { a: 1 }; return 0; }");
+        let (ast, decl) = one_fn("fn f() -> [] int { let x = P { a: 1 }; return 0; }");
         assert!(matches!(ast.stmt(decl.body.stmts[0]), Stmt::Let { .. }));
     }
 
@@ -976,7 +998,7 @@ mod tests {
 
     #[test]
     fn a_reference_type_names_its_region_first() {
-        let (ast, decl) = one_fn("fn f(s: &r Bytes) -> int { return 0; }");
+        let (ast, decl) = one_fn("fn f(s: &r Bytes) -> [] int { return 0; }");
         let TypeExpr::Ref { unique, region, inner } = ast.ty(decl.params[0].ty) else {
             panic!("expected a reference type")
         };
@@ -987,14 +1009,14 @@ mod tests {
 
     #[test]
     fn a_unique_reference_wears_a_bang() {
-        let (ast, decl) = one_fn("fn f(s: &!r Bytes) -> int { return 0; }");
+        let (ast, decl) = one_fn("fn f(s: &!r Bytes) -> [] int { return 0; }");
         let TypeExpr::Ref { unique, .. } = ast.ty(decl.params[0].ty) else { panic!() };
         assert!(unique);
     }
 
     #[test]
     fn references_nest() {
-        let (ast, decl) = one_fn("fn f(s: &a &b int) -> int { return 0; }");
+        let (ast, decl) = one_fn("fn f(s: &a &b int) -> [] int { return 0; }");
         let TypeExpr::Ref { region, inner, .. } = ast.ty(decl.params[0].ty) else { panic!() };
         assert_eq!(ast.name_of(*region), "a");
         let TypeExpr::Ref { region, .. } = ast.ty(*inner) else { panic!("expected a reference") };
@@ -1003,7 +1025,7 @@ mod tests {
 
     #[test]
     fn a_region_parameter_wears_its_ampersand_at_the_binder() {
-        let (ast, decl) = one_fn("fn f[T, &r](x: T, s: &r T) -> int { return 0; }");
+        let (ast, decl) = one_fn("fn f[T, &r](x: T, s: &r T) -> [] int { return 0; }");
         let types: Vec<&str> = decl.generics.iter().map(|g| ast.name_of(*g)).collect();
         let regions: Vec<&str> = decl.regions.iter().map(|g| ast.name_of(*g)).collect();
         assert_eq!(types, ["T"]);
@@ -1014,7 +1036,7 @@ mod tests {
     fn a_region_parameter_nobody_uses_is_still_a_region() {
         // The point of marking the binder: this declaration is unambiguous
         // even though no parameter mentions `r`.
-        let (ast, decl) = one_fn("fn f[&r]() -> int { return 0; }");
+        let (ast, decl) = one_fn("fn f[&r]() -> [] int { return 0; }");
         assert_eq!(decl.regions.len(), 1);
         assert_eq!(ast.name_of(decl.regions[0]), "r");
         assert!(decl.generics.is_empty());
@@ -1023,7 +1045,7 @@ mod tests {
     #[test]
     fn a_where_clause_declares_an_outlives_pair() {
         let (ast, decl) = one_fn(
-            "fn f[&dst, &src where src <= dst](d: &dst int, s: &src int) -> int { return 0; }",
+            "fn f[&dst, &src where src <= dst](d: &dst int, s: &src int) -> [] int { return 0; }",
         );
         let pairs: Vec<(&str, &str)> =
             decl.outlives.iter().map(|(a, b)| (ast.name_of(*a), ast.name_of(*b))).collect();
@@ -1038,7 +1060,7 @@ mod tests {
 
     #[test]
     fn a_borrow_statement_binds_a_region_and_a_reference() {
-        let (ast, decl) = one_fn("fn f(x: int) -> int { borrow x as &r in { return 0; } }");
+        let (ast, decl) = one_fn("fn f(x: int) -> [] int { borrow x as &r in { return 0; } }");
         let Stmt::Borrow { value, unique, region, body } = ast.stmt(decl.body.stmts[0]) else {
             panic!("expected a borrow")
         };
@@ -1050,7 +1072,7 @@ mod tests {
 
     #[test]
     fn borrow_mut_binds_a_unique_reference() {
-        let (ast, decl) = one_fn("fn f(x: int) -> int { borrow mut x as &!r in { return 0; } }");
+        let (ast, decl) = one_fn("fn f(x: int) -> [] int { borrow mut x as &!r in { return 0; } }");
         let Stmt::Borrow { unique, .. } = ast.stmt(decl.body.stmts[0]) else { panic!() };
         assert!(unique);
     }
@@ -1059,9 +1081,10 @@ mod tests {
     fn the_two_halves_of_a_borrow_must_agree() {
         // Writing `mut` in one place and not the other is a typo, not a
         // shorthand, so neither spelling is quietly preferred.
-        let err = parse("fn f(x: int) -> int { borrow mut x as &r in { return 0; } }").unwrap_err();
+        let err =
+            parse("fn f(x: int) -> [] int { borrow mut x as &r in { return 0; } }").unwrap_err();
         assert!(err.message.contains("write `as &!r`"), "{}", err.message);
-        let err = parse("fn f(x: int) -> int { borrow x as &!r in { return 0; } }").unwrap_err();
+        let err = parse("fn f(x: int) -> [] int { borrow x as &!r in { return 0; } }").unwrap_err();
         assert!(err.message.contains("write `borrow mut`"), "{}", err.message);
     }
 
@@ -1069,13 +1092,13 @@ mod tests {
     fn an_assignment_target_is_an_expression() {
         // Decided by the `=` after the fact rather than by lookahead, which
         // is what lets the left side grow without the parser growing with it.
-        let (ast, decl) = one_fn("fn f(p: P) -> int { p.x = 1; return 0; }");
+        let (ast, decl) = one_fn("fn f(p: P) -> [] int { p.x = 1; return 0; }");
         let Stmt::Assign { place, .. } = ast.stmt(decl.body.stmts[0]) else {
             panic!("expected an assignment")
         };
         assert!(matches!(ast.expr(*place), Expr::Field { .. }));
 
-        let (ast, decl) = one_fn("fn f() -> int { var x = 0; x = 1; return x; }");
+        let (ast, decl) = one_fn("fn f() -> [] int { var x = 0; x = 1; return x; }");
         let Stmt::Assign { place, .. } = ast.stmt(decl.body.stmts[1]) else { panic!() };
         assert!(matches!(ast.expr(*place), Expr::Name(_)));
     }
@@ -1083,13 +1106,44 @@ mod tests {
     #[test]
     fn a_comparison_is_still_an_expression_statement() {
         // `==` is one token, so it never reaches the assignment branch.
-        let (ast, decl) = one_fn("fn f(a: int) -> int { a == 1; return 0; }");
+        let (ast, decl) = one_fn("fn f(a: int) -> [] int { a == 1; return 0; }");
         assert!(matches!(ast.stmt(decl.body.stmts[0]), Stmt::Expr(_)));
+    }
+
+    // ---- effect rows (`docs/linearity-and-effects.md` §7) ---------------
+
+    #[test]
+    fn a_signature_carries_its_effect_row() {
+        let (ast, decl) = one_fn("fn f() -> [io, fs] int { return 0; }");
+        let labels: Vec<&str> = decl.effects.iter().map(|e| ast.name_of(*e)).collect();
+        assert_eq!(labels, ["io", "fs"], "the parser keeps what was written");
+    }
+
+    #[test]
+    fn an_empty_row_is_how_a_signature_says_pure() {
+        let (_, decl) = one_fn("fn f() -> [] int { return 0; }");
+        assert!(decl.effects.is_empty());
+    }
+
+    #[test]
+    fn a_row_is_required() {
+        // §7.2: an absent row would be an inferred one.
+        let err = parse("fn f() -> int { return 0; }").unwrap_err();
+        assert!(err.message.contains("expected `[`"), "{}", err.message);
+    }
+
+    #[test]
+    fn a_row_does_not_collide_with_a_generic_return_type() {
+        // `-> [] Opt[int]` parses as an empty row and a generic type; no type
+        // starts with `[`, so there is nothing to disambiguate.
+        let (ast, decl) = one_fn("fn f() -> [] Opt[int] { return g(); }");
+        assert!(decl.effects.is_empty());
+        assert_eq!(ast.name_of(ast.ty(decl.ret).head().unwrap()), "Opt");
     }
 
     #[test]
     fn a_lone_ampersand_is_not_a_conjunction() {
-        let (ast, decl) = one_fn("fn f(a: bool, b: bool) -> bool { return a && b; }");
+        let (ast, decl) = one_fn("fn f(a: bool, b: bool) -> [] bool { return a && b; }");
         let Stmt::Return(value) = ast.stmt(decl.body.stmts[0]) else { panic!() };
         assert!(matches!(ast.expr(*value), Expr::Binary { op: BinOp::And, .. }));
     }

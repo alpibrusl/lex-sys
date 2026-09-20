@@ -9,18 +9,18 @@
 
 res struct File { fd: int }
 
-fn close(f: File) -> int {
+fn close(f: File) -> [] int {
     let File { fd } = f;
     return fd;
 }
 
-fn disagree(f: File, flag: bool) -> int {
+fn disagree(f: File, flag: bool) -> [] int {
     if flag {
         let fd = close(f);
     }
     return 0;
 }
 
-fn main() -> int {
+fn main() -> [] int {
     return 0;
 }

@@ -2,6 +2,6 @@
 
 enum List { Nil, Cons(int, List) }
 
-fn main() -> int {
+fn main() -> [] int {
     return 0;
 }

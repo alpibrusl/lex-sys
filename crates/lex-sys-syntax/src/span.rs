@@ -115,8 +115,8 @@ mod tests {
 
     #[test]
     fn render_points_at_the_span() {
-        let f = SourceFile::new("t.ls", "fn main() -> int {\n    let x = ;\n}\n");
-        let d = Diagnostic::new("expected an expression", Span::new(31, 32));
+        let f = SourceFile::new("t.ls", "fn main() -> [] int {\n    let x = ;\n}\n");
+        let d = Diagnostic::new("expected an expression", Span::new(34, 35));
         let out = d.render(&f);
         assert!(out.starts_with("t.ls:2:13: error: expected an expression"), "{out}");
         assert!(out.ends_with("^"), "{out}");

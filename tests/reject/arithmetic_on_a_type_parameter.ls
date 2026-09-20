@@ -2,10 +2,10 @@
 // instantiation so far might be.
 //~ ERROR expected `T`, found `int`
 
-fn bad[T](x: T) -> T {
+fn bad[T](x: T) -> [] T {
     return x + 1;
 }
 
-fn main() -> int {
+fn main() -> [] int {
     return 0;
 }

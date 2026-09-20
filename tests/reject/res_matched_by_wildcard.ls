@@ -10,7 +10,7 @@ enum Slot {
     Full(File),
 }
 
-fn size(s: Slot) -> int {
+fn size(s: Slot) -> [] int {
     match s {
         Slot::Empty => {
             return 0;
@@ -21,6 +21,6 @@ fn size(s: Slot) -> int {
     }
 }
 
-fn main() -> int {
+fn main() -> [] int {
     return 0;
 }

@@ -6,7 +6,7 @@
 
 struct Counter { n: int }
 
-fn main() -> int {
+fn main() -> [] int {
     var c = Counter { n: 1 };
     borrow c as &r in {
         c = Counter { n: 2 };

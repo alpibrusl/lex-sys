@@ -2,10 +2,10 @@
 
 enum Shape { Rect(int, int) }
 
-fn make() -> Shape {
+fn make() -> [] Shape {
     return Shape::Rect(1);
 }
 
-fn main() -> int {
+fn main() -> [] int {
     return 0;
 }

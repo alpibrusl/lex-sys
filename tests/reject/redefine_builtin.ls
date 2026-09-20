@@ -1,9 +1,9 @@
 //~ ERROR builtin
 
-fn putchar(c: int) -> int {
+fn putchar(c: int) -> [] int {
     return c;
 }
 
-fn main() -> int {
+fn main() -> [] int {
     return 0;
 }

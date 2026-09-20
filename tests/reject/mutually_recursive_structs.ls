@@ -3,6 +3,6 @@
 struct A { b: B }
 struct B { a: A }
 
-fn main() -> int {
+fn main() -> [] int {
     return 0;
 }

@@ -8,7 +8,7 @@ struct Counter {
     n: int,
 }
 
-fn main() -> int {
+fn main() -> [] int {
     var c = Counter { n: 1 };
     borrow mut c as &!a in {
         borrow mut c as &!b in {

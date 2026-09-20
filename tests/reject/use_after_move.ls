@@ -4,16 +4,16 @@
 
 res struct File { fd: int }
 
-fn close(f: File) -> int {
+fn close(f: File) -> [] int {
     let File { fd } = f;
     return fd;
 }
 
-fn after_move(f: File) -> int {
+fn after_move(f: File) -> [] int {
     let first = close(f);
     return close(f);
 }
 
-fn main() -> int {
+fn main() -> [] int {
     return 0;
 }

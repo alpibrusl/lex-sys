@@ -2,6 +2,6 @@
 
 struct Point { x: int, x: bool }
 
-fn main() -> int {
+fn main() -> [] int {
     return 0;
 }

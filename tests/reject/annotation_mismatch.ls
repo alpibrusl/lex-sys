@@ -1,6 +1,6 @@
 //~ ERROR expected `int`, found `bool`
 
-fn main() -> int {
+fn main() -> [] int {
     let x: int = true;
     return x;
 }

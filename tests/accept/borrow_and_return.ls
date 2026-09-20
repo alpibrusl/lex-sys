@@ -13,22 +13,22 @@ res struct File {
     size: int,
 }
 
-fn open(fd: int) -> File {
+fn open(fd: int) -> [] File {
     return File { fd: fd, size: fd * 2 };
 }
 
-fn close(f: File) -> int {
+fn close(f: File) -> [] int {
     let File { fd, size } = f;
     return fd + size;
 }
 
 // Region-polymorphic, with the region written (§5.1). The caller's region is
 // substituted at the call site: one name, one assignment.
-fn size_of[&r](handle: &r File) -> int {
+fn size_of[&r](handle: &r File) -> [] int {
     return handle.size;
 }
 
-fn main() -> int {
+fn main() -> [io] int {
     let f = open(4);
 
     borrow f as &r in {

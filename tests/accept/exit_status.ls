@@ -2,6 +2,6 @@
 // carries. Nothing is printed.
 //~ EXIT 7
 
-fn main() -> int {
+fn main() -> [] int {
     return 7;
 }
