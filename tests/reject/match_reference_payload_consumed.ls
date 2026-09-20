@@ -27,7 +27,9 @@ fn steal[&h, &l](heap: &!h Heap, list: &l List) -> [heap] int {
 }
 
 fn main(world: World) -> [] int {
-    let Split { io, ffi, fs, heap } = split(world);
+    let Split { io, ffi, fs, heap, args } = split(world);
+    // This program reads no arguments, so that authority ends here.
+    release(args);
     release(heap);
     release(fs);
     release(ffi);

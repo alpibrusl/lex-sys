@@ -158,6 +158,14 @@ const ARENA_CHUNK: i64 = 64 * 1024;
 /// a function called `write` or `exit` without colliding with libc.
 const PREFIX: &str = "lexs_";
 
+/// Where `main` stashes what the runtime handed it
+/// (`docs/arguments.md` §3).
+///
+/// Written once, before any lex-sys code runs, and never again. `arg_count`
+/// and `arg` are the only readers.
+const ARGC_GLOBAL: &str = "lexs_argc";
+const ARGV_GLOBAL: &str = "lexs_argv";
+
 #[derive(Debug)]
 pub struct CodegenError(String);
 
@@ -347,8 +355,15 @@ impl<'a> Emitter<'a> {
         self.emit_c_main(entry_id, &declared, &mut ctx, &mut fb_ctx)
     }
 
-    /// Synthesise `int main(void)`, which calls the lex-sys entry function and
-    /// truncates its result to the platform's exit status.
+    /// Synthesise `int main(int argc, char **argv)`, which stashes what the
+    /// runtime handed over, calls the lex-sys entry function and truncates
+    /// its result to the platform's exit status.
+    ///
+    /// `docs/arguments.md` §3: the two globals are where `arg_count` and
+    /// `arg` read from. They are written exactly once, before any lex-sys
+    /// code runs, and never again — which is why a program cannot write
+    /// through an argument and why the bytes it reads are the bytes it was
+    /// started with.
     fn emit_c_main(
         &mut self,
         entry: IrFuncId,
@@ -356,21 +371,50 @@ impl<'a> Emitter<'a> {
         ctx: &mut Context,
         fb_ctx: &mut FunctionBuilderContext,
     ) -> Result<(), CodegenError> {
+        let pointer = self.module.isa().pointer_type();
         let mut sig = self.module.make_signature();
         sig.call_conv = self.module.isa().default_call_conv();
+        sig.params.push(AbiParam::new(types::I32));
+        sig.params.push(AbiParam::new(pointer));
         sig.returns.push(AbiParam::new(types::I32));
         let main = self
             .module
             .declare_function("main", Linkage::Export, &sig)
             .map_err(|e| CodegenError(e.to_string()))?;
 
+        // Defined here rather than on first use, because `main` is the one
+        // function guaranteed to exist and the only one that can fill them.
+        for name in [ARGC_GLOBAL, ARGV_GLOBAL] {
+            let id = self
+                .module
+                .declare_data(name, Linkage::Local, true, false)
+                .map_err(|e| CodegenError(e.to_string()))?;
+            let mut description = DataDescription::new();
+            description.define_zeroinit(RETURN_SLOT_STRIDE as usize);
+            self.module.define_data(id, &description).map_err(|e| CodegenError(e.to_string()))?;
+        }
+
         ctx.clear();
         ctx.func.signature = sig;
         {
             let mut builder = FunctionBuilder::new(&mut ctx.func, fb_ctx);
             let block = builder.create_block();
+            builder.append_block_params_for_function_params(block);
             builder.switch_to_block(block);
             builder.seal_block(block);
+
+            let argc = builder.block_params(block)[0];
+            let argv = builder.block_params(block)[1];
+            let argc = builder.ins().sextend(types::I64, argc);
+            for (name, value) in [(ARGC_GLOBAL, argc), (ARGV_GLOBAL, argv)] {
+                let id = self
+                    .module
+                    .declare_data(name, Linkage::Local, true, false)
+                    .map_err(|e| CodegenError(e.to_string()))?;
+                let global = self.module.declare_data_in_func(id, builder.func);
+                let address = builder.ins().global_value(pointer, global);
+                builder.ins().store(MemFlags::trusted(), value, address, 0);
+            }
 
             let callee = self.module.declare_func_in_func(declared[entry.0 as usize], builder.func);
             let call = builder.ins().call(callee, &[]);
@@ -897,6 +941,24 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
         self.builder.switch_to_block(merge);
         self.builder.seal_block(merge);
         vec![self.builder.block_params(merge)[0]]
+    }
+
+    /// The address of one of `main`'s two globals
+    /// (`docs/arguments.md` §3).
+    fn global(&mut self, name: &str) -> Value {
+        let pointer = self.pointer;
+        let id = self
+            .module
+            .declare_data(name, Linkage::Local, true, false)
+            .expect("the entry point declared this global consistently");
+        let global = self.module.declare_data_in_func(id, self.builder.func);
+        self.builder.ins().global_value(pointer, global)
+    }
+
+    /// `argc`, as the runtime handed it to `main`.
+    fn argc(&mut self) -> Value {
+        let at = self.global(ARGC_GLOBAL);
+        self.builder.ins().load(types::I64, MemFlags::trusted(), at, 0)
     }
 
     /// A string literal: its bytes into read-only data, and the two leaves
@@ -1631,6 +1693,44 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
                     Callee::Builtin(Builtin::Box | Builtin::Unbox | Builtin::Contents) => {
                         unreachable!("a heap operation is lowered as its own node")
                     }
+                    // `docs/arguments.md` §3: `argc`, exactly as the
+                    // runtime gave it.
+                    Callee::Builtin(Builtin::ArgCount) => vec![self.argc()],
+                    // One argument, as a pointer and a length. C hands over
+                    // a NUL-terminated string; the terminator is an
+                    // artifact of that interface rather than part of the
+                    // value, so the length is computed and the NUL is left
+                    // behind (§3.2).
+                    Callee::Builtin(Builtin::Arg) => {
+                        let pointer = self.pointer;
+                        // The capability carries no leaves, so the index is
+                        // the only argument that arrived.
+                        let index = args[0];
+
+                        // Outside `0 .. argc` traps, like indexing past a
+                        // slice: it is the same mistake and gets the same
+                        // answer. One unsigned comparison covers both ends.
+                        let count = self.argc();
+                        let past = self.builder.ins().icmp(
+                            IntCC::UnsignedGreaterThanOrEqual,
+                            index,
+                            count,
+                        );
+                        self.builder.ins().trapnz(past, TrapCode::HEAP_OUT_OF_BOUNDS);
+
+                        let argv = self.global(ARGV_GLOBAL);
+                        let argv = self.builder.ins().load(pointer, MemFlags::trusted(), argv, 0);
+                        let offset =
+                            self.builder.ins().imul_imm(index, i64::from(RETURN_SLOT_STRIDE));
+                        let slot = self.builder.ins().iadd(argv, offset);
+                        let text = self.builder.ins().load(pointer, MemFlags::trusted(), slot, 0);
+
+                        let strlen = self.libc_fn("strlen", &[pointer], &[types::I64]);
+                        let strlen = self.module.declare_func_in_func(strlen, self.builder.func);
+                        let call = self.builder.ins().call(strlen, &[text]);
+                        let length = self.builder.inst_results(call)[0];
+                        vec![text, length]
+                    }
                     Callee::Builtin(Builtin::PutChar) => {
                         let f = self.module.declare_func_in_func(self.putchar, self.builder.func);
                         let arg = self.builder.ins().ireduce(types::I32, args[0]);
@@ -1727,7 +1827,7 @@ mod tests {
 
     const SOURCE: &str = "fn shout[&i](io: &!i Io) -> [io] int { return putchar(io, 33); } \
                           fn main(world: World) -> [] int { \
-                              let Split { io, ffi, fs, heap } = split(world); release(heap); release(fs); release(ffi); \
+                              let Split { io, ffi, fs, heap, args } = split(world); release(args); release(heap); release(fs); release(ffi); \
                               var status = 0; \
                               borrow mut io as &!i in { status = shout(i); } \
                               release(io); \
@@ -1847,7 +1947,7 @@ mod tests {
         const FOREIGN: &str = "\
             extern fn labs[&f](ffi: &f Ffi(\"libc\"), n: int) -> [ffi(\"libc\")] int; \
             fn main(world: World) -> [] int { \
-                let Split { io, ffi, fs, heap } = split(world); release(heap); release(fs); release(io); \
+                let Split { io, ffi, fs, heap, args } = split(world); release(args); release(heap); release(fs); release(io); \
                 let libc = narrow(ffi, \"libc\"); var n = 0; \
                 borrow libc as &f in { n = labs(f, 0 - 7); } \
                 release(libc); return n - 7; \

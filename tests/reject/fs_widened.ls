@@ -9,7 +9,9 @@
 // asking for the directory its siblings live in, and the answer is no.
 
 fn main(world: World) -> [] int {
-    let Split { io, ffi, fs, heap } = split(world);
+    let Split { io, ffi, fs, heap, args } = split(world);
+    // This program reads no arguments, so that authority ends here.
+    release(args);
     // This program allocates nothing on the heap, so that authority ends here.
     release(heap);
     release(ffi);

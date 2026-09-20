@@ -40,7 +40,9 @@ fn double(n: int) -> [] int {
 fn main(world: World) -> [] int {
     // The one place authority enters a program. `split` consumes the
     // `World`: there is exactly one, and it is spent here.
-    let Split { io, ffi, fs, heap } = split(world);
+    let Split { io, ffi, fs, heap, args } = split(world);
+    // This program reads no arguments, so that authority ends here.
+    release(args);
     // This program touches no files, so that authority ends here.
     release(heap);
     release(fs);

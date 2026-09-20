@@ -78,8 +78,17 @@ impl Diagnostic {
     pub fn render(&self, file: &SourceFile) -> String {
         let (line, col) = file.line_col(self.span.start);
         let text = file.line_text(line);
-        let width = (self.span.end.saturating_sub(self.span.start)).max(1) as usize;
-        let pad = " ".repeat(col.saturating_sub(1) as usize);
+        let start = col.saturating_sub(1) as usize;
+        // A span may cover several lines -- a whole function signature, say
+        // -- while the caret sits under only the first of them. So it stops
+        // at that line's end rather than running on past it: underlining a
+        // multi-line signature with several hundred carets says nothing a
+        // reader can use.
+        // Counted in characters, because `line_col` counts the column that
+        // way and the two have to agree.
+        let room = text.chars().count().saturating_sub(start).max(1);
+        let width = ((self.span.end.saturating_sub(self.span.start)).max(1) as usize).min(room);
+        let pad = " ".repeat(start);
         format!(
             "{}:{}:{}: error: {}\n    {}\n    {}{}",
             file.path,
@@ -96,6 +105,17 @@ impl Diagnostic {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_caret_stops_at_the_end_of_its_line() {
+        // A multi-line span -- a wrapped function signature is the usual
+        // one -- underlines the first line and stops there.
+        let file = SourceFile::new("p.ls", "fn wide(\n    a: int,\n) -> [] int { return a; }\n");
+        let whole = Span::new(0, file.text.len() as u32);
+        let rendered = Diagnostic::new("nope", whole).render(&file);
+        let carets = rendered.lines().next_back().expect("a caret line").trim();
+        assert_eq!(carets.len(), "fn wide(".len(), "{rendered}");
+    }
 
     #[test]
     fn line_col_is_one_based() {

@@ -93,6 +93,14 @@ and requires every hash to survive.
 > result back through a `&!r` out-parameter. That is
 > [`docs/reading-references.md`](docs/reading-references.md).
 >
+> **And it reads its command line.** `Args` is the sixth capability, and
+> the interesting part is *why* it is one: arguments grant no power, so
+> this is not about containment. It is about visibility — a function whose
+> behaviour depends on the command line should say so in its type, and
+> ambient argv would let one eight frames down branch on `--force` with
+> nothing in any signature admitting it. `examples/lines.ls` is a real CLI
+> tool now. That is [`docs/arguments.md`](docs/arguments.md).
+>
 > **Still missing:** sharing — §9's `Rc` and `Gen`, which are libraries and
 > need a module system first. Do not mistake this for a usable language yet.
 
@@ -183,6 +191,7 @@ cargo run -p lex-sys -- run examples/tour.ls
 # M3 file: on disk (7)
 # M3 heap: 3 1 4 -> 8 (freed)
 # M3 reading: 8 3 8 (kept)
+# M3 args: 1 (named)
 ```
 
 `examples/tour.ls` is the shortest honest answer to "what can this language
@@ -220,20 +229,30 @@ cargo run -p lex-sys -- run examples/tree.ls
 # sum 37 count 7 depth 3
 ```
 
-`examples/lines.ls` is the M3 acceptance criterion: a small log tool that
-writes a log, reads it back off disk, counts and filters it, writes a
-report, and reads the report back to print it. Four file operations, one
-`Fs` capability narrowed once in `main`, and a row on every frame that
-carries it — nothing in that program can touch a path outside `/tmp`, and
-not by convention: `report` could not be *written* to do it, because its
-row would have to say so and its capability cannot be widened to match.
+`examples/lines.ls` is the M3 acceptance criterion: a real command-line
+tool. Given a path it reads that file, counts and filters it, writes a
+report and reads the report back; given nothing it lays down a sample and
+reads that, which is how a tool with no input behaves anyway.
 
 ```sh
 cargo run -p lex-sys -- run examples/lines.ls
 # lines 6
 # errors 2
 # longest 15
+
+lines /var/log/app.log        # or a path you name
 ```
+
+It is also where the design shows a sharp edge honestly. A capability is
+narrowed to a **literal**, checked where it is written — so a tool that
+reads a path the *user* chose cannot narrow to it, because there is no
+literal to narrow to. `lines` therefore passes its `Fs` on unnarrowed, and
+narrowing it to `/tmp` would not make a safer tool, it would make a broken
+one. What the types still buy at that width: `report`'s row says
+`fs_read("")` and `fs_write("")`, so a reader knows it reads and writes
+arbitrary paths without opening the body. A tool that *did* know its
+directory would narrow, and its row would say so instead. The type tells
+the truth either way.
 
 `examples/wordcount.ls` is `wc` over an embedded document — the first
 program here that is mostly text processing rather than demonstration, with
@@ -252,8 +271,8 @@ bindings, structs, enums with exhaustive `match`, generics over both,
 shared and unique borrows with lexical regions, exact effect rows,
 capabilities, narrowing, capability-gated foreign calls, arenas, checked
 arithmetic, slices, strings, file IO through a path-carrying capability, a
-general heap with recursive types, and reading through references — `*r`
-and `match` on a reference.
+general heap with recursive types, reading through references — `*r` and
+`match` on a reference — and the command line.
 
 ```
 res struct Ticket { serial: int }
@@ -436,10 +455,21 @@ Nothing moves out of a reference, so a `res` payload binds as a borrow and
 linearity is untouched; there are no binding modes to infer, because the
 scrutinee decides and it is one line up.
 
+Command-line arguments answered the last capability question M3 had open,
+and the answer is worth reading even though the feature is two operations.
+Arguments grant no *power*: a program that reads argv cannot damage
+anything by doing so, and `Fs` still governs what it may open. So the case
+for making them ambient was real. It loses because an effect row here is
+about **visibility** rather than containment — a function whose behaviour
+depends on the command line should say so in its type, and ambient argv
+would let one eight frames down branch on a flag with nothing in any
+signature admitting it. `putchar` is not more dangerous than `arg`; it is
+more visible, and that is what an exact row is for.
+
 **What does not, yet:** sharing — §9's `Rc` and `Gen`, which are libraries
-and want a module system first — and command-line arguments, which are
-another thing the runtime hands over and need a capability question answered
-first.
+and want a module system first — flag parsing and environment variables,
+both of which are libraries over what is already here, and standard input,
+which wants the file-handle design `filesystem.md` §3 defers.
 
 Every example declares what it prints in its own header, and a test walks
 `examples/` and checks them, so an example that stops matching the language
@@ -494,6 +524,7 @@ carry them exists now, while it is cheap.
 | [`docs/linearity-and-effects.md`](docs/linearity-and-effects.md) | The M2 gate: linear ownership, capability-typed effects, how they unify, and 23 must-reject fixtures written out as the conformance suite | settled; §3 through §8 implemented |
 | [`docs/bootstrap.md`](docs/bootstrap.md) | What M0 settled: bootstrap host (Rust), extension (`.ls`), the M0 surface, what is scaffolding and what replaces it | written |
 | [`docs/canonical-ast.md`](docs/canonical-ast.md) | Canonicalisation rules and per-unit identity: what is hashed, and what a hash is allowed to change with | written, implemented |
+| [`docs/arguments.md`](docs/arguments.md) | The `Args` capability, `arg_count` / `arg`, and why reading argv is an effect | **settled and built** — the "command-line" half of M3's acceptance criterion; §7's must-reject suite is enforced |
 | [`docs/reading-references.md`](docs/reading-references.md) | `*r`, and `match` on a reference binding payloads as references | **settled and built** — closed the two limits the heap slice left open; §7's must-reject suite is enforced |
 | [`docs/heap.md`](docs/heap.md) | The `Heap` capability and `Box[T]`: why the heap cannot leak, recursive types, heap versus arena | **settled and built** — closes M2's last unchecked item; §8's must-reject suite is enforced |
 | [`docs/filesystem.md`](docs/filesystem.md) | The `Fs(prefix)` capability, why the operations are builtins rather than `extern fn`, the runtime path check and why `..` is refused | **settled and built** — the last mile to M3's acceptance criterion; §7's must-reject suite is enforced |
