@@ -26,7 +26,9 @@ fn magnitude[&f, &i](ffi: &f Ffi("libc"), io: &!i Io, n: int) -> [io, ffi("libc"
 }
 
 fn main(world: World) -> [] int {
-    let Split { io, ffi } = split(world);
+    let Split { io, ffi, fs } = split(world);
+    // This program touches no files, so that authority ends here.
+    release(fs);
     // The one narrowing in the program. `Ffi("")` becomes `Ffi("libc")`,
     // and nothing can turn it back: from here this capability reaches libc
     // and no other library, whatever the rest of the program does.

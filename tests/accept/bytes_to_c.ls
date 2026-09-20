@@ -22,7 +22,9 @@ fn say[&f, &s](libc: &f Ffi("libc"), line: &s [byte]) -> [ffi("libc")] int {
 }
 
 fn main(world: World) -> [] int {
-    let Split { io, ffi } = split(world);
+    let Split { io, ffi, fs } = split(world);
+    // This program touches no files, so that authority ends here.
+    release(fs);
     // This program never touches the console capability: it writes to the
     // file descriptor directly, through libc.
     release(io);

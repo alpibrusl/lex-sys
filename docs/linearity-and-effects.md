@@ -737,7 +737,14 @@ fn widen(fs: &!f Fs) -> [fs_write("/")] int {
 >
 > **Refinement is prefix extension**, which is what makes it checkable by
 > reading rather than by solving: `narrow(c, t)` is accepted exactly when
-> `t` extends what `c` already names, and refused otherwise. The unnarrowed
+> `t` extends what `c` already names, and refused otherwise.
+>
+> *(M3 added `Fs(prefix)` as the second capability carrying a value, over
+> the same `narrow`. One rule had to be made sharper for it: a **path**
+> prefix extends at a `/` or not at all, because `/tmp` is a byte prefix of
+> `/tmpevil` and does not contain it — `fs_sibling_prefix.ls`. A library
+> name has no such structure, so `Ffi` keeps the plain textual rule. See
+> `docs/filesystem.md` §1.1.)* The unnarrowed
 > root is the empty string, a prefix of everything, so the `Ffi` that
 > `split` hands out can still become any library while an `Ffi("libcrypto")`
 > can never become `Ffi("libc")` — `effect_widened.ls`. Narrowing to what a
@@ -761,17 +768,20 @@ fn widen(fs: &!f Fs) -> [fs_write("/")] int {
 
 ### 8.1 What one looks like
 
-> **What was built.** `World`, `Io` and `Ffi(library)`, plus the `Split`
-> that `split` hands back — `let Split { io, ffi } = split(world);`.
-> `Heap` and `Fs` wait for allocation and the filesystem: a capability for
-> an effect nothing can perform is decoration, which is what §7.3 refuses
-> for rows and what this refuses for the same reason.
+> **What was built.** `World`, `Io`, `Ffi(library)` and — from M3 —
+> `Fs(prefix)`, plus the `Split` that `split` hands back:
+> `let Split { io, ffi, fs } = split(world);`. `Heap` still waits for
+> general allocation: a capability for an effect nothing can perform is
+> decoration, which is what §7.3 refuses for rows and what this refuses for
+> the same reason.
 >
 > A capability the program does not need is still a resource, so a program
 > that calls into no library releases its `Ffi` rather than ignoring it.
 > Adding a capability to `Split` is therefore a breaking change every
-> program has to acknowledge, which is the honest cost of there being no
-> ambient authority.
+> program has to acknowledge — which happened twice, for `Ffi` and again
+> for `Fs`, each time touching every program in the tree. That is the
+> honest cost of there being no ambient authority, and it is the cost being
+> paid rather than avoided.
 >
 > The prelude's types are predeclared rather than written in a program, and
 > a program may not declare its own — `capability_redeclared.ls`. Nor write
