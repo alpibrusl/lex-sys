@@ -67,6 +67,12 @@ fn leaves_into(ty: &Type, program: &Program, pointer: types::Type, out: &mut Vec
         // they are substituted here rather than monomorphised: `Pair[int,
         // bool]` and `Pair[bool, int]` are two leaf layouts of one
         // declaration. Only *functions* are copied per instantiation.
+        // `docs/heap.md` §3: a box at run time is a pointer and nothing
+        // else -- no header, no refcount, no tag. That is why `contents` is
+        // a load rather than a computation, and why §4 can let a type
+        // contain itself through one: it is a single leaf however large what
+        // it points at is.
+        Type::Named(def, _) if def.0 as usize == lex_sys_ir::PRELUDE_BOX => out.push(pointer),
         Type::Named(def, args) => match program.type_info(*def) {
             TypeInfo::Struct { fields, .. } => {
                 for (_, field) in fields {
@@ -1023,6 +1029,47 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
         at
     }
 
+    /// The bytes one value of this type occupies on the heap.
+    ///
+    /// The same leaf-slot layout an arena allocation uses (§6), for the same
+    /// reason: the backend stores and loads whole values by their leaves,
+    /// and a box is read back exactly as it was written.
+    fn boxed_size(&mut self, ty: &Type) -> Value {
+        let bytes =
+            i64::from(leaf_count(ty, self.program, self.pointer)) * i64::from(RETURN_SLOT_STRIDE);
+        self.builder.ins().iconst(self.pointer, bytes)
+    }
+
+    /// `box(h, value)` — one `malloc`, and the value written into it (§3).
+    fn boxed(&mut self, ty: &Type, value: &Expr) -> Value {
+        let values = self.expr(value);
+        let pointer = self.pointer;
+        let size = self.boxed_size(ty);
+        let id = self.libc_fn("malloc", &[pointer], &[pointer]);
+        let f = self.module.declare_func_in_func(id, self.builder.func);
+        let call = self.builder.ins().call(f, &[size]);
+        let at = self.builder.inst_results(call)[0];
+        // Out of memory traps, exactly as an exhausted arena does. A null
+        // pointer wandering into the store below is undefined behaviour, and
+        // this language does not have any to wander into.
+        self.builder.ins().trapz(at, TrapCode::HEAP_OUT_OF_BOUNDS);
+        self.store_leaves(at, &values);
+        at
+    }
+
+    /// `unbox(h, b)` — read the value back, then one `free` (§3).
+    ///
+    /// The load has to happen *before* the free, which is the only ordering
+    /// constraint in the whole heap and is why this is one function rather
+    /// than two composable ones.
+    fn unboxed(&mut self, ty: &Type, value: &Expr) -> Vec<Value> {
+        let at = self.expr(value)[0];
+        let kinds = leaves(ty, self.program, self.pointer);
+        let values = self.load_leaves(at, &kinds);
+        self.free(at);
+        values
+    }
+
     fn borrow_stmt(
         &mut self,
         referent: Slot,
@@ -1310,6 +1357,16 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
             // are loaded out of the buffer the reference points at rather
             // than picked out of leaves already in registers.
             Expr::Alloc { arena, ty, value } => vec![self.alloc(*arena, ty, value)],
+            Expr::Boxed { ty, value } => vec![self.boxed(ty, value)],
+            Expr::Unboxed { ty, value } => self.unboxed(ty, value),
+            // One load. A reference to a box points at where the box's own
+            // pointer lives, so reading it *is* the reference to what the
+            // box holds -- same region, same mode, nothing to check.
+            Expr::Contents(inner) => {
+                let reference = self.expr(inner)[0];
+                let pointer = self.pointer;
+                vec![self.builder.ins().load(pointer, MemFlags::trusted(), reference, 0)]
+            }
             Expr::AllocSlice { arena, element, count, fill } => {
                 self.alloc_slice(*arena, element, count, fill)
             }
@@ -1516,6 +1573,12 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
                     Callee::Builtin(Builtin::FsRead | Builtin::FsWrite) => {
                         unreachable!("a file operation is lowered as `Expr::FileOp`")
                     }
+                    // Like `len` and the file operations: checked and
+                    // lowered at the call site, because the type being boxed
+                    // is what decides every one of them.
+                    Callee::Builtin(Builtin::Box | Builtin::Unbox | Builtin::Contents) => {
+                        unreachable!("a heap operation is lowered as its own node")
+                    }
                     Callee::Builtin(Builtin::PutChar) => {
                         let f = self.module.declare_func_in_func(self.putchar, self.builder.func);
                         let arg = self.builder.ins().ireduce(types::I32, args[0]);
@@ -1612,7 +1675,7 @@ mod tests {
 
     const SOURCE: &str = "fn shout[&i](io: &!i Io) -> [io] int { return putchar(io, 33); } \
                           fn main(world: World) -> [] int { \
-                              let Split { io, ffi, fs } = split(world); release(fs); release(ffi); \
+                              let Split { io, ffi, fs, heap } = split(world); release(heap); release(fs); release(ffi); \
                               var status = 0; \
                               borrow mut io as &!i in { status = shout(i); } \
                               release(io); \
@@ -1732,7 +1795,7 @@ mod tests {
         const FOREIGN: &str = "\
             extern fn labs[&f](ffi: &f Ffi(\"libc\"), n: int) -> [ffi(\"libc\")] int; \
             fn main(world: World) -> [] int { \
-                let Split { io, ffi, fs } = split(world); release(fs); release(io); \
+                let Split { io, ffi, fs, heap } = split(world); release(heap); release(fs); release(io); \
                 let libc = narrow(ffi, \"libc\"); var n = 0; \
                 borrow libc as &f in { n = labs(f, 0 - 7); } \
                 release(libc); return n - 7; \

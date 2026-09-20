@@ -13,8 +13,9 @@
 // instead, which authorises writing to a terminal and nothing about disks.
 
 fn main(world: World) -> [] int {
-    let Split { io, ffi, fs } = split(world);
+    let Split { io, ffi, fs, heap } = split(world);
     release(ffi);
+    release(heap);
     release(fs);
 
     var read = 0;

@@ -216,8 +216,9 @@ fn report[&i](io: &!i Io) -> [io] int {
 }
 
 fn main(world: World) -> [] int {
-    let Split { io, ffi, fs } = split(world);
+    let Split { io, ffi, fs, heap } = split(world);
     // This program touches no files, so that authority ends here.
+    release(heap);
     release(fs);
     // This program reads no files and calls into no library: it counts what
     // it was compiled with, and the row on every frame below says so.

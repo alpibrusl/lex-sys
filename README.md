@@ -75,8 +75,18 @@ and requires every hash to survive.
 > what `Fs` is not: not a sandbox, because `Ffi("libc")` plus an `extern`
 > reaches any path. What it is, is authority visible in the types.
 >
-> **Still missing:** a general heap and the escape hatches (§9). Do not
-> mistake this for a usable language yet.
+> **And there is a heap.** `Heap` is the fifth capability and `Box[T]` is
+> one value in one allocation. It is `res` whatever `T` is, so §4's
+> exactly-once rule applies unchanged and **the general heap cannot leak** —
+> a box that is never unboxed is a *compile error*, and a double free is
+> unexpressible because `unbox` consumes. It costs nothing at run time: a
+> box is a pointer, with no header, no refcount and no tag. The payoff is a
+> type that can contain itself, through a `Box` and only through one — so
+> linked lists and trees compile, and the walk that reads one is the walk
+> that frees it. That is [`docs/heap.md`](docs/heap.md).
+>
+> **Still missing:** sharing — §9's `Rc` and `Gen`, which are libraries and
+> need a module system first. Do not mistake this for a usable language yet.
 
 ## What this is
 
@@ -163,6 +173,7 @@ cargo run -p lex-sys -- run examples/tour.ls
 # M3 slice: 3 1 4 1 5 -> 14
 # M3 string: hello (5 bytes, e is 101)
 # M3 file: on disk (7)
+# M3 heap: 3 1 4 -> 8 (freed)
 ```
 
 `examples/tour.ls` is the shortest honest answer to "what can this language
@@ -185,6 +196,20 @@ something you own without spending it is a borrow; the running tally lives
 in an arena; the overrun is computed by libc through a capability that names
 libc and nothing else; and printing needs the console capability `main` was
 handed. Delete any one of those and it stops compiling.
+
+`examples/tree.ls` is a binary search tree — the shortest honest answer to
+"why does a language need a heap at all". Its shape is decided at run time,
+its nodes outlive the calls that made them, and the type is defined in terms
+of itself; none of that fits in a block. There is **no `free` in the file**,
+and every node is freed: `unbox` is the only thing that ends a box, a box is
+`res`, and a node the program forgot would be a compile error rather than a
+leak found next month.
+
+```sh
+cargo run -p lex-sys -- run examples/tree.ls
+# 1 3 4 5 7 8 9
+# sum 37 count 7 depth 3
+```
 
 `examples/lines.ls` is the M3 acceptance criterion: a small log tool that
 writes a log, reads it back off disk, counts and filters it, writes a
@@ -217,7 +242,8 @@ bindings, structs, enums with exhaustive `match`, generics over both,
 `res`/`val` modes with exactly-once linearity and destructuring `let`,
 shared and unique borrows with lexical regions, exact effect rows,
 capabilities, narrowing, capability-gated foreign calls, arenas, checked
-arithmetic, slices, strings, and file IO through a path-carrying capability.
+arithmetic, slices, strings, file IO through a path-carrying capability, and
+a general heap with recursive types.
 
 ```
 res struct Ticket { serial: int }
@@ -379,9 +405,27 @@ decisions rather than any machinery — that the operations must *not* be
 the granted prefix traps while a path containing `..` is refused rather than
 normalised. See [`docs/filesystem.md`](docs/filesystem.md).
 
-**What does not, yet:** a general heap, the escape hatches of §9, and
-command-line arguments — which are another thing the runtime hands over,
-and which need a capability question answered first.
+The heap closed M2's last unchecked item, and it is where the "one system"
+claim paid off most visibly. `Box[T]` is `res`, so §4's exactly-once rule —
+written for capabilities and file handles — turns out to be a *memory
+safety* rule for free: no leaks, no double frees, no use-after-free, none of
+them checked by anything new. `contents` is region-preserving, so §5's
+occurs-check refuses a reference escaping a box exactly as it refuses one
+escaping an arena, by the same code. The only thing genuinely added to the
+checker was one hole in the size check: a type may contain itself through a
+`Box`, because a box is one pointer however large what it points at is.
+
+Two limits that slice found and `docs/heap.md` states rather than hides:
+there is **no dereference operator**, so a boxed *scalar* is read by
+unboxing it (`&r int` has been unreadable since M2 and this changed
+nothing); and **`match` requires ownership**, so reading a recursive
+structure means consuming it — the walk that traverses a tree is the walk
+that frees it.
+
+**What does not, yet:** sharing — §9's `Rc` and `Gen`, which are libraries
+and want a module system first — and command-line arguments, which are
+another thing the runtime hands over and need a capability question answered
+first.
 
 Every example declares what it prints in its own header, and a test walks
 `examples/` and checks them, so an example that stops matching the language
@@ -436,6 +480,7 @@ carry them exists now, while it is cheap.
 | [`docs/linearity-and-effects.md`](docs/linearity-and-effects.md) | The M2 gate: linear ownership, capability-typed effects, how they unify, and 23 must-reject fixtures written out as the conformance suite | settled; §3 through §8 implemented |
 | [`docs/bootstrap.md`](docs/bootstrap.md) | What M0 settled: bootstrap host (Rust), extension (`.ls`), the M0 surface, what is scaffolding and what replaces it | written |
 | [`docs/canonical-ast.md`](docs/canonical-ast.md) | Canonicalisation rules and per-unit identity: what is hashed, and what a hash is allowed to change with | written, implemented |
+| [`docs/heap.md`](docs/heap.md) | The `Heap` capability and `Box[T]`: why the heap cannot leak, recursive types, heap versus arena | **settled and built** — closes M2's last unchecked item; §8's must-reject suite is enforced |
 | [`docs/filesystem.md`](docs/filesystem.md) | The `Fs(prefix)` capability, why the operations are builtins rather than `extern fn`, the runtime path check and why `..` is refused | **settled and built** — the last mile to M3's acceptance criterion; §7's must-reject suite is enforced |
 | `docs/memory-model.md` | Regions, escape, the escape hatches and their cost | not written — §5 and §6 settled and built regions and escape; what remains is §9's escape hatches, which M3 needs |
 | [`docs/defined-behaviour.md`](docs/defined-behaviour.md) | Every place C and Rust leave behaviour open, and what we define it to | **written and enforced** — overflow traps, evaluation order is left to right, and §9 names the fixture behind each rule |
@@ -455,7 +500,7 @@ M0–M3 with acceptance criteria, sequencing, risks and open decisions.
 |---|---|---|
 | **M0** — native hello world ([#3](https://github.com/alpibrusl/lex-sys/issues/3)) | Lexer, parser, AST, IR, Cranelift backend, a real executable | **done** — green on both targets |
 | **M1** — typed core | Type checker, `bool`, structs, ADTs with exhaustiveness, monomorphised generics. No linearity, no effects — deliberately | **done** |
-| **M2** — the actual thesis ([#2](https://github.com/alpibrusl/lex-sys/issues/2)) | Linear ownership, effect rows and capability-passing as **one** system | **complete** — §3 through §8 of the design document, every must-reject fixture enforced |
+| **M2** — the actual thesis ([#2](https://github.com/alpibrusl/lex-sys/issues/2)) | Linear ownership, effect rows and capability-passing as **one** system | **complete** — §3 through §8 of the design document, every must-reject fixture enforced. §9's last item, a heap whose cost is documented, is [`docs/heap.md`](docs/heap.md); its two *sharing* hatches wait for a module system |
 | **M3** — minimal but real | Slices and strings, arenas, libc FFI, settled overflow semantics, canonical printer, per-unit identity, file IO through `Fs` | **complete.** `examples/lines.ls` is the acceptance criterion: a tool that reads and writes files, counts and filters, and whose authority to do any of it is one narrowed capability |
 
 Deliberately excluded from "minimal": borrow checker, traits, `comptime`, own

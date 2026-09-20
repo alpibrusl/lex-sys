@@ -20,6 +20,7 @@
 //~ STDOUT M3 slice: 3 1 4 1 5 -> 14
 //~ STDOUT M3 string: hello (5 bytes, e is 101)
 //~ STDOUT M3 file: on disk (7)
+//~ STDOUT M3 heap: 3 1 4 -> 8 (freed)
 //~ EXIT 0
 
 // ---------------------------------------------------------------- output ---
@@ -749,10 +750,80 @@ fn m3_file[&f, &i](
     return status - 7;
 }
 
+// ---------------------------------------------------------- M3: the heap ----
+// The last thing M3 added, and the one that closes M2's list
+// (`docs/heap.md`).
+//
+// Everything above this lives in a frame or an arena, and both are
+// *lexical*: a lifetime is a block. The heap is for the values whose
+// lifetime the *program* decides -- something that outlives the call that
+// made it, or a type defined in terms of itself.
+//
+// `Heap` is the fifth capability. It carries nothing, like `Io` and unlike
+// `Ffi(library)` and `Fs(prefix)`, because a heap has no parts to name and
+// so nothing to narrow. It is borrowed *uniquely*, because an allocator has
+// state and those other two are only keys. Allocation is an effect and
+// `[heap]` is how a function says it allocates.
+//
+// `Box[T]` is one value and one allocation, and it is `res` whatever `T` is
+// -- so §4's rule applies to it unchanged, and **the general heap cannot
+// leak**: a box that is never unboxed is a compile error. Nor can it
+// double-free, because `unbox` consumes. That is a stronger guarantee than
+// either escape hatch §9 will offer, and it costs nothing at run time: a
+// box is a pointer, with no header, no refcount and no tag.
+//
+// The payoff is a type that contains itself. `List` below is refused
+// without the `Box` -- it has no finite size -- and compiles with it,
+// because a box is one pointer however large what it points at is. Note
+// what `drain` does: `match` takes ownership, so reading this list is the
+// same act as freeing it, and a version of it that forgot a node would not
+// compile. See `examples/tree.ls` for the same idea with two children.
+
+enum List {
+    Empty,
+    Cons(int, Box[List]),
+}
+
+fn m3_heap[&h, &i](heap: &!h Heap, io: &!i Io) -> [heap, io] int {
+    write_all(io, "M3 heap:"); space(io);
+
+    // Built backwards, so this reads 3 1 4.
+    var list = List::Empty;
+    list = push(heap, list, 4);
+    list = push(heap, list, 1);
+    list = push(heap, list, 3);
+
+    // `drain` leaves a trailing space after the last value, so this does
+    // not add one.
+    let total = drain(heap, io, list);
+    write_all(io, "->"); space(io);
+    print_nat(io, total);
+    space(io); write_all(io, "(freed)");
+    return newline(io);
+}
+
+fn push[&h](heap: &!h Heap, rest: List, value: int) -> [heap] List {
+    return List::Cons(value, box(heap, rest));
+}
+
+// One pass that prints and frees. `rest` is the box the match handed over;
+// `unbox` ends that node and yields the tail.
+fn drain[&h, &i](heap: &!h Heap, io: &!i Io, list: List) -> [heap, io] int {
+    match list {
+        List::Empty => { return 0; }
+        List::Cons(value, rest) => {
+            print_nat(io, value);
+            space(io);
+            let tail = unbox(heap, rest);
+            return value + drain(heap, io, tail);
+        }
+    }
+}
+
 fn main(world: World) -> [] int {
     // §8.2: the runtime hands over exactly one `World`, and `split` consumes
     // it. There is no other way to obtain a capability.
-    let Split { io, ffi, fs } = split(world);
+    let Split { io, ffi, fs, heap } = split(world);
     // §7.4: attenuation, and the two narrowings in this program. From here
     // the foreign authority in this file reaches libc and no other library,
     // and its filesystem authority reaches `/tmp` and nowhere else. Neither
@@ -765,6 +836,7 @@ fn main(world: World) -> [] int {
     // caller's authority.
     borrow libc as &f in {
         borrow tmp as &t in {
+        borrow mut heap as &!p in {
         borrow mut io as &!i in {
             status = run(i);
             m2_capability(i);
@@ -774,6 +846,8 @@ fn main(world: World) -> [] int {
             m3_slice(i);
             m3_string(i);
             m3_file(t, i);
+            m3_heap(p, i);
+        }
         }
         }
     }
@@ -782,6 +856,7 @@ fn main(world: World) -> [] int {
     // forgets either does not compile.
     release(libc);
     release(tmp);
+    release(heap);
     release(io);
     return status;
 }

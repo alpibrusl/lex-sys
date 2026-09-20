@@ -51,7 +51,9 @@ pub const PRELUDE_WORLD: usize = 0;
 pub const PRELUDE_IO: usize = 1;
 pub const PRELUDE_FFI: usize = 2;
 pub const PRELUDE_FS: usize = 3;
-pub const PRELUDE_SPLIT: usize = 4;
+pub const PRELUDE_HEAP: usize = 4;
+pub const PRELUDE_BOX: usize = 5;
+pub const PRELUDE_SPLIT: usize = 6;
 
 /// The library an unnarrowed `Ffi` names: none of them yet.
 ///
@@ -251,6 +253,30 @@ pub enum Builtin {
     FsRead,
     /// `fs_write(fs, path, bytes) -> [fs_write(p)] int` — write a whole file.
     FsWrite,
+    /// `box(h, value) -> [heap] Box[T]` — one value, one allocation.
+    ///
+    /// `docs/heap.md` §3. A builtin rather than an `extern fn` for the same
+    /// reason the file operations are (`filesystem.md` §2): an `extern`
+    /// would be gated by `Ffi("libc")`, and then the FFI capability would
+    /// allocate, with `Heap` contributing nothing.
+    ///
+    /// Checked at the call site, because the result's type is the
+    /// argument's and a fixed signature has no parameter to bind it to.
+    Box,
+    /// `unbox(h, b: Box[T]) -> [heap] T` — free the allocation, yield the value.
+    ///
+    /// The only consumer a `Box` has. That is what makes §3.1's claim hold:
+    /// a box is `res`, so a program that never unboxes one does not compile,
+    /// and the general heap cannot leak.
+    Unbox,
+    /// `contents(b: &r Box[T]) -> [] &r T` — the dereference.
+    ///
+    /// Mode- and region-preserving: a shared borrow of a box yields a shared
+    /// borrow of what it holds, for exactly as long. There is nothing to
+    /// check at run time, because there is no way to hold a reference into a
+    /// box that has been freed -- `unbox` consumes, and §5 already refuses a
+    /// reference that outlives its borrow.
+    Contents,
     /// `len(s: &r [T]) -> [] int` — how many elements a slice has.
     ///
     /// Checked at the call site rather than through a written signature,
@@ -274,6 +300,9 @@ impl Builtin {
         Builtin::IntOf,
         Builtin::FsRead,
         Builtin::FsWrite,
+        Builtin::Box,
+        Builtin::Unbox,
+        Builtin::Contents,
     ];
 
     pub fn name(self) -> &'static str {
@@ -290,6 +319,9 @@ impl Builtin {
             Builtin::IntOf => "int_of",
             Builtin::FsRead => "fs_read",
             Builtin::FsWrite => "fs_write",
+            Builtin::Box => "box",
+            Builtin::Unbox => "unbox",
+            Builtin::Contents => "contents",
         }
     }
 
@@ -355,6 +387,9 @@ impl Builtin {
             // capability's type is what decides the row, and a fixed
             // signature cannot say that.
             Builtin::FsRead | Builtin::FsWrite => (Vec::new(), Type::Unit),
+            // All three depend on the type being boxed, which a fixed
+            // signature has no parameter to name (`docs/heap.md` §3).
+            Builtin::Box | Builtin::Unbox | Builtin::Contents => (Vec::new(), Type::Unit),
             Builtin::ByteOf => (vec![Type::Int], Type::Byte),
             Builtin::IntOf => (vec![Type::Byte], Type::Int),
             // Both are checked at the call site rather than here, because a
@@ -375,6 +410,9 @@ impl Builtin {
     pub fn effects(self) -> Effects {
         match self {
             Builtin::PutChar => Effects::plain(["io"]),
+            // `docs/heap.md` §2. Both reach the allocator, so both perform
+            // `heap`; `contents` is a load and performs nothing.
+            Builtin::Box | Builtin::Unbox => Effects::plain(["heap"]),
             // Moving authority around is not an effect. Splitting a `World`
             // observes nothing outside the program and releasing a
             // capability only ends one; what a capability *authorises* is
@@ -510,6 +548,28 @@ pub enum Expr {
         ty: Type,
         value: Box<Expr>,
     },
+    /// `box(h, value)` (`docs/heap.md` §3): one `malloc`, and the value
+    /// written into it.
+    ///
+    /// `ty` is what was boxed, which is how the backend knows how many bytes
+    /// to ask for. Unlike an arena's `alloc` it may be `res`: a box's
+    /// contents come back out through `unbox`, so an obligation put into one
+    /// is an obligation that leaves again.
+    Boxed {
+        ty: Type,
+        value: Box<Expr>,
+    },
+    /// `unbox(h, b)` (§3): read the value back, then one `free`.
+    Unboxed {
+        ty: Type,
+        value: Box<Expr>,
+    },
+    /// `contents(b)` (§3): the dereference, which is one load.
+    ///
+    /// No type is needed. A reference to a box is a pointer to where the
+    /// box's own pointer lives, so this reads that pointer and *is* the
+    /// reference to what the box holds.
+    Contents(Box<Expr>),
     /// A struct value. Fields are in *declaration* order whatever order they
     /// were written in, so the backend never has to consult a name.
     Struct {
@@ -835,24 +895,43 @@ impl TypeDef {
 
 /// Can `from` reach `target` by following member types?
 ///
-/// M1 has no references, so a type that contains itself — directly or through
-/// others — has no finite size. There is no representation to pick and no
-/// depth to stop at, so it is refused rather than approximated. That covers
-/// `enum List { Nil, Cons(int, List) }` as much as a self-referential struct:
-/// the classic linked list needs an indirection the language does not have
-/// yet.
+/// A type that contains itself — directly or through others — has no finite
+/// size. There is no representation to pick and no depth to stop at, so it
+/// is refused rather than approximated. That covers
+/// `enum List { Nil, Cons(int, List) }` as much as a self-referential struct.
+///
+/// **Except through a `Box`** (`docs/heap.md` §4). A box is a pointer, so it
+/// is one leaf however large what it points at is, and the size computation
+/// terminates. That hole is the whole reason the heap exists: every linked
+/// structure in computing is a self-referential declaration plus exactly
+/// this indirection.
 fn reaches(defs: &[TypeDef], from: usize, target: usize, seen: &mut [bool]) -> bool {
     if seen[from] {
         return false;
     }
     seen[from] = true;
-    defs[from].members().any(|ty| match ty {
-        Type::Named(def, _) => {
-            let next = def.0 as usize;
-            next == target || reaches(defs, next, target, seen)
-        }
-        _ => false,
-    })
+    defs[from].members().any(|ty| reaches_through(defs, ty, target, seen))
+}
+
+/// The same walk, over one member rather than a definition's whole list.
+///
+/// Split out because a member's *type arguments* have to be followed too.
+/// They were not before this existed, so `struct Node { w: Wrap[Node] }` was
+/// accepted although it has no more finite a size than `Wrap` written out:
+/// no program could build one, because the checker refused every attempt at
+/// a value, but the refusal landed at each use rather than at the
+/// declaration that was wrong.
+fn reaches_through(defs: &[TypeDef], ty: &Type, target: usize, seen: &mut [bool]) -> bool {
+    let Type::Named(def, args) = ty else {
+        return false;
+    };
+    let next = def.0 as usize;
+    if next == PRELUDE_BOX {
+        return false;
+    }
+    next == target
+        || reaches(defs, next, target, seen)
+        || args.iter().any(|arg| reaches_through(defs, arg, target, seen))
 }
 
 /// Does a value of this type occupy no machine values at all?
@@ -862,7 +941,10 @@ fn reaches(defs: &[TypeDef], from: usize, target: usize, seen: &mut [bool]) -> b
 /// is a claim worth a test rather than a comment.
 pub fn leaf_free(ty: &Type) -> bool {
     matches!(ty, Type::Named(def, _)
-        if matches!(def.0 as usize, PRELUDE_WORLD | PRELUDE_IO | PRELUDE_FFI | PRELUDE_FS))
+    if matches!(
+        def.0 as usize,
+        PRELUDE_WORLD | PRELUDE_IO | PRELUDE_FFI | PRELUDE_FS | PRELUDE_HEAP
+    ))
 }
 
 /// Is this one of the prelude's capability types?
@@ -873,7 +955,10 @@ pub fn leaf_free(ty: &Type) -> bool {
 /// out. So a capability has no literal form, and the only `Io` in existence
 /// is the one the runtime handed to `main` inside a `World`.
 fn is_capability(def: DefId) -> bool {
-    matches!(def.0 as usize, PRELUDE_WORLD | PRELUDE_IO | PRELUDE_FFI | PRELUDE_FS | PRELUDE_SPLIT)
+    matches!(
+        def.0 as usize,
+        PRELUDE_WORLD | PRELUDE_IO | PRELUDE_FFI | PRELUDE_FS | PRELUDE_HEAP | PRELUDE_SPLIT
+    )
 }
 
 /// Is this a capability whose only consumer is `release`?
@@ -883,7 +968,18 @@ fn is_capability(def: DefId) -> bool {
 /// authority without naming the function that knows how (§4.1) — and for
 /// `World` and `Io`, which carry no fields, it would do it silently.
 fn released_only(def: DefId) -> bool {
-    matches!(def.0 as usize, PRELUDE_WORLD | PRELUDE_IO | PRELUDE_FFI | PRELUDE_FS)
+    matches!(def.0 as usize, PRELUDE_WORLD | PRELUDE_IO | PRELUDE_FFI | PRELUDE_FS | PRELUDE_HEAP)
+}
+
+/// Is this a type whose only consumer is `unbox` (`docs/heap.md` §3)?
+///
+/// `Box[T]` carries no *fields* — what it owns is an allocation, and the
+/// pointer to it is not something a pattern can name. Destructuring one
+/// would end the allocation without naming the function that frees it,
+/// which is §4.1's rule and the same reason a capability may not be taken
+/// apart.
+fn unboxed_only(def: DefId) -> bool {
+    def.0 as usize == PRELUDE_BOX
 }
 
 /// Does `target` name something *inside* `prefix` (`docs/filesystem.md` §1)?
@@ -926,13 +1022,16 @@ fn discharged_by(defs: &[TypeDef], ty: &Type) -> Effects {
     }
     match index {
         PRELUDE_IO => Effects::plain(["io"]),
+        // `docs/heap.md` §2: one plain label, because a heap has no parts to
+        // name and so nothing to narrow.
+        PRELUDE_HEAP => Effects::plain(["heap"]),
         // A `World` is the root, so it discharges what every capability it
         // splits into discharges: the console, and the unnarrowed `Ffi`,
         // which covers every library there could be. Owning a `World` and
         // declaring `[]` is not a gap in the row — it is the parameter list
         // saying something stronger.
         PRELUDE_WORLD => {
-            let mut all = Effects::plain(["io"]);
+            let mut all = Effects::plain(["io", "heap"]);
             for name in ["ffi", "fs_read", "fs_write"] {
                 all.union(&Effects::new([Label {
                     name: name.to_owned(),
@@ -984,19 +1083,25 @@ fn prelude_types(ast: &Ast, unifier: &mut Unifier) -> Vec<TypeDef> {
     let io = symbol("Io");
     let ffi = symbol("Ffi");
     let fs = symbol("Fs");
+    let heap = symbol("Heap");
+    let boxed = symbol("Box");
     let split = symbol("Split");
     let library = symbol("L");
     let prefix = symbol("P");
+    let boxed_param = symbol("B");
     // The *field* is `io`; the type it holds is `Io`. Two different names,
     // and interning them separately is what keeps them so.
     let io_field = symbol("io");
     let ffi_field = symbol("ffi");
     let fs_field = symbol("fs");
+    let heap_field = symbol("heap");
 
     let world_def = unifier.declare("World");
     let io_def = unifier.declare("Io");
     let ffi_def = unifier.declare("Ffi");
     let fs_def = unifier.declare("Fs");
+    let heap_def = unifier.declare("Heap");
+    let box_def = unifier.declare("Box");
     let split_def = unifier.declare("Split");
 
     vec![
@@ -1039,7 +1144,34 @@ fn prelude_types(ast: &Ast, unifier: &mut Unifier) -> Vec<TypeDef> {
             kind: DefKind::Struct(Vec::new()),
             span,
         },
-        // `res` by inference, because it holds three.
+        // `docs/heap.md` §2: the fifth capability, and the second that
+        // carries nothing. A heap has no parts to name, so there is nothing
+        // to narrow and no parameter to narrow it with.
+        TypeDef {
+            name: heap,
+            def: heap_def,
+            generics: Vec::new(),
+            declared_mode: Some(Mode::Res),
+            kind: DefKind::Struct(Vec::new()),
+            span,
+        },
+        // `docs/heap.md` §3: one value, one allocation. Declared `res`
+        // whatever `B` is -- `B`'s mode says whether the *contents* must be
+        // consumed, and the box is `res` because it owns an allocation,
+        // which is true of a box of anything.
+        //
+        // It has no fields on purpose. What it owns is a pointer, and a
+        // pattern that could name the pointer would be a way to end the
+        // allocation without freeing it.
+        TypeDef {
+            name: boxed,
+            def: box_def,
+            generics: vec![boxed_param],
+            declared_mode: Some(Mode::Res),
+            kind: DefKind::Struct(Vec::new()),
+            span,
+        },
+        // `res` by inference, because it holds four.
         TypeDef {
             name: split,
             def: split_def,
@@ -1053,6 +1185,8 @@ fn prelude_types(ast: &Ast, unifier: &mut Unifier) -> Vec<TypeDef> {
                 // Likewise unnarrowed: authority over no path until someone
                 // narrows it to one.
                 (fs_field, Type::Named(fs_def, vec![Type::Lit(FFI_ROOT.to_owned())])),
+                // Nothing to narrow: the heap is the heap.
+                (heap_field, Type::Named(heap_def, Vec::new())),
             ]),
             span,
         },
@@ -1166,7 +1300,7 @@ fn collect_types(ast: &Ast, unifier: &mut Unifier) -> Result<Vec<TypeDef>, Diagn
         if reaches(&defs, index, index, &mut seen) {
             return Err(Diagnostic::new(
                 format!(
-                    "type `{}` contains itself, so it has no finite size (M1 has no references)",
+                    "type `{}` contains itself, so it has no finite size; put a `Box` on the path back to it",
                     ast.name_of(defs[index].name)
                 ),
                 defs[index].span,
@@ -1565,6 +1699,11 @@ fn settle_expr(expr: &mut Expr, unifier: &Unifier) {
             *ty = unifier.resolve(ty);
             settle_expr(value, unifier);
         }
+        Expr::Boxed { ty, value } | Expr::Unboxed { ty, value } => {
+            *ty = unifier.resolve(ty);
+            settle_expr(value, unifier);
+        }
+        Expr::Contents(inner) => settle_expr(inner, unifier),
         Expr::AllocSlice { element, count, fill, .. } => {
             *element = unifier.resolve(element);
             settle_expr(count, unifier);
@@ -2239,7 +2378,7 @@ impl<'a> FnLowering<'a> {
 
     /// The prelude's type ids, in the order `prelude_types` declared them.
     fn prelude(&self) -> Vec<DefId> {
-        self.defs[..5].iter().map(|d| d.def).collect()
+        self.defs[..7].iter().map(|d| d.def).collect()
     }
 
     /// Does `outer` outlive `inner` (§5.2)?
@@ -2633,6 +2772,17 @@ impl<'a> FnLowering<'a> {
                 span,
             ));
         }
+        // `docs/heap.md` §3: the same rule, for the same reason. What a box
+        // owns is an allocation, and a pattern that could name the pointer
+        // would be a way to end one without freeing it.
+        if unboxed_only(def_id) {
+            return Err(Diagnostic::new(
+                format!(
+                    "`{text}` owns an allocation and is ended by `unbox`, not by being taken apart; what it holds comes back out of `unbox`"
+                ),
+                span,
+            ));
+        }
         let DefKind::Struct(declared) = &def.kind else {
             return Err(Diagnostic::new(
                 format!("`{text}` is an enum, not a struct; take it apart with `match`"),
@@ -3020,6 +3170,117 @@ impl<'a> FnLowering<'a> {
         Err(Diagnostic::new(
             format!(
                 "`{}` is not a borrowed `Fs`; reading or writing a file is reached through the capability that names the path it may touch",
+                self.unifier.display(&resolved)
+            ),
+            span,
+        ))
+    }
+
+    /// `box(h, value)` — one value, one allocation (`docs/heap.md` §3).
+    fn boxed(&mut self, args: &[ExprId], span: Span) -> Result<(Expr, Type), Diagnostic> {
+        let [heap, value] = args else {
+            return Err(Diagnostic::new(
+                format!(
+                    "`box` takes 2 arguments -- the heap and the value -- but {} were given",
+                    args.len()
+                ),
+                span,
+            ));
+        };
+        self.expect_heap(*heap)?;
+
+        let (lowered, ty) = self.expr(*value)?;
+        let resolved = self.unifier.resolve(&ty);
+        self.performed.union(&Effects::plain(["heap"]));
+        Ok((
+            Expr::Boxed { ty: resolved.clone(), value: Box::new(lowered) },
+            Type::Named(DefId(PRELUDE_BOX as u32), vec![resolved]),
+        ))
+    }
+
+    /// `unbox(h, b)` — free the allocation and hand the value back (§3).
+    ///
+    /// The only consumer a box has, which is what makes §3.1 hold: a `Box`
+    /// is `res`, so a program that never reaches here for one does not
+    /// compile, and the heap cannot leak.
+    fn unboxed(&mut self, args: &[ExprId], span: Span) -> Result<(Expr, Type), Diagnostic> {
+        let [heap, boxed] = args else {
+            return Err(Diagnostic::new(
+                format!(
+                    "`unbox` takes 2 arguments -- the heap and the box -- but {} were given",
+                    args.len()
+                ),
+                span,
+            ));
+        };
+        self.expect_heap(*heap)?;
+
+        let boxed_span = self.ast.expr_span(*boxed);
+        let (lowered, ty) = self.expr(*boxed)?;
+        let inner = self.unifier.fresh();
+        let wanted = Type::Named(DefId(PRELUDE_BOX as u32), vec![inner.clone()]);
+        self.expect_type(&wanted, &ty, boxed_span)?;
+
+        self.performed.union(&Effects::plain(["heap"]));
+        let inner = self.unifier.resolve(&inner);
+        Ok((Expr::Unboxed { ty: inner.clone(), value: Box::new(lowered) }, inner))
+    }
+
+    /// `contents(b)` — the dereference (§3).
+    ///
+    /// Mode- and region-preserving, which is the whole of its type rule: a
+    /// shared borrow of a box yields a shared borrow of what it holds, for
+    /// exactly as long. §5 already refuses a reference that outlives its
+    /// borrow, so there is nothing here that needed a new rule.
+    fn contents(&mut self, args: &[ExprId], span: Span) -> Result<(Expr, Type), Diagnostic> {
+        let [reference] = args else {
+            return Err(Diagnostic::new(
+                format!("`contents` takes 1 argument, but {} were given", args.len()),
+                span,
+            ));
+        };
+        let reference_span = self.ast.expr_span(*reference);
+        let (lowered, ty) = self.expr(*reference)?;
+        let resolved = self.unifier.resolve(&ty);
+        if let Type::Ref { unique, region, inner } = &resolved
+            && let Type::Named(def, args) = self.unifier.resolve(inner)
+            && def.0 as usize == PRELUDE_BOX
+            && let Some(element) = args.first()
+        {
+            return Ok((
+                Expr::Contents(Box::new(lowered)),
+                Type::Ref {
+                    unique: *unique,
+                    region: *region,
+                    inner: Box::new(self.unifier.resolve(element)),
+                },
+            ));
+        }
+        Err(Diagnostic::new(
+            format!(
+                "`{}` is not a borrowed `Box`; `contents` reads what a box holds, so there has to be a box to read",
+                self.unifier.display(&resolved)
+            ),
+            reference_span,
+        ))
+    }
+
+    /// The `&!x Heap` a heap operation is reached through (§2).
+    fn expect_heap(&mut self, heap: ExprId) -> Result<(), Diagnostic> {
+        let span = self.ast.expr_span(heap);
+        let (_, ty) = self.expr(heap)?;
+        // The capability carries no data and so no leaves: what matters here
+        // is that `self.expr` ran at all, because that is what recorded the
+        // borrow the checker tracks.
+        let resolved = self.unifier.resolve(&ty);
+        if let Type::Ref { unique: true, inner, .. } = &resolved
+            && matches!(self.unifier.resolve(inner), Type::Named(def, _) if def.0 as usize == PRELUDE_HEAP)
+        {
+            return Ok(());
+        }
+        Err(Diagnostic::new(
+            format!(
+                "`{}` is not a uniquely borrowed `Heap`; allocating is reached through the capability that authorises it",
                 self.unifier.display(&resolved)
             ),
             span,
@@ -3734,6 +3995,17 @@ impl<'a> FnLowering<'a> {
                 }
                 if let Some(op @ (Builtin::FsRead | Builtin::FsWrite)) = Builtin::from_name(text) {
                     return self.file_op(op, args, span);
+                }
+                // `docs/heap.md` §3: all three depend on the type being
+                // boxed, which no fixed signature has a parameter to name.
+                if Builtin::from_name(text) == Some(Builtin::Box) {
+                    return self.boxed(args, span);
+                }
+                if Builtin::from_name(text) == Some(Builtin::Unbox) {
+                    return self.unboxed(args, span);
+                }
+                if Builtin::from_name(text) == Some(Builtin::Contents) {
+                    return self.contents(args, span);
                 }
                 let (params, ret) = if let Some(builtin) = Builtin::from_name(text) {
                     // A builtin's region parameters are instantiated exactly
@@ -4705,7 +4977,7 @@ mod capability_tests {
 
     /// Enough of a program to have authority in it.
     const MAIN: &str = " fn main(world: World) -> [] int { \
-        let Split { io, ffi, fs } = split(world); release(fs); release(ffi); release(io); return 0; }";
+        let Split { io, ffi, fs, heap } = split(world); release(heap); release(fs); release(ffi); release(io); return 0; }";
 
     fn refused(src: &str) -> String {
         lower_src(src).expect_err("this should be refused").message
@@ -4737,7 +5009,7 @@ mod capability_tests {
         accepted(&format!("fn f() -> [] int {{ return 0; }}{MAIN}"));
 
         let leaked = refused(
-            "fn main(world: World) -> [] int { let Split { io, ffi, fs } = split(world); release(fs); release(ffi); return 0; }",
+            "fn main(world: World) -> [] int { let Split { io, ffi, fs, heap } = split(world); release(heap); release(fs); release(ffi); return 0; }",
         );
         assert!(leaked.contains("still live"), "{leaked}");
 
@@ -4749,7 +5021,7 @@ mod capability_tests {
     fn a_released_capability_cannot_be_used_again() {
         let message = refused(
             "fn greet[&i](io: &!i Io) -> [io] int { return putchar(io, 65); } \
-             fn main(world: World) -> [] int { let Split { io, ffi, fs } = split(world); release(fs); release(ffi); \
+             fn main(world: World) -> [] int { let Split { io, ffi, fs, heap } = split(world); release(heap); release(fs); release(ffi); \
              release(io); borrow mut io as &!i in { greet(i); } return 0; }",
         );
         assert!(message.contains("nothing left to borrow"), "{message}");
@@ -4758,7 +5030,7 @@ mod capability_tests {
     #[test]
     fn a_capability_is_destroyed_by_release_not_by_destructuring() {
         let message = refused(
-            "fn main(world: World) -> [] int { let Split { io, ffi, fs } = split(world); release(fs); release(ffi); \
+            "fn main(world: World) -> [] int { let Split { io, ffi, fs, heap } = split(world); release(heap); release(fs); release(ffi); \
              let Io { } = io; return 0; }",
         );
         assert!(message.contains("destroyed by `release`"), "{message}");
@@ -4771,7 +5043,7 @@ mod capability_tests {
         // that is visible in the parameter list rather than in the row.
         let program = accepted(
             "fn greet[&i](io: &!i Io) -> [io] int { return putchar(io, 65); } \
-             fn main(world: World) -> [] int { let Split { io, ffi, fs } = split(world); release(fs); release(ffi); \
+             fn main(world: World) -> [] int { let Split { io, ffi, fs, heap } = split(world); release(heap); release(fs); release(ffi); \
              borrow mut io as &!i in { greet(i); } release(io); return 0; }",
         );
         let main = program.func(program.find("main").expect("main"));
@@ -5289,14 +5561,14 @@ mod foreign_tests {
     /// A `main` that takes the authority it is given and gives it back, for
     /// the cases whose subject is a declaration rather than a body.
     const MAIN: &str = " fn main(world: World) -> [] int { \
-        let Split { io, ffi, fs } = split(world); release(fs); release(ffi); release(io); return 0; }";
+        let Split { io, ffi, fs, heap } = split(world); release(heap); release(fs); release(ffi); release(io); return 0; }";
 
     /// A `main` that narrows to libc, runs `body` inside the borrow, and
     /// gives everything back.
     fn with_libc(body: &str) -> String {
         format!(
             "{LABS} fn main(world: World) -> [] int {{ \
-             let Split {{ io, ffi, fs }} = split(world); release(fs); release(io); \
+             let Split {{ io, ffi, fs, heap }} = split(world); release(heap); release(fs); release(io); \
              let libc = narrow(ffi, \"libc\"); var n = 0; \
              borrow libc as &f in {{ {body} }} \
              release(libc); return n; }}"
@@ -5309,7 +5581,7 @@ mod foreign_tests {
         // is the only place a foreign signature is written.
         let message = refused(
             "extern fn labs(n: int) -> [ffi(\"libc\")] int; \
-             fn main(world: World) -> [] int { let Split { io, ffi, fs } = split(world); release(fs); \
+             fn main(world: World) -> [] int { let Split { io, ffi, fs, heap } = split(world); release(heap); release(fs); \
              release(ffi); release(io); return labs(0); }",
         );
         assert!(message.contains("holds no capability that authorises it"), "{message}");
@@ -5367,7 +5639,7 @@ mod foreign_tests {
         // §7.4: prefix extension, and `libc` is a prefix of `libcrypto`, so
         // the capability over `libcrypto` is the narrower of the two.
         let message = refused(
-            "fn main(world: World) -> [] int { let Split { io, ffi, fs } = split(world); release(fs); \
+            "fn main(world: World) -> [] int { let Split { io, ffi, fs, heap } = split(world); release(heap); release(fs); \
              release(io); let crypto = narrow(ffi, \"libcrypto\"); \
              let wider = narrow(crypto, \"libc\"); release(wider); return 0; }",
         );
@@ -5377,7 +5649,7 @@ mod foreign_tests {
     #[test]
     fn narrowing_to_the_same_thing_is_refused() {
         let message = refused(
-            "fn main(world: World) -> [] int { let Split { io, ffi, fs } = split(world); release(fs); \
+            "fn main(world: World) -> [] int { let Split { io, ffi, fs, heap } = split(world); release(heap); release(fs); \
              release(io); let a = narrow(ffi, \"libc\"); let b = narrow(a, \"libc\"); \
              release(b); return 0; }",
         );
@@ -5389,7 +5661,7 @@ mod foreign_tests {
         // The point of the whole section: after narrowing there is no way
         // back to what was narrowed, because it was spent.
         let message = refused(
-            "fn main(world: World) -> [] int { let Split { io, ffi, fs } = split(world); release(fs); \
+            "fn main(world: World) -> [] int { let Split { io, ffi, fs, heap } = split(world); release(heap); release(fs); \
              release(io); let libc = narrow(ffi, \"libc\"); release(libc); \
              let libm = narrow(ffi, \"libm\"); release(libm); return 0; }",
         );
@@ -5399,7 +5671,7 @@ mod foreign_tests {
     #[test]
     fn a_borrowed_capability_cannot_be_narrowed() {
         let message = refused(
-            "fn main(world: World) -> [] int { let Split { io, ffi, fs } = split(world); release(fs); \
+            "fn main(world: World) -> [] int { let Split { io, ffi, fs, heap } = split(world); release(heap); release(fs); \
              release(io); borrow ffi as &f in { let libc = narrow(f, \"libc\"); release(libc); } \
              release(ffi); return 0; }",
         );
@@ -5422,7 +5694,7 @@ mod foreign_tests {
             "{LABS} \
              fn size[&f](ffi: &f Ffi(\"libc\"), n: int) -> [ffi(\"libc\")] int \
              {{ return labs(ffi, n); }} \
-             fn main(world: World) -> [] int {{ let Split {{ io, ffi, fs }} = split(world); release(fs); \
+             fn main(world: World) -> [] int {{ let Split {{ io, ffi, fs, heap }} = split(world); release(heap); release(fs); \
              release(io); let libc = narrow(ffi, \"libc\"); var n = 0; \
              borrow libc as &f in {{ n = size(f, 0 - 7); }} release(libc); return n - 7; }}"
         ));
@@ -6066,7 +6338,7 @@ mod linearity_tests {
         // `narrow`: the type records where it may reach, and two different
         // prefixes are two different types.
         let program = check(
-            "fn main(world: World) -> [] int {              let Split { io, ffi, fs } = split(world); release(ffi); release(io);              let tmp = narrow(fs, \"/tmp\"); let app = narrow(tmp, \"/tmp/app\");              return release(app); }",
+            "fn main(world: World) -> [] int {              let Split { io, ffi, fs, heap } = split(world); release(heap); release(ffi); release(io);              let tmp = narrow(fs, \"/tmp\"); let app = narrow(tmp, \"/tmp/app\");              return release(app); }",
         )
         .expect("accepted");
         assert!(program.funcs.iter().any(|f| f.name == "main"));
@@ -6075,7 +6347,7 @@ mod linearity_tests {
     #[test]
     fn a_filesystem_capability_cannot_step_sideways() {
         let message = refused(
-            "fn main(world: World) -> [] int {              let Split { io, ffi, fs } = split(world); release(ffi); release(io);              let tmp = narrow(fs, \"/tmp\"); let evil = narrow(tmp, \"/tmpevil\");              return release(evil); }",
+            "fn main(world: World) -> [] int {              let Split { io, ffi, fs, heap } = split(world); release(heap); release(ffi); release(io);              let tmp = narrow(fs, \"/tmp\"); let evil = narrow(tmp, \"/tmpevil\");              return release(evil); }",
         );
         assert!(message.contains("a path prefix extends at a `/`"), "{message}");
     }
@@ -6086,7 +6358,7 @@ mod linearity_tests {
         // that names the filesystem, which is why the operations are
         // builtins rather than `extern fn` gated by `Ffi("libc")`.
         let message = refused(
-            "fn main(world: World) -> [] int {              let Split { io, ffi, fs } = split(world); release(ffi); release(fs);              var n = 0; region a { let b = alloc_slice[a](4, byte_of(0));              borrow mut io as &!i in { n = fs_read(i, \"/tmp/x\", b); } }              release(io); return n; }",
+            "fn main(world: World) -> [] int {              let Split { io, ffi, fs, heap } = split(world); release(heap); release(ffi); release(fs);              var n = 0; region a { let b = alloc_slice[a](4, byte_of(0));              borrow mut io as &!i in { n = fs_read(i, \"/tmp/x\", b); } }              release(io); return n; }",
         );
         assert!(message.contains("is not a borrowed `Fs`"), "{message}");
     }
@@ -6096,10 +6368,93 @@ mod linearity_tests {
         // §1: the label is `fs_read("/tmp")`, not `fs_read`. A row that
         // dropped the prefix would take away the thing the prefix is for.
         let message = refused(
-            "fn peek[&f, &b](fs: &f Fs(\"/tmp\"), into: &!b [byte]) -> [] int {              return fs_read(fs, \"/tmp/x\", into); }              fn main(world: World) -> [] int { let Split { io, ffi, fs } = split(world); \
+            "fn peek[&f, &b](fs: &f Fs(\"/tmp\"), into: &!b [byte]) -> [] int {              return fs_read(fs, \"/tmp/x\", into); }              fn main(world: World) -> [] int { let Split { io, ffi, fs, heap } = split(world); release(heap); \
              release(ffi); release(fs); return release(io); }",
         );
         assert!(message.contains("fs_read(\"/tmp\")"), "{message}");
+    }
+
+    #[test]
+    fn a_type_may_contain_itself_through_a_box() {
+        // `docs/heap.md` §4: the one hole in the size check, and the whole
+        // reason the heap exists. A box is a pointer however large what it
+        // points at is, so the size computation terminates.
+        let program = check(
+            "enum List { Empty, Cons(int, Box[List]) } \
+             fn main(world: World) -> [] int { \
+             let Split { io, ffi, fs, heap } = split(world); \
+             release(ffi); release(fs); release(io); release(heap); return 0; }",
+        )
+        .expect("accepted");
+        assert!(program.funcs.iter().any(|f| f.name == "main"));
+    }
+
+    #[test]
+    fn a_type_may_not_contain_itself_without_one() {
+        let message =
+            refused("enum List { Empty, Cons(int, List) } fn main() -> [] int { return 0; }");
+        assert!(message.contains("contains itself"), "{message}");
+        assert!(message.contains("put a `Box`"), "{message}");
+    }
+
+    #[test]
+    fn a_type_may_not_contain_itself_through_a_type_argument() {
+        // The hole this slice closed. `reaches` followed member types but
+        // not their *arguments*, so this was accepted although it has no
+        // more finite a size than writing `Wrap`'s field out: no program
+        // could build one, because the checker refused every attempt at a
+        // value, but the refusal landed at each use rather than here.
+        let message = refused(
+            "struct Wrap[T] { t: T } struct Node { w: Wrap[Node] } \
+             fn main() -> [] int { return 0; }",
+        );
+        assert!(message.contains("contains itself"), "{message}");
+    }
+
+    #[test]
+    fn a_box_is_one_leaf_however_large_what_it_holds() {
+        // §3.2: no header, no refcount, no tag. This is what makes
+        // `contents` a load and §4's hole sound.
+        let boxed =
+            crate::Type::Named(crate::DefId(crate::PRELUDE_BOX as u32), vec![crate::Type::Int]);
+        assert!(!crate::leaf_free(&boxed), "a box is a pointer, so it is not free to thread");
+    }
+
+    #[test]
+    fn owning_a_heap_discharges_the_allocation_effect() {
+        // §8.2's rule, unchanged: owning authority is stronger than
+        // borrowing it, so `main`'s row stays `[]` while the program
+        // allocates.
+        let program = check(
+            "fn main(world: World) -> [] int { \
+             let Split { io, ffi, fs, heap } = split(world); \
+             release(ffi); release(fs); release(io); \
+             var n = 0; \
+             borrow mut heap as &!h in { let b = box(h, 41); n = unbox(h, b); } \
+             release(heap); return n - 41; }",
+        )
+        .expect("accepted");
+        let main = program.funcs.iter().find(|f| f.name == "main").expect("a main");
+        assert!(main.effects.is_pure(), "`main` should declare [], not {:?}", main.effects);
+    }
+
+    #[test]
+    fn allocating_through_a_borrowed_heap_declares_the_effect() {
+        let message = refused(
+            "fn stash[&h](heap: &!h Heap, n: int) -> [] Box[int] { return box(heap, n); } \
+             fn main() -> [] int { return 0; }",
+        );
+        assert!(message.contains("performs `heap`"), "{message}");
+    }
+
+    #[test]
+    fn contents_needs_a_borrowed_box() {
+        let message = refused(
+            "struct Point { x: int } \
+             fn peek[&r](p: &r Point) -> [] int { return contents(p).x; } \
+             fn main() -> [] int { return 0; }",
+        );
+        assert!(message.contains("is not a borrowed `Box`"), "{message}");
     }
 
     #[test]
