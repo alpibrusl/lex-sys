@@ -127,6 +127,13 @@ impl TypeExpr {
 pub enum UnOp {
     Neg,
     Not,
+    /// `*r` — read what a reference points at
+    /// (`docs/reading-references.md` §3).
+    ///
+    /// Prefix, so it never collides with multiplication: the parser knows
+    /// which position it is in, and `a * *b` is a product of `a` and what
+    /// `b` points at.
+    Deref,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

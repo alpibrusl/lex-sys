@@ -141,6 +141,9 @@ fn unary_tag(op: UnOp) -> u8 {
     match op {
         UnOp::Neg => 0x01,
         UnOp::Not => 0x02,
+        // Appended, never inserted: a new tag takes the next number so that
+        // every hash containing `-` or `!` stays where it was.
+        UnOp::Deref => 0x03,
     }
 }
 

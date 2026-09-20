@@ -85,6 +85,14 @@ and requires every hash to survive.
 > linked lists and trees compile, and the walk that reads one is the walk
 > that frees it. That is [`docs/heap.md`](docs/heap.md).
 >
+> **And a reference can be read.** `*r` reads what a reference points at,
+> and `match` on a reference binds each payload as a reference into the
+> value — one rule, *a reference gives references*, with no binding modes
+> to infer. So a recursive structure can be traversed without being
+> destroyed, which it could not be a day ago, and a function can hand a
+> result back through a `&!r` out-parameter. That is
+> [`docs/reading-references.md`](docs/reading-references.md).
+>
 > **Still missing:** sharing — §9's `Rc` and `Gen`, which are libraries and
 > need a module system first. Do not mistake this for a usable language yet.
 
@@ -174,6 +182,7 @@ cargo run -p lex-sys -- run examples/tour.ls
 # M3 string: hello (5 bytes, e is 101)
 # M3 file: on disk (7)
 # M3 heap: 3 1 4 -> 8 (freed)
+# M3 reading: 8 3 8 (kept)
 ```
 
 `examples/tour.ls` is the shortest honest answer to "what can this language
@@ -242,8 +251,9 @@ bindings, structs, enums with exhaustive `match`, generics over both,
 `res`/`val` modes with exactly-once linearity and destructuring `let`,
 shared and unique borrows with lexical regions, exact effect rows,
 capabilities, narrowing, capability-gated foreign calls, arenas, checked
-arithmetic, slices, strings, file IO through a path-carrying capability, and
-a general heap with recursive types.
+arithmetic, slices, strings, file IO through a path-carrying capability, a
+general heap with recursive types, and reading through references — `*r`
+and `match` on a reference.
 
 ```
 res struct Ticket { serial: int }
@@ -415,12 +425,16 @@ escaping an arena, by the same code. The only thing genuinely added to the
 checker was one hole in the size check: a type may contain itself through a
 `Box`, because a box is one pointer however large what it points at is.
 
-Two limits that slice found and `docs/heap.md` states rather than hides:
-there is **no dereference operator**, so a boxed *scalar* is read by
-unboxing it (`&r int` has been unreadable since M2 and this changed
-nothing); and **`match` requires ownership**, so reading a recursive
-structure means consuming it — the walk that traverses a tree is the walk
-that frees it.
+Both limits that slice found are now closed, by the change that came next.
+They looked like two problems — a scalar behind a reference could not be
+read, and a recursive structure could not be read without destroying it —
+and they were one: nothing could be read *through* a reference except a
+field or an element. One rule fixes both. **A reference gives references:**
+matching `&l List` binds every payload as a reference into the list,
+carrying the scrutinee's mode and region, and `*r` reads a `val` referent.
+Nothing moves out of a reference, so a `res` payload binds as a borrow and
+linearity is untouched; there are no binding modes to infer, because the
+scrutinee decides and it is one line up.
 
 **What does not, yet:** sharing — §9's `Rc` and `Gen`, which are libraries
 and want a module system first — and command-line arguments, which are
@@ -480,6 +494,7 @@ carry them exists now, while it is cheap.
 | [`docs/linearity-and-effects.md`](docs/linearity-and-effects.md) | The M2 gate: linear ownership, capability-typed effects, how they unify, and 23 must-reject fixtures written out as the conformance suite | settled; §3 through §8 implemented |
 | [`docs/bootstrap.md`](docs/bootstrap.md) | What M0 settled: bootstrap host (Rust), extension (`.ls`), the M0 surface, what is scaffolding and what replaces it | written |
 | [`docs/canonical-ast.md`](docs/canonical-ast.md) | Canonicalisation rules and per-unit identity: what is hashed, and what a hash is allowed to change with | written, implemented |
+| [`docs/reading-references.md`](docs/reading-references.md) | `*r`, and `match` on a reference binding payloads as references | **settled and built** — closed the two limits the heap slice left open; §7's must-reject suite is enforced |
 | [`docs/heap.md`](docs/heap.md) | The `Heap` capability and `Box[T]`: why the heap cannot leak, recursive types, heap versus arena | **settled and built** — closes M2's last unchecked item; §8's must-reject suite is enforced |
 | [`docs/filesystem.md`](docs/filesystem.md) | The `Fs(prefix)` capability, why the operations are builtins rather than `extern fn`, the runtime path check and why `..` is refused | **settled and built** — the last mile to M3's acceptance criterion; §7's must-reject suite is enforced |
 | `docs/memory-model.md` | Regions, escape, the escape hatches and their cost | not written — §5 and §6 settled and built regions and escape; what remains is §9's escape hatches, which M3 needs |

@@ -439,6 +439,7 @@ impl Printer<'_> {
                 let symbol = match op {
                     UnOp::Neg => "-",
                     UnOp::Not => "!",
+                    UnOp::Deref => "*",
                 };
                 // `-` immediately before an integer *token* is one literal,
                 // not a negation of one -- that is how

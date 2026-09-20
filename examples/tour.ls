@@ -21,6 +21,7 @@
 //~ STDOUT M3 string: hello (5 bytes, e is 101)
 //~ STDOUT M3 file: on disk (7)
 //~ STDOUT M3 heap: 3 1 4 -> 8 (freed)
+//~ STDOUT M3 reading: 8 3 8 (kept)
 //~ EXIT 0
 
 // ---------------------------------------------------------------- output ---
@@ -820,6 +821,85 @@ fn drain[&h, &i](heap: &!h Heap, io: &!i Io, list: List) -> [heap, io] int {
     }
 }
 
+// ------------------------------------------- M3: reading a reference ----
+// The gap the heap section left, and the one that closes it
+// (`docs/reading-references.md`).
+//
+// Two things were impossible above. A scalar behind a reference could not
+// be read -- `&r int` has existed since M2 with nothing to do to one. And
+// a recursive structure could not be read *without destroying it*, because
+// `match` required ownership: the walk that printed the list above is the
+// walk that freed it, and a structure you can only read by consuming is a
+// structure you can read once.
+//
+// They are one gap. The rule that closes it is one sentence:
+//
+//     A reference gives references.
+//
+// Matching `&l List` binds every payload as a reference into the list,
+// carrying the scrutinee's mode and its region. Nothing moves out of a
+// reference, ever -- which is what keeps linearity intact, because a `res`
+// payload binds as a *borrow* of that `res` and creates no obligation. And
+// `*r` reads what a reference points at, for a `val` referent; copying a
+// `res` would duplicate an obligation, so it is refused.
+//
+// No binding modes and nothing inferred (§2.1): match an owned enum and
+// you get owned payloads, match a reference and you get references. Which
+// one you are in is visible one line up, in the scrutinee.
+
+fn sum_kept[&l](list: &l List) -> [] int {
+    match list {
+        List::Empty => { return 0; }
+        // `value` is `&l int` and `rest` is `&l Box[List]`. `contents`
+        // follows the box to `&l List`, for exactly as long as `l` lasts.
+        List::Cons(value, rest) => { return *value + sum_kept(contents(rest)); }
+    }
+}
+
+fn count_kept[&l](list: &l List) -> [] int {
+    match list {
+        List::Empty => { return 0; }
+        // `_` through a reference discards nothing: this match never owned
+        // the value, so there is nothing to drop.
+        List::Cons(_, rest) => { return 1 + count_kept(contents(rest)); }
+    }
+}
+
+fn m3_reading[&h, &i](heap: &!h Heap, io: &!i Io) -> [heap, io] int {
+    write_all(io, "M3 reading:"); space(io);
+
+    var list = List::Empty;
+    list = push(heap, list, 4);
+    list = push(heap, list, 1);
+    list = push(heap, list, 3);
+
+    // Read three times. None of these spends the list: `sum_kept` and
+    // `count_kept` hold no capability at all, so their rows are `[]` and
+    // they could not free anything if they tried.
+    borrow list as &l in {
+        print_nat(io, sum_kept(l));
+        space(io);
+        print_nat(io, count_kept(l));
+        space(io);
+        print_nat(io, sum_kept(l));
+    }
+    space(io); write_all(io, "(kept)");
+    newline(io);
+
+    // Still owned here, and still owing exactly one traversal that ends it.
+    return drain_quiet(heap, list);
+}
+
+fn drain_quiet[&h](heap: &!h Heap, list: List) -> [heap] int {
+    match list {
+        List::Empty => { return 0; }
+        List::Cons(value, rest) => {
+            let tail = unbox(heap, rest);
+            return value + drain_quiet(heap, tail);
+        }
+    }
+}
+
 fn main(world: World) -> [] int {
     // §8.2: the runtime hands over exactly one `World`, and `split` consumes
     // it. There is no other way to obtain a capability.
@@ -847,6 +927,7 @@ fn main(world: World) -> [] int {
             m3_string(i);
             m3_file(t, i);
             m3_heap(p, i);
+            m3_reading(p, i);
         }
         }
         }
