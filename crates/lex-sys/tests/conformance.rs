@@ -209,7 +209,11 @@ fn run_builds_and_executes_in_one_step() {
 #[test]
 fn printing_preserves_every_identity_and_is_idempotent() {
     let mut checked = 0;
-    for dir in ["tests/accept", "tests/reject", "examples"] {
+    // `examples/wordfreq` is listed separately because the walkers here
+    // filter on the `.ls` extension, which a directory does not have --
+    // that is what keeps a multi-file example out of the single-file
+    // harnesses, and it would keep it out of this one too.
+    for dir in ["tests/accept", "tests/reject", "examples", "examples/wordfreq"] {
         for entry in std::fs::read_dir(repo_root().join(dir)).expect("a readable directory") {
             let path = entry.expect("a readable entry").path();
             if path.extension().and_then(|e| e.to_str()) != Some("ls") {
@@ -659,6 +663,214 @@ fn an_argument_past_the_end_traps() {
     let run = Command::new(&exe).output().expect("the compiled program runs");
     assert!(!run.status.success(), "an argument past the end should not succeed");
     assert_eq!(run.status.code(), None, "the process should be killed by a signal, not exit");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Build a program from several named files, in the order given.
+fn build_many(tag: &str, files: &[(&str, &str)]) -> (PathBuf, std::process::Output) {
+    let dir = scratch(tag);
+    let mut paths: Vec<PathBuf> = Vec::new();
+    for (name, source) in files {
+        let path = dir.join(name);
+        std::fs::write(&path, source).expect("a writable fixture");
+        paths.push(path);
+    }
+    let exe = dir.join("program");
+    let mut command = Command::new(BIN);
+    command.arg("build");
+    for path in &paths {
+        command.arg(path);
+    }
+    command.arg("-o").arg(&exe);
+    let build = command.output().expect("the compiler runs");
+    (exe, build)
+}
+
+const UTIL_LS: &str = "fn print_nat[&i](io: &!i Io, n: int) -> [io] int {\n\
+                           if n >= 10 { print_nat(io, n / 10); }\n\
+                           return putchar(io, 48 + n % 10);\n\
+                       }\n";
+
+#[test]
+fn the_multi_file_example_builds_and_runs() {
+    // `examples/wordfreq` is the capstone: more than one file, arguments,
+    // file IO, the heap, matching through references, and slices, each
+    // doing real work rather than being demonstrated.
+    //
+    // The single-file example harness cannot reach it -- it filters on the
+    // `.ls` extension and a directory has none -- so it is run here.
+    let root = repo_root().join("examples").join("wordfreq");
+    let dir = scratch("wordfreq");
+    let exe = dir.join("wordfreq");
+    let build = Command::new(BIN)
+        .arg("build")
+        .arg(root.join("main.ls"))
+        .arg(root.join("text.ls"))
+        .arg(root.join("counts.ls"))
+        .arg("-o")
+        .arg(&exe)
+        .output()
+        .expect("the compiler runs");
+    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+
+    // With no arguments it counts its own sample. The list is built by
+    // prepending, so the order is reverse first-seen.
+    let run = Command::new(&exe).output().expect("the compiled program runs");
+    assert_eq!(
+        String::from_utf8_lossy(&run.stdout),
+        "dog 1\nlazy 1\nover 1\njumps 1\nfox 2\nbrown 1\nquick 1\nthe 3\n"
+    );
+    assert_eq!(run.status.code(), Some(0), "eight distinct words");
+
+    // Given a path it counts that file instead.
+    let doc = dir.join("doc.txt");
+    std::fs::write(&doc, "alpha beta alpha\ngamma beta alpha\n").expect("a writable fixture");
+    let counted = Command::new(&exe).arg(&doc).output().expect("the compiled program runs");
+    assert_eq!(String::from_utf8_lossy(&counted.stdout), "gamma 1\nbeta 2\nalpha 3\n");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_program_can_be_spread_over_several_files() {
+    // `docs/many-files.md` §2: a program is a set of files, named on the
+    // command line in any order, sharing one flat namespace.
+    //
+    // `main.ls` calls `print_nat`, which is declared in a file listed
+    // *after* it, and `twice`, declared in a third. Order does not matter
+    // because there is no order to matter: the files are one program.
+    let (exe, build) = build_many(
+        "many-files",
+        &[
+            (
+                "main.ls",
+                "fn main(world: World) -> [] int {\n\
+                     let Split { io, ffi, fs, heap, args } = split(world);\n\
+                     release(args); release(heap); release(fs); release(ffi);\n\
+                     borrow mut io as &!i in { print_nat(i, twice(21)); putchar(i, 10); }\n\
+                     release(io);\n\
+                     return twice(21) - 42;\n\
+                 }\n",
+            ),
+            ("util.ls", UTIL_LS),
+            ("math.ls", "fn twice(n: int) -> [] int { return n + n; }\n"),
+        ],
+    );
+    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+
+    let run = Command::new(&exe).output().expect("the compiled program runs");
+    assert_eq!(String::from_utf8_lossy(&run.stdout), "42\n");
+    assert_eq!(run.status.code(), Some(0));
+
+    let _ = std::fs::remove_dir_all(exe.parent().expect("a directory"));
+}
+
+#[test]
+fn a_diagnostic_names_the_file_it_came_from() {
+    // §4: spans are offsets into the whole program's source, and a
+    // `SourceMap` resolves one back to a file, a line and a column. The
+    // error here is in the *third* file, several thousand bytes into the
+    // program, and has to be reported at that file's own line 1.
+    let dir = scratch("many-files-diagnostic");
+    let main = dir.join("main.ls");
+    let util = dir.join("util.ls");
+    let broken = dir.join("broken.ls");
+    std::fs::write(
+        &main,
+        "fn main(world: World) -> [] int {\n\
+             let Split { io, ffi, fs, heap, args } = split(world);\n\
+             release(args); release(heap); release(fs); release(ffi); release(io);\n\
+             return 0;\n\
+         }\n",
+    )
+    .expect("a writable fixture");
+    std::fs::write(&util, UTIL_LS).expect("a writable fixture");
+    std::fs::write(&broken, "fn oops() -> [] int { return missing(); }\n")
+        .expect("a writable fixture");
+
+    let output = Command::new(BIN)
+        .args(["check".as_ref(), main.as_os_str(), util.as_os_str(), broken.as_os_str()])
+        .output()
+        .expect("the compiler runs");
+    assert_eq!(output.status.code(), Some(1));
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains(&format!("{}:1:", broken.display())), "{stderr}");
+    assert!(stderr.contains("`missing` is not a function"), "{stderr}");
+    // The offending source line, from the right file.
+    assert!(stderr.contains("fn oops() -> [] int"), "{stderr}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_name_is_declared_once_per_program_not_per_file() {
+    // §2.2: the namespace is flat and shared, so a duplicate across two
+    // files is the same error as a duplicate within one. Nothing new had
+    // to be invented -- this is `duplicate_function.ls` noticing a second
+    // file.
+    let (_, build) = build_many(
+        "many-files-duplicate",
+        &[
+            (
+                "main.ls",
+                "fn twice(n: int) -> [] int { return n + n; }\n\
+                 fn main(world: World) -> [] int {\n\
+                     let Split { io, ffi, fs, heap, args } = split(world);\n\
+                     release(args); release(heap); release(fs); release(ffi); release(io);\n\
+                     return twice(0);\n\
+                 }\n",
+            ),
+            ("other.ls", "fn twice(n: int) -> [] int { return n * 2; }\n"),
+        ],
+    );
+    assert_eq!(build.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&build.stderr);
+    assert!(stderr.contains("twice"), "{stderr}");
+
+    let _ = std::fs::remove_dir_all(scratch("many-files-duplicate"));
+}
+
+#[test]
+fn identity_is_content_not_location() {
+    // §3, and the reason that section exists. `canonical-ast.md` §1 has
+    // claimed since M0 that "moving a function between files changes
+    // nothing about it". With one file there were no files to move
+    // between; with several there are, so it is checked.
+    //
+    // The same function, in two programs, at different positions, with
+    // different neighbours, in differently named files: same `SigId`,
+    // same `BodyId`.
+    let dir = scratch("many-files-identity");
+    let alone = dir.join("alone.ls");
+    let crowded = dir.join("crowded.ls");
+    let body = "fn double(n: int) -> [] int { return n + n; }\n";
+    let main = "fn main(world: World) -> [] int {\n\
+                    let Split { io, ffi, fs, heap, args } = split(world);\n\
+                    release(args); release(heap); release(fs); release(ffi); release(io);\n\
+                    return double(0);\n\
+                }\n";
+    std::fs::write(&alone, format!("{body}{main}")).expect("a writable fixture");
+    std::fs::write(
+        &crowded,
+        format!("fn unrelated(n: int) -> [] int {{ return n * 3; }}\n{body}{main}"),
+    )
+    .expect("a writable fixture");
+
+    let ids_of = |path: &Path| -> String {
+        let out = Command::new(BIN).arg("ids").arg(path).output().expect("the compiler runs");
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter(|l| l.contains("double"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    let first = ids_of(&alone);
+    assert!(!first.is_empty(), "`double` should have hashes");
+    assert_eq!(first, ids_of(&crowded), "a unit hashes its content, not where it sits");
 
     let _ = std::fs::remove_dir_all(&dir);
 }

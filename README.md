@@ -101,8 +101,19 @@ and requires every hash to survive.
 > nothing in any signature admitting it. `examples/lines.ls` is a real CLI
 > tool now. That is [`docs/arguments.md`](docs/arguments.md).
 >
-> **Still missing:** sharing — §9's `Rc` and `Gen`, which are libraries and
-> need a module system first. Do not mistake this for a usable language yet.
+> **And a program can be more than one file.** Named on the command line,
+> sharing one flat namespace — no `import`, no namespaces, no visibility,
+> which is deliberately the minimum that makes a *library* possible at
+> all. `examples/wordfreq/` is the capstone: a byte-helper file, a tally
+> file and a program, using every capability the language has. It also
+> makes `canonical-ast.md` §1 checkable for the first time — the same
+> function in two different files has the same hashes, which has been the
+> claim since M0 and until now had no files to be tested across. That is
+> [`docs/many-files.md`](docs/many-files.md).
+>
+> **Still missing:** sharing — §9's `Rc` and `Gen` — and a standard
+> library. Both are now unblocked rather than impossible. Do not mistake
+> this for a usable language yet.
 
 ## What this is
 
@@ -254,6 +265,27 @@ arbitrary paths without opening the body. A tool that *did* know its
 directory would narrow, and its row would say so instead. The type tells
 the truth either way.
 
+`examples/wordfreq/` is the capstone, and the only example that is three
+files: `text.ls` holds byte helpers, `counts.ls` holds the tally, and
+`main.ls` is the program. Every capability is in it doing real work —
+arguments, file IO, the heap, matching through references, slices — and
+`bump` is worth reading in particular: it walks the tally through a
+*unique* reference and increments a count in place, which is what matching
+`&!c` is for.
+
+```sh
+cargo run -p lex-sys -- run examples/wordfreq/main.ls \
+    examples/wordfreq/text.ls examples/wordfreq/counts.ls
+# dog 1
+# lazy 1
+# over 1
+# jumps 1
+# fox 2
+# brown 1
+# quick 1
+# the 3
+```
+
 `examples/wordcount.ls` is `wc` over an embedded document — the first
 program here that is mostly text processing rather than demonstration, with
 a whole-word search that is two slices compared a byte at a time, which is
@@ -272,7 +304,8 @@ shared and unique borrows with lexical regions, exact effect rows,
 capabilities, narrowing, capability-gated foreign calls, arenas, checked
 arithmetic, slices, strings, file IO through a path-carrying capability, a
 general heap with recursive types, reading through references — `*r` and
-`match` on a reference — and the command line.
+`match` on a reference — the command line, and programs spread over
+several files.
 
 ```
 res struct Ticket { serial: int }
@@ -466,10 +499,22 @@ would let one eight frames down branch on a flag with nothing in any
 signature admitting it. `putchar` is not more dangerous than `arg`; it is
 more visible, and that is what an exact row is for.
 
-**What does not, yet:** sharing — §9's `Rc` and `Gen`, which are libraries
-and want a module system first — flag parsing and environment variables,
-both of which are libraries over what is already here, and standard input,
-which wants the file-handle design `filesystem.md` §3 defers.
+More than one file came last, and it is the smallest feature here with the
+largest consequence: three design docs had each had to write *"there is
+nowhere to put a library"*, and now there is. A program is the set of files
+named on the command line, sharing one flat namespace — no `import`, no
+namespaces, no visibility, because each of those is a design and the
+minimum that unblocks a library is none of them.
+
+It is also where `canonical-ast.md` §1 stopped being aspirational. That
+section has said since M0 that "moving a function between files changes
+nothing about it"; with one file there was nothing to test. The same
+function in two files now demonstrably has the same `SigId` and `BodyId`.
+
+**What does not, yet:** sharing — §9's `Rc` and `Gen` — a standard library,
+`import`, namespaces and visibility, flag parsing, environment variables,
+and standard input. All of them are now ordinary work rather than blocked
+work, which is the difference this change made.
 
 Every example declares what it prints in its own header, and a test walks
 `examples/` and checks them, so an example that stops matching the language
@@ -524,6 +569,7 @@ carry them exists now, while it is cheap.
 | [`docs/linearity-and-effects.md`](docs/linearity-and-effects.md) | The M2 gate: linear ownership, capability-typed effects, how they unify, and 23 must-reject fixtures written out as the conformance suite | settled; §3 through §8 implemented |
 | [`docs/bootstrap.md`](docs/bootstrap.md) | What M0 settled: bootstrap host (Rust), extension (`.ls`), the M0 surface, what is scaffolding and what replaces it | written |
 | [`docs/canonical-ast.md`](docs/canonical-ast.md) | Canonicalisation rules and per-unit identity: what is hashed, and what a hash is allowed to change with | written, implemented |
+| [`docs/many-files.md`](docs/many-files.md) | A program in more than one file: flat namespace, identity by content, global spans | **settled and built** — the precondition for a library of any kind |
 | [`docs/arguments.md`](docs/arguments.md) | The `Args` capability, `arg_count` / `arg`, and why reading argv is an effect | **settled and built** — the "command-line" half of M3's acceptance criterion; §7's must-reject suite is enforced |
 | [`docs/reading-references.md`](docs/reading-references.md) | `*r`, and `match` on a reference binding payloads as references | **settled and built** — closed the two limits the heap slice left open; §7's must-reject suite is enforced |
 | [`docs/heap.md`](docs/heap.md) | The `Heap` capability and `Box[T]`: why the heap cannot leak, recursive types, heap versus arena | **settled and built** — closes M2's last unchecked item; §8's must-reject suite is enforced |

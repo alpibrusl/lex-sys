@@ -8,14 +8,45 @@ use crate::lexer::{Token, TokenKind, tokenize};
 use crate::span::{Diagnostic, Span};
 
 pub fn parse(source: &str) -> Result<Ast, Diagnostic> {
-    let tokens = tokenize(source)?;
-    let mut p = Parser { source, tokens, pos: 0, ast: Ast::new(), no_struct_literal: false };
-    p.unit()?;
-    Ok(p.ast)
+    let mut ast = Ast::new();
+    parse_into(&mut ast, source, 0)?;
+    Ok(ast)
+}
+
+/// Parse one file of a program into an AST that may already hold others
+/// (`docs/many-files.md` §2).
+///
+/// `base` is the global offset this file's spans are relative to, as a
+/// [`SourceMap`](crate::span::SourceMap) handed it out. The lexer works in
+/// local offsets, so every token's span is shifted once here rather than
+/// the whole lexer learning about bases — and the one place that slices the
+/// source by a span subtracts it again.
+pub fn parse_into(ast: &mut Ast, source: &str, base: u32) -> Result<(), Diagnostic> {
+    let mut tokens = match tokenize(source) {
+        Ok(tokens) => tokens,
+        Err(mut error) => {
+            error.span = shift(error.span, base);
+            return Err(error);
+        }
+    };
+    for token in &mut tokens {
+        token.span = shift(token.span, base);
+    }
+    let owned = std::mem::take(ast);
+    let mut p = Parser { source, base, tokens, pos: 0, ast: owned, no_struct_literal: false };
+    let outcome = p.unit();
+    *ast = p.ast;
+    outcome
+}
+
+fn shift(span: Span, base: u32) -> Span {
+    Span::new(span.start + base, span.end + base)
 }
 
 struct Parser<'a> {
     source: &'a str,
+    /// What this file's spans were shifted by, so `text` can undo it.
+    base: u32,
     tokens: Vec<Token>,
     pos: usize,
     ast: Ast,
@@ -34,7 +65,9 @@ impl<'a> Parser<'a> {
     }
 
     fn text(&self, tok: Token) -> &'a str {
-        &self.source[tok.span.start as usize..tok.span.end as usize]
+        let start = (tok.span.start - self.base) as usize;
+        let end = (tok.span.end - self.base) as usize;
+        &self.source[start..end]
     }
 
     fn bump(&mut self) -> Token {
