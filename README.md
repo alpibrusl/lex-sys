@@ -123,8 +123,29 @@ cargo run -p lex-sys -- run examples/tour.ls
 
 `examples/tour.ls` is the shortest honest answer to "what can this language
 do": one section per feature, in the order the milestones added them.
+
+Two programs rather than a tour:
+
+```sh
+cargo run -p lex-sys -- run examples/pipeline.ls
+# jobs: 4 done, 2 cancelled
+# spent: 49 of 50
+# headroom: 1
+```
+
+`examples/pipeline.ls` admits a run of jobs against a budget, and is M2 as
+*one* system rather than four features side by side. A job is a linear
+resource finished exactly once — completed or cancelled, never both and
+never neither; deciding which needs its cost, and reading a field of
+something you own without spending it is a borrow; the running tally lives
+in an arena; the overrun is computed by libc through a capability that names
+libc and nothing else; and printing needs the console capability `main` was
+handed. Delete any one of those and it stops compiling.
+
 `examples/rational.ls` is a real 250-line program — exact rational arithmetic
-with a generic `Result[T]` threaded through every fallible operation.
+with a generic `Result[T]` threaded through every fallible operation. It
+predates M2 and stays that way on purpose: it is the M1 language still
+compiling unchanged.
 
 **What exists:** `int` and `bool`, functions and calls, arithmetic and
 comparison, `&&`/`||` with short-circuiting, `if`/`else`, `while`, `let`/`var`
