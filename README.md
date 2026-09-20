@@ -55,8 +55,10 @@ and requires every hash to survive.
 > out-of-range one traps, with no unchecked form to reach for.
 >
 > **Still missing:** strings and a general heap — those are the rest of M3,
-> and so are the escape hatches (§9). Do not mistake this for a usable
-> language yet.
+> and so are the escape hatches (§9). Strings are designed and not yet
+> built: [`docs/strings.md`](docs/strings.md) settles what one *is* (bytes,
+> no encoding claimed) before any code exists, the way the M2 gate did. Do
+> not mistake this for a usable language yet.
 
 ## What this is
 
@@ -370,7 +372,8 @@ carry them exists now, while it is cheap.
 | [`docs/bootstrap.md`](docs/bootstrap.md) | What M0 settled: bootstrap host (Rust), extension (`.ls`), the M0 surface, what is scaffolding and what replaces it | written |
 | [`docs/canonical-ast.md`](docs/canonical-ast.md) | Canonicalisation rules and per-unit identity: what is hashed, and what a hash is allowed to change with | written, implemented |
 | `docs/memory-model.md` | Regions, escape, the escape hatches and their cost | not written — §5 and §6 settled and built regions and escape; what remains is §9's escape hatches, which M3 needs |
-| `docs/defined-behaviour.md` | Every place C and Rust leave behaviour open, and what we define it to | **written and enforced** — overflow traps, evaluation order is left to right, and §9 names the fixture behind each rule |
+| [`docs/defined-behaviour.md`](docs/defined-behaviour.md) | Every place C and Rust leave behaviour open, and what we define it to | **written and enforced** — overflow traps, evaluation order is left to right, and §9 names the fixture behind each rule |
+| [`docs/strings.md`](docs/strings.md) | What a string is: bytes rather than an encoding, `byte` as storage rather than arithmetic, packed layout, literals and the static region | **written, not built** — the gate for M3's last item, must-reject suite stated in advance |
 
 Division already traps on a zero divisor and on `int::MIN / -1` rather than
 being undefined, with a fixture that runs the trap and asserts the process dies
