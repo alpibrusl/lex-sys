@@ -40,7 +40,9 @@ fn double(n: int) -> [] int {
 fn main(world: World) -> [] int {
     // The one place authority enters a program. `split` consumes the
     // `World`: there is exactly one, and it is spent here.
-    let Split { io } = split(world);
+    let Split { io, ffi } = split(world);
+    // Nothing here calls into C, so that authority is dropped at once.
+    release(ffi);
 
     var status = 0;
     // Threaded by borrow, not by move -- a callee should not consume its

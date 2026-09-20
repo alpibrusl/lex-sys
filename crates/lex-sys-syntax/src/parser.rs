@@ -73,6 +73,7 @@ impl<'a> Parser<'a> {
         while self.peek().kind != TokenKind::Eof {
             match self.peek().kind {
                 TokenKind::Fn => self.fn_decl()?,
+                TokenKind::Extern => self.extern_decl()?,
                 TokenKind::Struct => self.struct_decl(None, None)?,
                 TokenKind::Enum => self.enum_decl(None, None)?,
                 TokenKind::Res | TokenKind::Val => {
@@ -92,7 +93,7 @@ impl<'a> Parser<'a> {
                 }
                 other => {
                     return Err(self.err(format!(
-                        "expected `fn`, `struct` or `enum`, found {}",
+                        "expected `fn`, `extern`, `struct` or `enum`, found {}",
                         other.describe()
                     )));
                 }
@@ -129,6 +130,52 @@ impl<'a> Parser<'a> {
         let (body, end) = self.block()?;
         Ok(self.ast.push_item(
             Item::Fn(FnDecl { name, generics, regions, outlives, params, effects, ret, body }),
+            start.to(end),
+        ))
+    }
+
+    /// `extern fn abs(f: &!r Ffi("libc"), n: int) -> [ffi("libc")] int;`
+    ///
+    /// A signature and a semicolon. §8.4: the declaration is the only place
+    /// a foreign signature is written, the capability is the only way to
+    /// reach it, and the row makes the call visible in every caller's
+    /// signature all the way up.
+    fn extern_decl(&mut self) -> Result<ItemId, Diagnostic> {
+        let start = self.expect(TokenKind::Extern)?.span;
+        self.expect(TokenKind::Fn)?;
+        let name_tok = self.peek();
+        let name = self.ident()?;
+        let symbol = self.text(name_tok).to_owned();
+        // A foreign function is not generic over types -- C has no such
+        // thing -- but it is region-polymorphic, because it takes borrowed
+        // capabilities like any other function.
+        let (generics, regions, _) = self.declaration_params()?;
+        if let Some(first) = generics.first() {
+            let _ = first;
+            return Err(
+                self.err("a foreign function takes no type parameters; C has none to instantiate")
+            );
+        }
+
+        self.expect(TokenKind::LParen)?;
+        let mut params = Vec::new();
+        while self.peek().kind != TokenKind::RParen {
+            let name = self.ident()?;
+            self.expect(TokenKind::Colon)?;
+            let ty = self.type_expr()?;
+            params.push(Param { name, ty });
+            if !self.eat(TokenKind::Comma) {
+                break;
+            }
+        }
+        self.expect(TokenKind::RParen)?;
+
+        self.expect(TokenKind::Arrow)?;
+        let effects = self.effect_row()?;
+        let ret = self.type_expr()?;
+        let end = self.expect(TokenKind::Semi)?.span;
+        Ok(self.ast.push_item(
+            Item::Extern(ExternDecl { name, regions, params, effects, ret, symbol }),
             start.to(end),
         ))
     }
@@ -211,17 +258,35 @@ impl<'a> Parser<'a> {
     /// Labels are plain identifiers here. Which ones mean anything is not the
     /// parser's question: a label nothing grounds can never be performed, so
     /// §7.3 refuses it without a registry of legal names.
-    fn effect_row(&mut self) -> Result<Vec<Symbol>, Diagnostic> {
+    fn effect_row(&mut self) -> Result<Vec<EffectLabel>, Diagnostic> {
         self.expect(TokenKind::LBracket)?;
         let mut effects = Vec::new();
         while self.peek().kind != TokenKind::RBracket {
-            effects.push(self.ident()?);
+            let name = self.ident()?;
+            // `ffi("libc")` — a label narrowed to a value (§7.4). The value
+            // is a literal here and nowhere else, which is what makes the
+            // refinement structural.
+            let argument = if self.eat(TokenKind::LParen) {
+                let text = self.string_literal()?;
+                self.expect(TokenKind::RParen)?;
+                Some(text)
+            } else {
+                None
+            };
+            effects.push(EffectLabel { name, argument });
             if !self.eat(TokenKind::Comma) {
                 break;
             }
         }
         self.expect(TokenKind::RBracket)?;
         Ok(effects)
+    }
+
+    /// The text inside a string literal, without its quotes.
+    fn string_literal(&mut self) -> Result<String, Diagnostic> {
+        let tok = self.expect(TokenKind::Str)?;
+        let raw = self.text(tok);
+        Ok(raw[1..raw.len() - 1].to_owned())
     }
 
     /// `[T, &r, &s where s <= r]` after a declaration's name, or nothing.
@@ -292,6 +357,16 @@ impl<'a> Parser<'a> {
         let name = self.ident()?;
         let mut args = Vec::new();
         let mut end = tok.span;
+        // `Ffi("libc")` — a type indexed by a literal (§7.4). Parenthesised
+        // rather than bracketed because it indexes by a *value*, and the
+        // document writes it that way.
+        if self.eat(TokenKind::LParen) {
+            let text = self.string_literal()?;
+            let lit_end = self.expect(TokenKind::RParen)?.span;
+            let lit = self.ast.push_type(TypeExpr::Lit(text), tok.span.to(lit_end));
+            args.push(lit);
+            return Ok(self.ast.push_type(TypeExpr::Name { name, args }, tok.span.to(lit_end)));
+        }
         if self.eat(TokenKind::LBracket) {
             while self.peek().kind != TokenKind::RBracket {
                 args.push(self.type_expr()?);
@@ -609,6 +684,10 @@ impl<'a> Parser<'a> {
                 let value = self.int_value(tok, false)?;
                 Ok(self.ast.push_expr(Expr::Int(value), tok.span))
             }
+            TokenKind::Str => {
+                let text = self.string_literal()?;
+                Ok(self.ast.push_expr(Expr::Str(text), tok.span))
+            }
             TokenKind::True | TokenKind::False => {
                 self.bump();
                 Ok(self.ast.push_expr(Expr::Bool(tok.kind == TokenKind::True), tok.span))
@@ -714,7 +793,7 @@ mod tests {
             .iter()
             .find_map(|item| match item {
                 Item::Fn(decl) => Some(decl.clone()),
-                Item::Struct(_) | Item::Enum(_) => None,
+                Item::Struct(_) | Item::Enum(_) | Item::Extern(_) => None,
             })
             .expect("a function");
         (ast, decl)
@@ -1115,8 +1194,53 @@ mod tests {
     #[test]
     fn a_signature_carries_its_effect_row() {
         let (ast, decl) = one_fn("fn f() -> [io, fs] int { return 0; }");
-        let labels: Vec<&str> = decl.effects.iter().map(|e| ast.name_of(*e)).collect();
+        let labels: Vec<&str> = decl.effects.iter().map(|e| ast.name_of(e.name)).collect();
         assert_eq!(labels, ["io", "fs"], "the parser keeps what was written");
+        assert!(decl.effects.iter().all(|e| e.argument.is_none()));
+    }
+
+    #[test]
+    fn a_label_may_carry_a_literal() {
+        // §7.4: `ffi` and `ffi("libc")` are different labels, and the parser
+        // keeps the difference rather than dropping the argument.
+        let (ast, decl) = one_fn("fn f() -> [ffi(\"libc\"), io] int { return 0; }");
+        let written: Vec<(String, Option<String>)> = decl
+            .effects
+            .iter()
+            .map(|e| (ast.name_of(e.name).to_owned(), e.argument.clone()))
+            .collect();
+        assert_eq!(
+            written,
+            vec![("ffi".to_owned(), Some("libc".to_owned())), ("io".to_owned(), None)]
+        );
+    }
+
+    #[test]
+    fn a_foreign_declaration_is_a_signature_with_no_body() {
+        // §8.4. It is region-polymorphic like any other function, because
+        // the capability that authorises it is borrowed.
+        let ast =
+            parse("extern fn labs[&f](ffi: &f Ffi(\"libc\"), n: int) -> [ffi(\"libc\")] int;")
+                .expect("should parse");
+        let decl = ast
+            .items
+            .iter()
+            .find_map(|item| match item {
+                Item::Extern(decl) => Some(decl.clone()),
+                _ => None,
+            })
+            .expect("a foreign declaration");
+        assert_eq!(ast.name_of(decl.name), "labs");
+        assert_eq!(decl.symbol, "labs", "the linker binds the name it was given");
+        assert_eq!(decl.params.len(), 2);
+        assert_eq!(decl.regions.len(), 1);
+    }
+
+    #[test]
+    fn a_foreign_declaration_takes_no_type_parameters() {
+        // There is nothing in C to instantiate one at.
+        let err = parse("extern fn f[T](x: T) -> [] int;").expect_err("should be refused");
+        assert!(err.message.contains("no type parameters"), "{}", err.message);
     }
 
     #[test]

@@ -65,7 +65,7 @@ Rules M0 already enforces, because they were cheaper to write than to retrofit:
 
 | Scaffold | Why it exists | Replaced by |
 |---|---|---|
-| `putchar` as a compiler builtin | A program must be able to produce output before there is FFI | M2: a capability-gated foreign call. Output is an effect, and an effect must be granted |
+| `putchar` as a compiler builtin | A program must be able to produce output before there is FFI | M2 made output an effect that must be granted: `putchar` now takes an `&!i Io`. It stays a builtin because `Io` is the console rather than a named library; an `extern fn` reached through `Ffi("libc")` is what replaces it once there are strings to write |
 | Wrapping arithmetic on `+`, `-`, `*` | Overflow semantics are still an open decision (#1) | M3: *Defined-behaviour arithmetic* |
 | `cc` as the linker | The C runtime supplies `_start` and libc | Much later; "no Rust" is reachable long before "no C" |
 

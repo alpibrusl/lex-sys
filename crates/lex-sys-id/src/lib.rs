@@ -19,8 +19,8 @@
 use std::collections::HashMap;
 
 use lex_sys_syntax::ast::{
-    Ast, BinOp, Block, EnumDecl, Expr, ExprId, FnDecl, Item, Stmt, StmtId, StructDecl, Symbol,
-    TypeExpr, TypeId, UnOp,
+    Ast, BinOp, Block, EffectLabel, EnumDecl, Expr, ExprId, ExternDecl, FnDecl, Item, Stmt, StmtId,
+    StructDecl, Symbol, TypeExpr, TypeId, UnOp,
 };
 
 /// A 32-byte content hash.
@@ -106,6 +106,11 @@ mod tag {
     /// deduplicated before it is encoded, which is what "a canonical order
     /// makes an effect row hashable" means in bytes.
     pub const EFFECTS: u8 = 0x64;
+    /// A foreign declaration (`docs/linearity-and-effects.md` §8.4).
+    pub const EXTERN_DECL: u8 = 0x65;
+    /// A string literal, in the only two places one may appear: a narrowing
+    /// argument and a type indexed by a literal.
+    pub const STR: u8 = 0x66;
 
     /// The tag for a declared mode. Written out rather than cast from the
     /// enum, so adding a mode cannot silently renumber the others.
@@ -257,14 +262,23 @@ pub fn identify(ast: &Ast) -> Identities {
             Item::Enum(decl) => {
                 type_ids.insert(decl.name, hash_enum(ast, decl));
             }
-            Item::Fn(_) => {}
+            Item::Fn(_) | Item::Extern(_) => {}
         }
     }
 
     let mut sig_ids: HashMap<Symbol, Hash> = HashMap::new();
     for item in &ast.items {
-        if let Item::Fn(decl) = item {
-            sig_ids.insert(decl.name, hash_signature(ast, decl, &type_ids));
+        match item {
+            Item::Fn(decl) => {
+                sig_ids.insert(decl.name, hash_signature(ast, decl, &type_ids));
+            }
+            // A foreign declaration is a signature and nothing else, so it
+            // has one identity rather than two. A caller depends on it the
+            // same way it depends on any other signature.
+            Item::Extern(decl) => {
+                sig_ids.insert(decl.name, hash_extern(ast, decl, &type_ids));
+            }
+            _ => {}
         }
     }
 
@@ -275,6 +289,14 @@ pub fn identify(ast: &Ast) -> Identities {
                 name: ast.name_of(decl.name).to_owned(),
                 sig: sig_ids[&decl.name],
                 body: hash_body(ast, decl, &sig_ids, &type_ids),
+            }),
+            // A foreign function has no body, so its two identities are the
+            // same hash: there is nothing to rewrite that a caller could
+            // fail to notice.
+            Item::Extern(decl) => identities.functions.push(FunctionId {
+                name: ast.name_of(decl.name).to_owned(),
+                sig: sig_ids[&decl.name],
+                body: sig_ids[&decl.name],
             }),
             Item::Struct(decl) => identities.types.push(TypeDeclId {
                 name: ast.name_of(decl.name).to_owned(),
@@ -322,7 +344,18 @@ fn encode_type(
         return;
     }
 
-    let (name, args) = (written.head().expect("not a reference"), written.args().to_vec());
+    // A literal stands where a type argument does: `Ffi("libc")` is a
+    // different type from `Ffi("libm")`, and the text is the whole of the
+    // difference (§7.4).
+    if let TypeExpr::Lit(text) = written {
+        encoder.tag(tag::STR).str(text);
+        return;
+    }
+
+    let (name, args) = (
+        written.head().expect("a reference and a literal were handled above"),
+        written.args().to_vec(),
+    );
     encoder.tag(tag::TYPE_NAME);
 
     // A generic parameter is positional: `f[T](x: T)` and `f[U](x: U)` differ
@@ -367,13 +400,7 @@ fn hash_signature(ast: &Ast, decl: &FnDecl, type_ids: &HashMap<Symbol, Hash>) ->
     // row has to contain it. Sorted here rather than trusted, so two
     // spellings of one set are one signature.
     encoder.tag(tag::EFFECTS);
-    let mut effects: Vec<&str> = decl.effects.iter().map(|e| ast.name_of(*e)).collect();
-    effects.sort_unstable();
-    effects.dedup();
-    encoder.len(effects.len());
-    for label in effects {
-        encoder.str(label);
-    }
+    encode_effects(ast, &mut encoder, &decl.effects);
     encoder.len(decl.params.len());
     for param in &decl.params {
         // Parameter names are excluded: lex-sys has no named arguments, so a
@@ -381,6 +408,47 @@ fn hash_signature(ast: &Ast, decl: &FnDecl, type_ids: &HashMap<Symbol, Hash>) ->
         encode_type(ast, &mut encoder, param.ty, type_ids, &decl.generics, &decl.regions);
     }
     encode_type(ast, &mut encoder, decl.ret, type_ids, &decl.generics, &decl.regions);
+    encoder.finish(DOMAIN_SIG)
+}
+
+/// The row, canonicalised: sorted by (name, argument) and deduplicated, so
+/// two spellings of one set are one signature (§7.1).
+fn encode_effects(ast: &Ast, encoder: &mut Encoder, effects: &[EffectLabel]) {
+    encoder.tag(tag::EFFECTS);
+    let mut labels: Vec<(&str, Option<&str>)> =
+        effects.iter().map(|e| (ast.name_of(e.name), e.argument.as_deref())).collect();
+    labels.sort_unstable();
+    labels.dedup();
+    encoder.len(labels.len());
+    for (name, argument) in labels {
+        encoder.str(name);
+        match argument {
+            Some(text) => {
+                encoder.tag(tag::SOME).str(text);
+            }
+            None => {
+                encoder.tag(tag::NONE);
+            }
+        }
+    }
+}
+
+/// A foreign signature (§8.4).
+///
+/// The linker symbol is part of it: two declarations that agree on
+/// everything but which C function they bind are not the same declaration.
+fn hash_extern(ast: &Ast, decl: &ExternDecl, type_ids: &HashMap<Symbol, Hash>) -> Hash {
+    let mut encoder = Encoder::default();
+    encoder.tag(tag::EXTERN_DECL);
+    encoder.str(ast.name_of(decl.name));
+    encoder.str(&decl.symbol);
+    encoder.len(decl.regions.len());
+    encode_effects(ast, &mut encoder, &decl.effects);
+    encoder.len(decl.params.len());
+    for param in &decl.params {
+        encode_type(ast, &mut encoder, param.ty, type_ids, &[], &decl.regions);
+    }
+    encode_type(ast, &mut encoder, decl.ret, type_ids, &[], &decl.regions);
     encoder.finish(DOMAIN_SIG)
 }
 
@@ -641,6 +709,9 @@ impl BodyHasher<'_> {
             }
             Expr::Bool(value) => {
                 self.encoder.tag(tag::BOOL).bool(*value);
+            }
+            Expr::Str(text) => {
+                self.encoder.tag(tag::STR).str(text);
             }
             Expr::Name(name) => {
                 self.encoder.tag(tag::LOCAL);
@@ -1089,6 +1160,42 @@ mod tests {
         assert_eq!(
             body("fn f() -> [] int { return 1 + 1; }", "f"),
             body("fn f() -> [io] int { return 1 + 1; }", "f")
+        );
+    }
+
+    // ---- narrowing and foreign declarations (§7.4, §8.4) ---------------
+
+    #[test]
+    fn a_labels_argument_is_part_of_the_signature() {
+        // §7.4: `ffi` and `ffi("libc")` are different labels, and a caller
+        // depends on which one it is exactly as it depends on the types.
+        assert_ne!(
+            sig("fn f() -> [ffi] int { return 0; }", "f"),
+            sig("fn f() -> [ffi(\"libc\")] int { return 0; }", "f")
+        );
+        assert_ne!(
+            sig("fn f() -> [ffi(\"libc\")] int { return 0; }", "f"),
+            sig("fn f() -> [ffi(\"libm\")] int { return 0; }", "f")
+        );
+    }
+
+    #[test]
+    fn a_foreign_declaration_has_an_identity_like_any_other() {
+        // It is a signature with no body, so `SigId` and `BodyId` are the
+        // same hash: there is nothing else it could be a hash of.
+        let identities =
+            ids("extern fn labs[&f](ffi: &f Ffi(\"libc\"), n: int) -> [ffi(\"libc\")] int;");
+        let labs = identities.function("labs").expect("the foreign declaration");
+        assert_eq!(labs.sig, labs.body);
+    }
+
+    #[test]
+    fn the_library_a_foreign_function_names_reaches_its_hash() {
+        // Two declarations differing only in which library they reach are
+        // two different contracts, and a caller is entitled to notice.
+        assert_ne!(
+            sig("extern fn f[&c](ffi: &c Ffi(\"libc\")) -> [ffi(\"libc\")] int;", "f"),
+            sig("extern fn f[&c](ffi: &c Ffi(\"libm\")) -> [ffi(\"libm\")] int;", "f")
         );
     }
 

@@ -23,10 +23,16 @@ defined behaviour, and a canonical content-addressable AST designed in from day 
 > given a capability cannot perform its effect — the whole safety story,
 > stated as a type. That is §3 through §8 of the design document.
 >
-> **Still missing:** arenas, effect narrowing and FFI (§6, §7.4, §8.4), all
-> of which need capabilities that *carry data*. There are also no strings,
-> no slices and no allocation: those are M3. Do not mistake this for a
-> usable language yet.
+> **FFI is that story applied to C.** An `extern fn` declaration is reached
+> only through an `Ffi("libc")` capability, its row names the library it
+> calls into, and the two have to agree where the declaration is written.
+> The capability comes from narrowing — `Ffi("")` can become `Ffi("libc")`
+> and never the other way — so a program cannot grant itself what it was not
+> given. C's effects stop being invisible at the point they enter.
+>
+> **Still missing:** arenas (§6). There are also no strings, no slices and
+> no allocation: those are M3. Do not mistake this for a usable language
+> yet.
 
 ## What this is
 
@@ -105,6 +111,7 @@ cargo run -p lex-sys -- run examples/tour.ls
 # M2 unique: 3 5 5
 # M2 effects: 42
 # M2 capability: 88
+# M2 foreign: 7 9
 ```
 
 `examples/tour.ls` is the shortest honest answer to "what can this language
@@ -116,8 +123,8 @@ with a generic `Result[T]` threaded through every fallible operation.
 comparison, `&&`/`||` with short-circuiting, `if`/`else`, `while`, `let`/`var`
 bindings, structs, enums with exhaustive `match`, generics over both,
 `res`/`val` modes with exactly-once linearity and destructuring `let`,
-shared and unique borrows with lexical regions, exact effect rows, and
-capabilities.
+shared and unique borrows with lexical regions, exact effect rows,
+capabilities, narrowing, and capability-gated foreign calls.
 
 ```
 res struct Ticket { serial: int }
@@ -158,7 +165,8 @@ fn triple(n: int) -> [] int { return n * 3; }               // pure, and says so
 fn show[&i](io: &!i Io, n: int) -> [io] int { ... }         // borrows the console
 
 fn main(world: World) -> [] int {
-    let Split { io } = split(world);      // the one place authority comes from
+    let Split { io, ffi } = split(world); // the one place authority comes from
+    release(ffi);                         // unused authority is still a resource
     borrow mut io as &!i in { show(i, 7); }
     release(io);                          // a resource, destroyed exactly once
     return 0;
@@ -184,6 +192,29 @@ inexact row means `[]` stops meaning pure. And there is no list of legal
 labels: every `io` traces back to a builtin that performs one, so a label
 with nothing underneath it is refused the moment it is written.
 
+A foreign call is the same idea pointed at C:
+
+```
+extern fn labs[&f](ffi: &f Ffi("libc"), n: int) -> [ffi("libc")] int;
+
+let libc = narrow(ffi, "libc");        // `Ffi("")` -> `Ffi("libc")`, one way only
+borrow libc as &f in { n = labs(f, 0 - 7); }
+```
+
+The declaration is the only place a foreign signature is written, the
+capability is the only way to reach it, and the row names the library all
+the way up every caller. The two have to agree where the declaration is
+written: a foreign function that named an effect it holds no capability for,
+or held one it did not declare, is refused there rather than at the call.
+The capability itself is checked and then erased — what libc receives is the
+integer and nothing else.
+
+Narrowing is prefix extension, and it goes one way. `Ffi("")` names no
+library at all, so it authorises nothing until it is narrowed; an
+`Ffi("libcrypto")` can never become an `Ffi("libc")`. It also *consumes*
+what it attenuates, so there is no way back to the wider capability — the
+same commitment `lex-os` makes for manifests, for the same reason.
+
 There is **no borrow checker**. A region is a block, so a reference's validity
 is lexical rather than inferred: no non-lexical lifetimes, no variance, no
 dataflow. A binding is `Owned`, `Frozen` or `Locked`, set at block entry and
@@ -191,10 +222,11 @@ restored at block exit; `r_inner <= r_outer` holds exactly when the outer
 block encloses the inner one, which is a walk up a stack; and escape is an
 occurs-check over one type.
 
-**What does not, yet:** strings, slices, allocation, references, FFI — and the
-capability-typed effects that linearity exists to carry (§5 onward). That is
-why `examples/hello.ls` still packs its greeting into two 64-bit words and
-unpacks it a byte at a time.
+**What does not, yet:** strings, slices and allocation — and arenas (§6),
+the one part of the M2 document still unbuilt. That is why
+`examples/hello.ls` still packs its greeting into two 64-bit words and
+unpacks it a byte at a time, and why a foreign call can pass an integer but
+not a pointer to bytes.
 
 Every example declares what it prints in its own header, and a test walks
 `examples/` and checks them, so an example that stops matching the language
@@ -245,7 +277,7 @@ carry them exists now, while it is cheap.
 
 | Doc | What | Status |
 |---|---|---|
-| [`docs/linearity-and-effects.md`](docs/linearity-and-effects.md) | The M2 gate: linear ownership, capability-typed effects, how they unify, and 23 must-reject fixtures written out as the conformance suite | settled; §3–5, §7.1–7.3 and §8.1–8.3 implemented |
+| [`docs/linearity-and-effects.md`](docs/linearity-and-effects.md) | The M2 gate: linear ownership, capability-typed effects, how they unify, and 23 must-reject fixtures written out as the conformance suite | settled; §3–5, §7 and §8 implemented |
 | [`docs/bootstrap.md`](docs/bootstrap.md) | What M0 settled: bootstrap host (Rust), extension (`.ls`), the M0 surface, what is scaffolding and what replaces it | written |
 | [`docs/canonical-ast.md`](docs/canonical-ast.md) | Canonicalisation rules and per-unit identity: what is hashed, and what a hash is allowed to change with | written, implemented |
 | `docs/memory-model.md` | Regions, escape, the escape hatches and their cost | not written (M2) |
@@ -265,8 +297,8 @@ M0–M3 with acceptance criteria, sequencing, risks and open decisions.
 |---|---|---|
 | **M0** — native hello world ([#3](https://github.com/alpibrusl/lex-sys/issues/3)) | Lexer, parser, AST, IR, Cranelift backend, a real executable | **done** — green on both targets |
 | **M1** — typed core | Type checker, `bool`, structs, ADTs with exhaustiveness, monomorphised generics. No linearity, no effects — deliberately | **done** |
-| **M2** — the actual thesis ([#2](https://github.com/alpibrusl/lex-sys/issues/2)) | Linear ownership, effect rows and capability-passing as **one** system | **done** — §3–§5, §7.1–7.3 and §8.1–8.3; arenas, narrowing and FFI wait for capabilities that carry data |
-| **M3** — minimal but real | Slices and strings, arenas, libc FFI, settled overflow semantics, canonical printer, per-unit identity | started — per-unit identity landed |
+| **M2** — the actual thesis ([#2](https://github.com/alpibrusl/lex-sys/issues/2)) | Linear ownership, effect rows and capability-passing as **one** system | **done** — §3–§5, §7 and §8, narrowing and FFI included; arenas (§6) remain |
+| **M3** — minimal but real | Slices and strings, arenas, libc FFI, settled overflow semantics, canonical printer, per-unit identity | started — per-unit identity landed, and libc FFI arrived early with M2's capabilities |
 
 Deliberately excluded from "minimal": borrow checker, traits, `comptime`, own
 optimiser, incremental compilation, LSP, async. Each is "yes, later" — saying

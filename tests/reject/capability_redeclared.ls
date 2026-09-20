@@ -9,7 +9,9 @@ res struct Io {
 }
 
 fn main(world: World) -> [] int {
-    let Split { io } = split(world);
+    let Split { io, ffi } = split(world);
+    // Nothing here calls into C, so that authority is dropped at once.
+    release(ffi);
     release(io);
     return 0;
 }

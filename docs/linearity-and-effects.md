@@ -6,17 +6,19 @@
 > now the specification the implementation is measured against; §12 lists what
 > is still open, and nothing there blocks the rest.
 >
-> **Implemented: §3, §4, §5, §7.1–7.3 and §8.1–8.3** — modes, linearity,
-> both borrow modes, exact effect rows, and capabilities. §2's claim now
+> **Implemented: §3, §4, §5, §7 and §8** — modes, linearity, both borrow
+> modes, exact effect rows, narrowing, capabilities and FFI. §2's claim now
 > holds in code: an effect *is* a borrowed capability, `[io]` on a signature
 > means the function was handed an `&!i Io` it did not create, and the only
 > checker that runs over any of it is the linearity and borrow checker §3–§5
 > already needed.
 >
-> **Not implemented: §6, §7.4, §8.4, §9** — arenas, narrowing, FFI and the
-> escape hatches. Those add capabilities that *carry data* (`Fs(prefix)`,
-> `Ffi(library)`), which is where §7.4's refinement lives; the two
-> capabilities that exist today carry none.
+> §7.4 and §8.4 arrived together, because `Ffi(library)` is the first
+> capability that *carries data* and so the first thing there is to narrow.
+> A foreign call is now a real call into libc, gated by a capability that
+> names the library it reaches.
+>
+> **Not implemented: §6 and §9** — arenas and the escape hatches.
 >
 > Where the concrete syntax below differs from what was implemented, §5.3
 > says so and why. The syntax here was always illustrative (§1); the rules
@@ -671,16 +673,50 @@ fn widen(fs: &!f Fs) -> [fs_write("/")] int {
 }
 ```
 
+> **What was built.** `narrow(cap, "libc")`, on the one capability that
+> carries a value: `Ffi`. What a capability was narrowed to travels in its
+> type — `Ffi("libc")` and `Ffi("libm")` are different types — and the label
+> carries the same text, so `ffi` and `ffi("libc")` are different labels and
+> a row containing one is a different `SigId` from a row containing the
+> other.
+>
+> **Refinement is prefix extension**, which is what makes it checkable by
+> reading rather than by solving: `narrow(c, t)` is accepted exactly when
+> `t` extends what `c` already names, and refused otherwise. The unnarrowed
+> root is the empty string, a prefix of everything, so the `Ffi` that
+> `split` hands out can still become any library while an `Ffi("libcrypto")`
+> can never become `Ffi("libc")` — `effect_widened.ls`. Narrowing to what a
+> capability already names is refused too: it grants nothing and would read
+> as though it had.
+>
+> **Narrowing consumes.** The wider capability is spent, which is the whole
+> point — after narrowing there is no way back to it, because linearity says
+> there is no second use. For the same reason a *borrowed* capability cannot
+> be narrowed: a borrow is the promise to give it back.
+>
+> **Covering, not equality.** §8.2's discharge rule reads the same prefix
+> order: owning `Ffi("")` discharges every `ffi(...)` label, because its
+> holder can narrow to any of them, and owning a `World` discharges both
+> `io` and the `Ffi` root. That is why `main` still declares `[]` while the
+> program calls into libc.
+
 ---
 
 ## 8. Capabilities
 
 ### 8.1 What one looks like
 
-> **What was built.** `World` and `Io`, plus the `Split` that `split` hands
-> back. `Heap`, `Fs` and `Ffi` wait for allocation, the filesystem and FFI:
-> a capability for an effect nothing can perform is decoration, which is
-> what §7.3 refuses for rows and what this refuses for the same reason.
+> **What was built.** `World`, `Io` and `Ffi(library)`, plus the `Split`
+> that `split` hands back — `let Split { io, ffi } = split(world);`.
+> `Heap` and `Fs` wait for allocation and the filesystem: a capability for
+> an effect nothing can perform is decoration, which is what §7.3 refuses
+> for rows and what this refuses for the same reason.
+>
+> A capability the program does not need is still a resource, so a program
+> that calls into no library releases its `Ffi` rather than ignoring it.
+> Adding a capability to `Split` is therefore a breaking change every
+> program has to acknowledge, which is the honest cost of there being no
+> ambient authority.
 >
 > The prelude's types are predeclared rather than written in a program, and
 > a program may not declare its own — `capability_redeclared.ls`. Nor write
@@ -784,6 +820,45 @@ capability is the only way to reach it, and the row makes the call visible in
 every caller's signature all the way up. C's effects stop being invisible at
 the exact point they enter the program.
 
+> **What was built.** `extern fn` declarations, lowered to real imports and
+> called through the platform's own convention:
+>
+> ```
+> extern fn labs[&f](ffi: &f Ffi("libc"), n: int) -> [ffi("libc")] int;
+> ```
+>
+> A foreign declaration is a signature with no body, so its `SigId` and
+> `BodyId` are the same hash — there is nothing else it could be a hash of.
+> It is region-polymorphic like any other function, because the capability
+> it takes is borrowed, but it takes no type parameters: C has none to
+> instantiate.
+>
+> **The declaration is where the rules are enforced**, because it is the
+> only place the signature is written. Three of them:
+>
+> * the row and the capability parameters must agree exactly, in both
+>   directions — a declaration naming an effect it holds no capability for
+>   is `ffi_without_capability.ls`, and one holding a capability it does not
+>   declare is `foreign_effect_undeclared.ls`;
+> * the borrowed capability must name a library. The unnarrowed root names
+>   none, so `Ffi("")` is refused here — narrow first;
+> * only what C can name crosses: `int`, `bool`, `()`, and borrowed
+>   capabilities, which do not cross at all. An aggregate has no layout
+>   agreement between the two sides yet, and a reference to anything but a
+>   capability would be a pointer this compiler has not promised to lay out.
+>
+> **`int` at the boundary is the platform's 64-bit integer**, not C's
+> `int` — which is why the fixtures call `labs` rather than `abs`. A
+> narrower C integer type needs a type to name it, and M2 does not have one.
+>
+> **The capability does not travel.** It is checked, then erased: what libc
+> receives is the integer and nothing else. `narrowed_capability.ls` calls
+> `labs(-7)` and prints `7`, which it could not do if a zero-sized
+> capability were pushed in front of the argument.
+>
+> A foreign name is not also a written function's name: two answers to one
+> call is one answer too many.
+
 ---
 
 ## 9. Escape hatches
@@ -869,15 +944,18 @@ rest are the sections not yet implemented.
 | `arena_holds_res.ls` | `alloc` takes `val` data only | 6.1 | |
 | `undeclared_effect.ls` | A call's row must be a subset of the declared row | 7.2 | ✓ |
 | `effect_declared_not_performed.ls` | An over-wide row is an error | 7.3 | ✓ |
-| `effect_widened.ls` | A capability may be narrowed, never widened | 7.4 | |
+| `effect_widened.ls` | A capability may be narrowed, never widened | 7.4 | ✓ |
 | `no_ambient_capability.ls` | There is no way to obtain a capability but to be given one | 8.2 | ✓ |
 | `capability_used_after_release.ls` | A capability is a resource | 8.3 | ✓ |
 | `capability_leaked.ls` | A capability must be released | 8.3 | ✓ |
-| `ffi_without_capability.ls` | A foreign call requires its `Ffi` capability | 8.4 | |
+| `ffi_without_capability.ls` | A foreign call requires its `Ffi` capability | 8.4 | ✓ |
 
 §7 adds three more: `effect_not_propagated.ls` (a row is transitive),
 `ungrounded_effect_label.ls` (a label nothing performs) and
 `effect_row_required.ls` (the syntax).
+
+§8.4 adds one beyond the table — `foreign_effect_undeclared.ls`, a foreign
+declaration holding a capability its row does not name.
 
 §8 adds three: `world_leaked.ls` (the root is a resource too),
 `capability_destructured.ls` (taking one apart is not releasing it) and
@@ -914,7 +992,7 @@ that rejects everything is not a rule either:
 | `nested_regions.ls` | An inner region reading an outer one | ✓ |
 | `arena_roundtrip.ls` | Allocate, walk, release in O(1) | |
 | `effect_exact.ls` | A row that is exactly what the body performs | ✓ |
-| `narrowed_capability.ls` | Attenuation, and a call that fits inside it | |
+| `narrowed_capability.ls` | Attenuation, and a call that fits inside it | ✓ |
 | `threaded_io.ls` | `main` splitting `World` and threading `Io` down three frames | ✓ |
 
 ---

@@ -25,6 +25,7 @@ pub enum TokenKind {
     Match,
     Res,
     Val,
+    Extern,
     Borrow,
     As,
     In,
@@ -58,6 +59,11 @@ pub enum TokenKind {
     Slash,
     Percent,
     Bang,
+    /// A double-quoted literal. It never becomes a runtime value: the only
+    /// places one may appear are an effect label's argument and a narrowing
+    /// call, both of which are settled and erased at compile time (§7.4).
+    /// Runtime strings are M3, and they are a different thing entirely.
+    Str,
     AmpAmp,
     Amp,
     PipePipe,
@@ -83,6 +89,7 @@ impl TokenKind {
             TokenKind::Enum => "`enum`",
             TokenKind::Match => "`match`",
             TokenKind::Res => "`res`",
+            TokenKind::Extern => "`extern`",
             TokenKind::Borrow => "`borrow`",
             TokenKind::As => "`as`",
             TokenKind::In => "`in`",
@@ -118,6 +125,7 @@ impl TokenKind {
             TokenKind::Bang => "`!`",
             TokenKind::AmpAmp => "`&&`",
             TokenKind::Amp => "`&`",
+            TokenKind::Str => "a string literal",
             TokenKind::PipePipe => "`||`",
             TokenKind::Eof => "end of file",
         }
@@ -153,6 +161,32 @@ pub fn tokenize(text: &str) -> Result<Vec<Token>, Diagnostic> {
         }
 
         let start = i;
+
+        // A string literal. Deliberately austere: no escapes, no newlines.
+        // It names a library or a path at compile time and never becomes a
+        // value, so there is nothing an escape would buy that is not M3's
+        // job to provide properly.
+        if b == b'"' {
+            i += 1;
+            while i < bytes.len() && bytes[i] != b'"' {
+                if bytes[i] == b'\n' {
+                    return Err(Diagnostic::new(
+                        "a string literal may not span lines",
+                        Span::new(start as u32, i as u32),
+                    ));
+                }
+                i += 1;
+            }
+            if i == bytes.len() {
+                return Err(Diagnostic::new(
+                    "unterminated string literal",
+                    Span::new(start as u32, bytes.len() as u32),
+                ));
+            }
+            i += 1;
+            out.push(Token { kind: TokenKind::Str, span: Span::new(start as u32, i as u32) });
+            continue;
+        }
 
         if b.is_ascii_digit() {
             while i < bytes.len() && (bytes[i].is_ascii_digit() || bytes[i] == b'_') {
@@ -252,6 +286,7 @@ fn keyword(s: &str) -> Option<TokenKind> {
         "enum" => TokenKind::Enum,
         "match" => TokenKind::Match,
         "res" => TokenKind::Res,
+        "extern" => TokenKind::Extern,
         "val" => TokenKind::Val,
         "borrow" => TokenKind::Borrow,
         "as" => TokenKind::As,
@@ -313,6 +348,21 @@ mod tests {
         let src = "let x";
         let toks = tokenize(src).unwrap();
         assert_eq!(&src[toks[1].span.start as usize..toks[1].span.end as usize], "x");
+    }
+
+    #[test]
+    fn a_string_literal_is_one_token() {
+        assert_eq!(kinds("\"libc\""), vec![TokenKind::Str, TokenKind::Eof]);
+        let src = "narrow(f, \"libc\")";
+        let toks = tokenize(src).unwrap();
+        let literal = toks.iter().find(|t| t.kind == TokenKind::Str).expect("the literal");
+        assert_eq!(&src[literal.span.start as usize..literal.span.end as usize], "\"libc\"");
+    }
+
+    #[test]
+    fn an_unterminated_string_is_refused_rather_than_running_to_the_end() {
+        assert!(tokenize("\"libc").is_err());
+        assert!(tokenize("\"lib\nc\"").is_err());
     }
 
     #[test]
