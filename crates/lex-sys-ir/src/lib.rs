@@ -60,6 +60,11 @@ pub const PRELUDE_SPLIT: usize = 3;
 /// narrowed one can become another.
 pub const FFI_ROOT: &str = "";
 
+/// The one region with a name rather than a binder (`docs/strings.md` §4):
+/// where a string literal's bytes live, which is the object file rather
+/// than any frame.
+pub const STATIC_REGION: &str = "static";
+
 /// An effect row: a canonically ordered set of labels
 /// (`docs/linearity-and-effects.md` §7.1).
 ///
@@ -219,6 +224,17 @@ pub enum Builtin {
     WrappingAdd,
     WrappingSub,
     WrappingMul,
+    /// `byte_of(n: int) -> [] byte` — narrow an integer to a byte, or trap.
+    ///
+    /// `docs/strings.md` §2: it traps outside 0..255 rather than
+    /// truncating, because truncation is the silently wrong answer
+    /// `defined-behaviour.md` §2.1 already refused for `+`. A caller that
+    /// wants the low eight bits says so, once there is a mask to say it
+    /// with.
+    ByteOf,
+    /// `int_of(b: byte) -> [] int` — widen a byte, which is always defined
+    /// and always lands in 0..255.
+    IntOf,
     /// `len(s: &r [T]) -> [] int` — how many elements a slice has.
     ///
     /// Checked at the call site rather than through a written signature,
@@ -238,6 +254,8 @@ impl Builtin {
         Builtin::WrappingSub,
         Builtin::WrappingMul,
         Builtin::Len,
+        Builtin::ByteOf,
+        Builtin::IntOf,
     ];
 
     pub fn name(self) -> &'static str {
@@ -250,6 +268,8 @@ impl Builtin {
             Builtin::WrappingSub => "wrapping_sub",
             Builtin::WrappingMul => "wrapping_mul",
             Builtin::Len => "len",
+            Builtin::ByteOf => "byte_of",
+            Builtin::IntOf => "int_of",
         }
     }
 
@@ -311,6 +331,8 @@ impl Builtin {
                 (vec![Type::Int, Type::Int], Type::Int)
             }
             Builtin::Len => (Vec::new(), Type::Int),
+            Builtin::ByteOf => (vec![Type::Int], Type::Byte),
+            Builtin::IntOf => (vec![Type::Byte], Type::Int),
             // Both are checked at the call site rather than here, because a
             // fixed signature cannot say what they need. `release` ends any
             // capability, and there is more than one kind; `narrow` has an
@@ -430,6 +452,9 @@ pub enum Expr {
         index: Box<Expr>,
         element: Type,
     },
+    /// A string literal's bytes (`docs/strings.md` §4). Lowered to a
+    /// read-only data object plus the two leaves a slice is made of.
+    Bytes(String),
     /// `len(s)` — a slice's length, which travels in the slice itself.
     Len(Box<Expr>),
     /// `alloc_slice[a](count, fill)` (§6): bump-allocate `count` elements
@@ -1141,10 +1166,18 @@ pub fn lower(ast: &Ast) -> Result<Program, Diagnostic> {
                 Type::Int | Type::Bool => {}
                 Type::Ref { inner, .. } if matches!(inner.as_ref(), Type::Named(def, _) if is_capability(*def)) =>
                     {}
+                // `docs/strings.md` §6: a byte slice crosses as a pointer
+                // *and* a separate length, because C has no notion of the
+                // pair. That is what makes `write(fd, ptr, len)`
+                // expressible and `strlen(ptr)` not: this design puts no
+                // NUL anywhere, and the functions taking an explicit length
+                // are the ones that cannot run off the end.
+                Type::Ref { inner, .. } if matches!(inner.as_ref(), Type::Slice(element) if **element == Type::Byte) =>
+                    {}
                 Type::Ref { .. } => {
                     return Err(Diagnostic::new(
                         format!(
-                            "`{name}` takes `{what}` by reference, but the only reference that crosses a foreign boundary is a borrowed capability: C is not told about regions"
+                            "`{name}` takes `{what}` by reference, and the only references that cross a foreign boundary are a borrowed capability and a `[byte]` slice: C is not told about regions"
                         ),
                         span,
                     ));
@@ -1458,6 +1491,7 @@ fn settle_expr(expr: &mut Expr, unifier: &Unifier) {
             settle_expr(index, unifier);
         }
         Expr::Len(inner) => settle_expr(inner, unifier),
+        Expr::Bytes(_) => {}
         Expr::FieldRef { base, args, .. } => {
             settle_expr(base, unifier);
             for arg in args.iter_mut() {
@@ -1701,6 +1735,12 @@ fn check_region_names(
                 span,
             ));
         }
+        if text == STATIC_REGION {
+            return Err(Diagnostic::new(
+                "`static` is the region a program's literals live in; it cannot be declared",
+                span,
+            ));
+        }
         scope.push((*name, Region::Param(index as u32)));
     }
     Ok(scope)
@@ -1764,6 +1804,24 @@ fn resolve_type_at(
     // that exists nowhere.
     if let TypeExpr::Ref { unique, region, inner } = ast.ty(id) {
         let text = ast.name_of(*region);
+        // `&static [byte]` — the one region with a name rather than a
+        // binder (`docs/strings.md` §4). It outlives everything, so a
+        // function may hand a literal back to any caller; without a way to
+        // write it, a literal could not leave the function that wrote it,
+        // which is not a restriction anything is buying.
+        if text == STATIC_REGION {
+            if *unique {
+                return Err(Diagnostic::new(
+                    "`static` holds a program's literals, which are shared; there is no unique reference into it",
+                    span,
+                ));
+            }
+            return Ok(Type::Ref {
+                unique: false,
+                region: Region::Static,
+                inner: Box::new(resolve_type_at(ast, defs, generics, regions, *inner, true)?),
+            });
+        }
         let Some((_, found)) = regions.iter().rev().find(|(name, _)| name == region) else {
             return Err(Diagnostic::new(
                 format!(
@@ -1828,6 +1886,7 @@ fn resolve_type_at(
 
     let (ty, arity) = match name {
         "int" => (Type::Int, 0),
+        "byte" => (Type::Byte, 0),
         "bool" => (Type::Bool, 0),
         other => match defs.iter().find(|d| d.name == written_name) {
             Some(def) => (Type::Named(def.def, args.clone()), def.generics.len()),
@@ -2096,6 +2155,11 @@ impl<'a> FnLowering<'a> {
     fn outlives(&self, outer: Region, inner: Region) -> bool {
         match (outer, inner) {
             (a, b) if a == b => true,
+            // §4 of `docs/strings.md`: the static region outlives every
+            // other, because its data is in the object file rather than in
+            // a frame. Nothing outlives it but itself.
+            (Region::Static, _) => true,
+            (_, Region::Static) => false,
             (Region::Block(a), Region::Block(b)) => self.encloses(a, b),
             (Region::Param(_), Region::Block(_)) => true,
             (Region::Block(_), Region::Param(_)) => false,
@@ -2168,7 +2232,8 @@ impl<'a> FnLowering<'a> {
     fn in_scope(&self, region: Region, scope: Option<u32>) -> bool {
         match region {
             Region::Block(id) => scope.is_some_and(|inner| self.encloses(id, inner)),
-            // A region parameter is open for the whole body.
+            // A region parameter is open for the whole body, and the static
+            // region is open for the whole program.
             _ => true,
         }
     }
@@ -3105,14 +3170,24 @@ impl<'a> FnLowering<'a> {
         Ok(match self.ast.expr(id) {
             AstExpr::Int(v) => (Expr::Int(*v), Type::Int),
             // A literal the checker reads and the program never holds.
+            // `docs/strings.md` §4: the bytes go in the object file and the
+            // slice points at them, so the region is `static` -- it outlives
+            // everything, because the data is not in any frame.
+            //
+            // *Shared*, never unique: two occurrences of `"ok"` may be the
+            // same bytes, and a program that could write through one would
+            // be writing through both.
+            //
             // `narrow` intercepts its own argument before it reaches here,
-            // so anywhere else is a place a string cannot be.
-            AstExpr::Str(_) => {
-                return Err(Diagnostic::new(
-                    "a string literal is only a narrowing argument here; there are no strings yet (M3)",
-                    span,
-                ));
-            }
+            // so this is every other place a literal can appear.
+            AstExpr::Str(text) => (
+                Expr::Bytes(text.clone()),
+                Type::Ref {
+                    unique: false,
+                    region: Region::Static,
+                    inner: Box::new(Type::Slice(Box::new(Type::Byte))),
+                },
+            ),
             AstExpr::Bool(v) => (Expr::Bool(*v), Type::Bool),
             AstExpr::Name(name) => {
                 let text = self.ast.name_of(*name);
@@ -3406,11 +3481,15 @@ impl<'a> FnLowering<'a> {
                     // type. Structs would need a field-wise comparison, which
                     // is a decision about what equality means rather than a
                     // missing instruction, so M1 refuses instead of guessing.
+                    //
+                    // `byte` is among them: comparing storage is not
+                    // arithmetic (`docs/strings.md` §2), and a parser that
+                    // cannot say `b == byte_of(44)` is not worth having.
                     BinOp::Eq | BinOp::Ne => {
-                        if !matches!(operand, Type::Int | Type::Bool) {
+                        if !matches!(operand, Type::Int | Type::Bool | Type::Byte) {
                             return Err(Diagnostic::new(
                                 format!(
-                                    "`{}` cannot be compared with `==` (M1 compares `int` and `bool`)",
+                                    "`{}` cannot be compared with `==` (`int`, `byte` and `bool` can)",
                                     self.unifier.display(&operand)
                                 ),
                                 lhs_span,
@@ -4532,6 +4611,131 @@ mod capability_tests {
             "a `World` should occupy no machine value, got {:?}",
             main.slots[0]
         );
+    }
+}
+
+/// Strings: `docs/strings.md`.
+#[cfg(test)]
+mod string_tests {
+    use super::tests::lower_src;
+    use super::{Expr, Program, Stmt};
+
+    fn refused(src: &str) -> String {
+        lower_src(src).expect_err("this should be refused").message
+    }
+
+    fn accepted(src: &str) -> Program {
+        lower_src(src).expect("this should be accepted")
+    }
+
+    fn in_main(body: &str) -> String {
+        format!("fn main() -> [] int {{ {body} return 0; }}")
+    }
+
+    #[test]
+    fn a_literal_is_a_shared_static_byte_slice() {
+        // §1 and §4: a string is `&static [byte]`, so every slice rule
+        // applies to it and none of them had to be written twice.
+        accepted(&in_main(
+            "let s = \"hi\"; let n = len(s); let first = s[0]; let c = int_of(first);",
+        ));
+
+        // Shared: two occurrences may be the same bytes, so nothing writes
+        // through one.
+        let message = refused(&in_main("let s = \"hi\"; s[0] = byte_of(65);"));
+        assert!(message.contains("shared slice"), "{message}");
+    }
+
+    #[test]
+    fn static_outlives_every_region_and_is_not_declarable() {
+        // A literal may be handed back to any caller, because its bytes are
+        // in the object file rather than in a frame.
+        accepted(
+            "fn greeting() -> [] &static [byte] { return \"hi\"; } \
+                  fn main() -> [] int { return len(greeting()) - 2; }",
+        );
+
+        // A buffer in an arena may not: same occurs-check, same code.
+        let escaped = refused(
+            "fn build() -> [] &static [byte] \
+             { region a { return alloc_slice[a](2, byte_of(65)); } } \
+             fn main() -> [] int { return 0; }",
+        );
+        assert!(escaped.contains("may not outlive its region"), "{escaped}");
+
+        // And `static` is the one region with a name rather than a binder,
+        // so it cannot be declared as a parameter.
+        let declared = refused(
+            "fn f[&static](x: &static [byte]) -> [] int { return 0; } \
+             fn main() -> [] int { return 0; }",
+        );
+        assert!(declared.contains("cannot be declared"), "{declared}");
+
+        // Nor written unique: there is no unique reference into it.
+        let unique = refused(
+            "fn f(x: &!static [byte]) -> [] int { return 0; } \
+             fn main() -> [] int { return 0; }",
+        );
+        assert!(unique.contains("shared"), "{unique}");
+    }
+
+    #[test]
+    fn a_byte_is_storage_and_not_arithmetic() {
+        // §2, and the decision that keeps `defined-behaviour.md` §8's
+        // deferral of unsigned widths intact.
+        for expression in ["b + b", "b - b", "b * b", "b / b", "0 - b"] {
+            let message = refused(&format!(
+                "fn f(b: byte) -> [] byte {{ return {expression}; }} \
+                 fn main() -> [] int {{ return 0; }}"
+            ));
+            assert!(message.contains("byte"), "{expression}: {message}");
+        }
+
+        // Comparison is allowed: comparing storage is not arithmetic.
+        accepted(
+            "fn f(b: byte) -> [] bool { return b == byte_of(44); } \
+             fn main() -> [] int { return 0; }",
+        );
+
+        // And a byte is not an int, in either direction, without saying so.
+        let widened =
+            refused("fn f(b: byte) -> [] int { return b; } fn main() -> [] int { return 0; }");
+        assert!(widened.contains("expected `int`, found `byte`"), "{widened}");
+        accepted("fn f(b: byte) -> [] int { return int_of(b); } fn main() -> [] int { return 0; }");
+    }
+
+    #[test]
+    fn a_byte_slice_crosses_to_c_and_other_references_do_not() {
+        // §6: a pointer and a separate length, because C has no notion of
+        // the pair.
+        accepted(
+            "extern fn write[&f, &s](ffi: &f Ffi(\"libc\"), fd: int, buf: &s [byte], n: int) \
+             -> [ffi(\"libc\")] int; \
+             fn main() -> [] int { return 0; }",
+        );
+
+        // A reference to anything else still stops at the checker.
+        let other = refused(
+            "struct P { x: int } \
+             extern fn f[&c, &r](ffi: &c Ffi(\"libc\"), p: &r P) -> [ffi(\"libc\")] int; \
+             fn main() -> [] int { return 0; }",
+        );
+        assert!(other.contains("borrowed capability"), "{other}");
+    }
+
+    #[test]
+    fn a_literal_carries_its_bytes_and_not_its_spelling() {
+        // `canonical-ast.md` §3: the AST keeps values, not spellings, so an
+        // escape is resolved by the parser and never reaches the tree.
+        let program = accepted(&in_main("let s = \"a\\nb\"; let n = len(s);"));
+        let main = program.func(program.find("main").expect("main"));
+        // Read the node rather than its `Debug` rendering, which would
+        // escape the newline straight back again.
+        let Some(Stmt::Store { value: Expr::Bytes(text), .. }) = main.body.first() else {
+            panic!("a literal, got {:?}", main.body.first())
+        };
+        assert_eq!(text, "a\nb", "the escape should already be resolved");
+        assert_eq!(text.len(), 3, "three bytes, not four");
     }
 }
 

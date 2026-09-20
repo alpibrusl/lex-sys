@@ -254,6 +254,44 @@ fn printing_preserves_every_identity_and_is_idempotent() {
 }
 
 #[test]
+fn byte_of_traps_outside_a_byte_rather_than_truncating() {
+    // `docs/strings.md` §2: truncation is the silently wrong answer
+    // `defined-behaviour.md` §2.1 already refused for `+`. One unsigned
+    // comparison covers both ends, so `byte_of(-1)` dies with `byte_of(256)`.
+    for value in ["256", "0 - 1"] {
+        let dir = scratch(&format!("byte-range-{}", value.replace([' ', '-'], "")));
+        let source = dir.join("byte.ls");
+        std::fs::write(
+            &source,
+            format!(
+                "fn main(world: World) -> [] int {{\n\
+                     let Split {{ io, ffi }} = split(world); release(ffi); release(io);\n\
+                     return int_of(byte_of({value}));\n\
+                 }}\n"
+            ),
+        )
+        .expect("a writable fixture");
+        let exe = dir.join("byte");
+
+        let build = Command::new(BIN)
+            .args(["build".as_ref(), source.as_os_str(), "-o".as_ref(), exe.as_os_str()])
+            .output()
+            .expect("the compiler runs");
+        assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+
+        let run = Command::new(&exe).output().expect("the compiled program runs");
+        assert!(!run.status.success(), "`byte_of({value})` should not succeed");
+        assert_eq!(
+            run.status.code(),
+            None,
+            "`byte_of({value})` should be killed by a signal, not exit"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[test]
 fn indexing_past_a_slice_traps_rather_than_reading_on() {
     // `docs/defined-behaviour.md` §1: the alternative to a bounds check is
     // reading past the end of an allocation, and this language has no

@@ -1,47 +1,28 @@
 // hello.ls — the smoke program (#3), and the narrowest program the language
 // can express.
 //
-// It is still written the way M0 forced: there are no strings and no arrays
-// even now, so the greeting travels as two packed 64-bit words, seven bytes
-// each, unpacked a byte at a time. M3's slices are what change that.
+// For three milestones this file packed its greeting into two 64-bit words
+// and unpacked it a byte at a time, because there were no strings. M3's
+// `docs/strings.md` is what removed the workaround, and this file is the
+// clearest signal it landed: the greeting is now a greeting.
 //
-// Deliberately left in its original form. The language has grown a type
-// system, structs, enums and generics since — see `tour.ls` for those — and
-// this file is worth keeping as the thing CI has built and run on both targets
-// since the first milestone.
-//
+// What is left is not boilerplate. `main` takes the `World` the runtime
+// hands it, splits it, and threads the console capability down to the one
+// function that writes — delete the `io` parameter from `write_all` and the
+// body stops compiling. That is the language's whole argument in ten lines.
 //~ STDOUT Hello, world!
 //~ EXIT 0
 
-// Write the low seven bytes of `word`, least significant first.
-fn put_word[&i](io: &!i Io, word: int) -> [io] int {
-    var rest = word;
-    var written = 0;
-    while rest > 0 {
-        putchar(io, rest % 256);
-        rest = rest / 256;
-        written = written + 1;
+// A string is `&r [byte]`: an ordinary slice, so an ordinary reference.
+// `len` reads the length that travels beside the pointer, and every index
+// is bounds-checked.
+fn write_all[&r, &i](io: &!i Io, s: &r [byte]) -> [io] int {
+    var n = 0;
+    while n < len(s) {
+        putchar(io, int_of(s[n]));
+        n = n + 1;
     }
-    return written;
-}
-
-// "Hello, " and "world!\n", little-endian in base 256.
-fn greeting_head() -> [] int {
-    return 9056056326776136;
-}
-
-fn greeting_tail() -> [] int {
-    return 2851464966991735;
-}
-
-fn run[&i](io: &!i Io) -> [io] int {
-    let written = put_word(io, greeting_head()) + put_word(io, greeting_tail());
-    if written == 14 {
-        return 0;
-    } else {
-        // Unreachable unless codegen is wrong, and then the exit status says so.
-        return 1;
-    }
+    return len(s);
 }
 
 fn main(world: World) -> [] int {
@@ -50,14 +31,19 @@ fn main(world: World) -> [] int {
     let Split { io, ffi } = split(world);
     // Nothing here calls into C, so that authority is dropped at once.
     release(ffi);
-    var status = 0;
+
+    var written = 0;
     // Threaded by borrow, not by move: a callee should not consume its
     // caller's authority.
     borrow mut io as &!i in {
-        status = run(i);
+        written = write_all(i, "Hello, world!\n");
     }
+
     // Authority is a resource, so it is destroyed exactly once. A program
     // that forgets this does not compile.
     release(io);
-    return status;
+    if written == 14 {
+        return 0;
+    }
+    return 1;
 }

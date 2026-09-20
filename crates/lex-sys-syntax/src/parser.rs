@@ -283,10 +283,32 @@ impl<'a> Parser<'a> {
     }
 
     /// The text inside a string literal, without its quotes.
+    /// The literal's *bytes*, with escapes already resolved.
+    ///
+    /// Resolved here rather than left for the checker because the AST keeps
+    /// values and not spellings (`canonical-ast.md` §3): `"\n"` and a
+    /// literal newline would be the same string if one could be written, so
+    /// they are the same node.
     fn string_literal(&mut self) -> Result<String, Diagnostic> {
         let tok = self.expect(TokenKind::Str)?;
         let raw = self.text(tok);
-        Ok(raw[1..raw.len() - 1].to_owned())
+        let inner = &raw[1..raw.len() - 1];
+        let mut out = String::with_capacity(inner.len());
+        let mut chars = inner.chars();
+        while let Some(c) = chars.next() {
+            if c != '\\' {
+                out.push(c);
+                continue;
+            }
+            // The lexer already refused anything else.
+            match chars.next().expect("the lexer checked the escape") {
+                'n' => out.push('\n'),
+                't' => out.push('\t'),
+                '0' => out.push('\0'),
+                other => out.push(other),
+            }
+        }
+        Ok(out)
     }
 
     /// `[T, &r, &s where s <= r]` after a declaration's name, or nothing.

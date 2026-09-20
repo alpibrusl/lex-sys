@@ -17,7 +17,7 @@ use cranelift_codegen::ir::{
 use cranelift_codegen::settings::{self, Configurable};
 use cranelift_codegen::{Context, isa};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
-use cranelift_module::{FuncId, Linkage, Module, default_libcall_names};
+use cranelift_module::{DataDescription, FuncId, Linkage, Module, default_libcall_names};
 use cranelift_object::{ObjectBuilder, ObjectModule};
 use lex_sys_ir::{
     Arm, BinOp, Builtin, Callee, Expr, Func, FuncId as IrFuncId, Place, Program, Slot, Stmt,
@@ -42,10 +42,27 @@ use target_lexicon::Triple;
 /// comparison *is* a `bool` with nothing to convert. M0 widened every
 /// comparison to `i64` and called it an `int`; the type system now says what
 /// was always true about the value.
+/// Does this parameter reach the foreign function, or stop at the checker?
+///
+/// A borrowed capability carries no data and stops here (§8.1). A byte
+/// slice crosses as both its leaves — a pointer and a length — because
+/// `docs/strings.md` §6 says C is handed the pair as two arguments.
+fn crosses_to_c(ty: &Type) -> bool {
+    match ty {
+        Type::Ref { inner, .. } => {
+            matches!(inner.as_ref(), Type::Slice(element) if **element == Type::Byte)
+        }
+        _ => true,
+    }
+}
+
 fn leaves_into(ty: &Type, program: &Program, pointer: types::Type, out: &mut Vec<types::Type>) {
     match ty {
         Type::Int => out.push(types::I64),
-        Type::Bool => out.push(types::I8),
+        // A byte and a bool are both one byte wide. That they share a
+        // machine type is not an invitation to mix them: the checker keeps
+        // them apart, and `byte` has no arithmetic to mix *with*.
+        Type::Byte | Type::Bool => out.push(types::I8),
         // A generic type's members are written in terms of its parameters, so
         // they are substituted here rather than monomorphised: `Pair[int,
         // bool]` and `Pair[bool, int]` are two leaf layouts of one
@@ -274,7 +291,7 @@ impl<'a> Emitter<'a> {
         for ext in &self.program.externs {
             let mut sig = self.module.make_signature();
             sig.call_conv = call_conv;
-            for param in ext.params.iter().filter(|t| !matches!(t, Type::Ref { .. })) {
+            for param in ext.params.iter().filter(|t| crosses_to_c(t)) {
                 for leaf in leaves(param, self.program, pointer) {
                     sig.params.push(AbiParam::new(leaf));
                 }
@@ -376,6 +393,12 @@ struct BodyEmitter<'a, 'f> {
     pointer: types::Type,
     /// Where each slot's leaves begin among the function's variables.
     slot_base: Vec<u32>,
+    /// How many string literals have been emitted so far, so each gets its
+    /// own symbol. Two occurrences of the same text get two data objects:
+    /// interning is an optimisation that changes whether they share an
+    /// address, which is observable, so `docs/strings.md` §8 keeps it open
+    /// until there is a rule for it.
+    literals: u32,
     /// Each open arena's base pointer and bump pointer, indexed by the arena
     /// number `Stmt::Region` carries. Variables rather than values because a
     /// `region` inside a loop opens a fresh arena on every iteration.
@@ -413,6 +436,7 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
             return_pointer: None,
             pointer,
             slot_base,
+            literals: 0,
             arenas: Vec::new(),
             next_var,
         }
@@ -686,6 +710,37 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
         at
     }
 
+    /// A string literal: its bytes into read-only data, and the two leaves
+    /// a slice is made of pointing at them (`docs/strings.md` §4).
+    ///
+    /// The data is `Local` and not writable, which is what makes the
+    /// *shared* slice honest — there is no unique reference to it anywhere,
+    /// and the section it lands in would refuse a write anyway.
+    fn bytes(&mut self, text: &str) -> Vec<Value> {
+        let pointer = self.pointer;
+        let name = format!("{PREFIX}str_{}_{}", self.func.name, self.literals);
+        self.literals += 1;
+
+        let mut description = DataDescription::new();
+        // An empty literal still needs an address, because a slice is a
+        // pointer and a length and the pointer has to be *some*thing. One
+        // byte nobody reads is the cheapest honest answer: the length is
+        // zero, and every index is checked against it.
+        let contents: Vec<u8> = if text.is_empty() { vec![0] } else { text.as_bytes().to_vec() };
+        description.define(contents.into_boxed_slice());
+
+        let id = self
+            .module
+            .declare_data(&name, Linkage::Local, false, false)
+            .expect("a fresh name for each literal");
+        self.module.define_data(id, &description).expect("each literal is defined once");
+
+        let value = self.module.declare_data_in_func(id, self.builder.func);
+        let start = self.builder.ins().global_value(pointer, value);
+        let len = self.builder.ins().iconst(types::I64, text.len() as i64);
+        vec![start, len]
+    }
+
     /// `alloc_slice[a](count, fill)` — `count` copies of `fill`, contiguous.
     ///
     /// Returns the two leaves a slice is made of: where it starts and how
@@ -693,8 +748,7 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
     fn alloc_slice(&mut self, arena: u32, element: &Type, count: &Expr, fill: &Expr) -> Vec<Value> {
         let count = self.scalar(count);
         let values = self.expr(fill);
-        let stride = i64::from(leaf_count(element, self.program, self.pointer))
-            * i64::from(RETURN_SLOT_STRIDE);
+        let stride = self.stride(element);
 
         // A negative length is not a small allocation, it is a mistake, and
         // reading `s[0]` of one would be reading memory nobody reserved.
@@ -740,6 +794,23 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
         vec![start, count]
     }
 
+    /// How many bytes one element of a slice takes.
+    ///
+    /// Everything is leaf-stride apart except `byte`, which is packed one
+    /// per byte (`docs/strings.md` §3): a string at 8 bytes per character
+    /// could not be handed to C, and would not be a string so much as a
+    /// rumour of one. This is the only size in the language that is not a
+    /// multiple of 8, and it is confined to `byte` on purpose.
+    fn stride(&self, element: &Type) -> i64 {
+        match element {
+            Type::Byte => 1,
+            other => {
+                i64::from(leaf_count(other, self.program, self.pointer))
+                    * i64::from(RETURN_SLOT_STRIDE)
+            }
+        }
+    }
+
     /// Where element `index` of a slice lives, with the bounds check in
     /// front of it (`docs/defined-behaviour.md` §1).
     ///
@@ -753,8 +824,7 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
         let out_of_range = self.builder.ins().icmp(IntCC::UnsignedGreaterThanOrEqual, index, len);
         self.builder.ins().trapnz(out_of_range, TrapCode::HEAP_OUT_OF_BOUNDS);
 
-        let stride = i64::from(leaf_count(element, self.program, self.pointer))
-            * i64::from(RETURN_SLOT_STRIDE);
+        let stride = self.stride(element);
         let offset = self.builder.ins().imul_imm(index, stride);
         self.builder.ins().iadd(start, offset)
     }
@@ -1068,6 +1138,10 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
             // The length is the slice's second leaf: already there, never
             // computed.
             Expr::Len(slice) => vec![self.expr(slice)[1]],
+            Expr::Bytes(text) => {
+                let text = text.clone();
+                self.bytes(&text)
+            }
             Expr::FieldRef { base, def, args, index } => {
                 let address = self.scalar(base);
                 let TypeInfo::Struct { fields, .. } = self.program.type_info(*def) else {
@@ -1162,7 +1236,7 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
                     Callee::Extern(index) => evaluated
                         .into_iter()
                         .zip(&self.program.externs[*index as usize].params)
-                        .filter(|(_, param)| !matches!(param, Type::Ref { .. }))
+                        .filter(|(_, param)| crosses_to_c(param))
                         .flat_map(|(values, _)| values)
                         .collect(),
                     Callee::Fn(_) => evaluated.into_iter().flatten().collect(),
@@ -1232,6 +1306,23 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
                     // its argument's element type is what decides it.
                     Callee::Builtin(Builtin::Len) => {
                         unreachable!("`len` is lowered as `Expr::Len`")
+                    }
+                    // §2: narrow or trap. Truncation is the silently wrong
+                    // answer `defined-behaviour.md` §2.1 already refused.
+                    Callee::Builtin(Builtin::ByteOf) => {
+                        let n = args[0];
+                        // One unsigned comparison covers both ends, exactly
+                        // as the bounds check does: a negative integer read
+                        // as unsigned is enormous, so `n > 255` catches it.
+                        let out_of_range =
+                            self.builder.ins().icmp_imm(IntCC::UnsignedGreaterThan, n, 255);
+                        self.builder.ins().trapnz(out_of_range, TrapCode::INTEGER_OVERFLOW);
+                        vec![self.builder.ins().ireduce(types::I8, n)]
+                    }
+                    // Always defined, and always lands in 0..255 -- which is
+                    // why it widens *unsigned* rather than sign-extending.
+                    Callee::Builtin(Builtin::IntOf) => {
+                        vec![self.builder.ins().uextend(types::I64, args[0])]
                     }
                     Callee::Builtin(Builtin::PutChar) => {
                         let f = self.module.declare_func_in_func(self.putchar, self.builder.func);
