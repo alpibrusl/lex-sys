@@ -1014,8 +1014,15 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
                 out
             }
             Expr::Neg(inner) => {
+                // Negation overflows in exactly one place -- `-int::MIN` has
+                // no positive counterpart -- so it is a checked subtraction
+                // from zero rather than an `ineg` that would quietly hand
+                // back `int::MIN` again.
                 let v = self.scalar(inner);
-                vec![self.builder.ins().ineg(v)]
+                let zero = self.builder.ins().iconst(types::I64, 0);
+                let (value, overflowed) = self.builder.ins().ssub_overflow(zero, v);
+                self.builder.ins().trapnz(overflowed, TrapCode::INTEGER_OVERFLOW);
+                vec![value]
             }
             Expr::Not(inner) => {
                 // A `bool` is 0 or 1, so flipping the low bit is the negation.
@@ -1100,6 +1107,19 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
                         let kinds = leaves(&ret, self.program, self.pointer);
                         self.load_leaves(buffer, &kinds)
                     }
+                    // The escape from checked arithmetic. `iadd`/`isub`/
+                    // `imul` are two's-complement wraparound, which is what
+                    // was asked for here — the checked forms above are the
+                    // ones that trap.
+                    Callee::Builtin(Builtin::WrappingAdd) => {
+                        vec![self.builder.ins().iadd(args[0], args[1])]
+                    }
+                    Callee::Builtin(Builtin::WrappingSub) => {
+                        vec![self.builder.ins().isub(args[0], args[1])]
+                    }
+                    Callee::Builtin(Builtin::WrappingMul) => {
+                        vec![self.builder.ins().imul(args[0], args[1])]
+                    }
                     Callee::Builtin(Builtin::PutChar) => {
                         let f = self.module.declare_func_in_func(self.putchar, self.builder.func);
                         let arg = self.builder.ins().ireduce(types::I32, args[0]);
@@ -1146,9 +1166,28 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
 
     fn binary(&mut self, op: BinOp, a: Value, b: Value) -> Value {
         let cc = match op {
-            BinOp::Add => return self.builder.ins().iadd(a, b),
-            BinOp::Sub => return self.builder.ins().isub(a, b),
-            BinOp::Mul => return self.builder.ins().imul(a, b),
+            // `int` is 64-bit two's complement and arithmetic on it is
+            // *checked*: a result that does not fit traps rather than
+            // wrapping (`docs/defined-behaviour.md`). Wrapping silently is
+            // not undefined behaviour, but it is a silently wrong answer,
+            // and the whole point of dividing by zero trapping is that this
+            // language does not hand those back. `wrapping_add` and its two
+            // siblings are there for when wraparound is the intent.
+            BinOp::Add => {
+                let (value, overflowed) = self.builder.ins().sadd_overflow(a, b);
+                self.builder.ins().trapnz(overflowed, TrapCode::INTEGER_OVERFLOW);
+                return value;
+            }
+            BinOp::Sub => {
+                let (value, overflowed) = self.builder.ins().ssub_overflow(a, b);
+                self.builder.ins().trapnz(overflowed, TrapCode::INTEGER_OVERFLOW);
+                return value;
+            }
+            BinOp::Mul => {
+                let (value, overflowed) = self.builder.ins().smul_overflow(a, b);
+                self.builder.ins().trapnz(overflowed, TrapCode::INTEGER_OVERFLOW);
+                return value;
+            }
             // Cranelift's `sdiv`/`srem` trap on a zero divisor and on
             // `int::MIN / -1`. A trap is defined behaviour; C's answer here is
             // not, which is the difference the language exists to make (#1).

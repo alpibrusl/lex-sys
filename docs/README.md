@@ -1,19 +1,23 @@
 # Design documents
 
-Design lands here before the code that implements it. M0 is built
-(`docs/bootstrap.md` records what it settled); everything below M2 is still
-paper, which is the cheap place for it to be wrong.
+Design lands here before the code that implements it, which is the cheap
+place for it to be wrong. M0, M1 and M2 are built; `bootstrap.md` records
+what M0 settled, and `linearity-and-effects.md` carries a "what was built"
+note in every section whose code exists.
 
 | Doc | Purpose | Status |
 |---|---|---|
-| `linearity-and-effects.md` | The core type-system rules: linear/affine ownership, capability-typed effects, how they unify, and the cases that **must** be rejected. Worked examples throughout. | **written** ([#2](https://github.com/alpibrusl/lex-sys/issues/2)) — awaiting review |
+| `linearity-and-effects.md` | The core type-system rules: linear/affine ownership, capability-typed effects, how they unify, and the cases that **must** be rejected. Worked examples throughout. | **settled and built** ([#2](https://github.com/alpibrusl/lex-sys/issues/2)) — §3 through §8 implemented, every row of §11's must-reject table enforced by a fixture |
 | `bootstrap.md` | What M0 settled to exist: bootstrap host language, file extension, layout, the M0 surface, what is scaffolding and what replaces it. | written ([#3](https://github.com/alpibrusl/lex-sys/issues/3)) |
 | `canonical-ast.md` | AST shape, canonicalisation rules, per-unit identity (signature vs body hashing), and the determinism invariants. | **written** — implemented by `lex-sys-id`; `lex-sys ids <file>` prints them. §8 lists what is not yet a contract |
 | `memory-model.md` | Regions/arenas, what escapes, the escape hatches (refcount / generational refs) and their runtime cost. | not written — §5 and §6 of `linearity-and-effects.md` settled regions, arenas and escape, and both are built; §9's escape hatches are what is left, and M3 is what needs them |
-| `defined-behaviour.md` | Every place C/Rust leave behaviour open, and what we define it to instead. Integer overflow, evaluation order, layout. | not written — needed for M3. Division already traps rather than being undefined, with a fixture to prove it |
+| `defined-behaviour.md` | Every place C/Rust leave behaviour open, and what we define it to instead. Integer overflow, evaluation order, layout. | **written and enforced** — overflow traps, evaluation order is left to right everywhere, and §9 lists the fixture behind each rule. §8 is what does not exist yet, which is absent rather than undefined |
 
-`linearity-and-effects.md` is the gating artifact: it is the decision set that
-determines whether this is a three-month prototype or a three-year project, and
-nothing in M2 should start before it is settled. It is written; it is not
-*settled* until it has been reviewed, and its must-reject list has been read as
-what it is — the M2 conformance suite, stated in advance.
+`linearity-and-effects.md` was the gating artifact: the decision set that
+determined whether this is a three-month prototype or a three-year project.
+It was settled before M2 started, its must-reject list was read as what it is
+— the M2 conformance suite, stated in advance — and M2 was then built against
+it slice by slice. Every rule in it now has a fixture, and the two places the
+implementation had to decide something the document left open (§3.1's
+instantiation rule, §6's unique-to-shared coercion) are written back into it
+rather than living only in code.

@@ -36,6 +36,15 @@ defined behaviour, and a canonical content-addressable AST designed in from day 
 > borrow, checked by the same occurs-check, which is what §5's lexical bet
 > was for. **M2 is complete.**
 >
+> **And arithmetic is checked.** `int` is 64-bit two's complement, and `+`,
+> `-`, `*` and unary `-` produce the right answer or **trap** — they never
+> wrap. Wrapping is still expressible, but it has to be asked for by name
+> (`wrapping_add`), because a silently wrong answer is worse than a stopped
+> process. Evaluation order is left to right everywhere, including a struct
+> literal's fields, which is enforced rather than merely intended. That is
+> [`docs/defined-behaviour.md`](docs/defined-behaviour.md), and every rule in
+> it has a fixture.
+>
 > **Still missing:** strings, slices and a general heap — those are M3, and
 > so are the escape hatches (§9). Do not mistake this for a usable language
 > yet.
@@ -63,6 +72,8 @@ Three things Lex's philosophy buys that no systems language currently combines:
 2. **Determinism as a language property.** No UB, defined evaluation order,
    deterministic layout. This is what makes replay, attestation and
    content-addressing mean anything — and it is exactly what C throws away.
+   Written out operation by operation in
+   [`docs/defined-behaviour.md`](docs/defined-behaviour.md).
 3. **A checker that is fast and total,** because the guarantee is only worth what
    it costs to verify.
 
@@ -119,6 +130,7 @@ cargo run -p lex-sys -- run examples/tour.ls
 # M2 capability: 88
 # M2 foreign: 7 9
 # M2 arena: 1 4 9 -> 14
+# M3 arithmetic: 6 1
 ```
 
 `examples/tour.ls` is the shortest honest answer to "what can this language
@@ -152,7 +164,8 @@ comparison, `&&`/`||` with short-circuiting, `if`/`else`, `while`, `let`/`var`
 bindings, structs, enums with exhaustive `match`, generics over both,
 `res`/`val` modes with exactly-once linearity and destructuring `let`,
 shared and unique borrows with lexical regions, exact effect rows,
-capabilities, narrowing, capability-gated foreign calls, and arenas.
+capabilities, narrowing, capability-gated foreign calls, arenas, and
+checked arithmetic.
 
 ```
 res struct Ticket { serial: int }
@@ -327,7 +340,7 @@ carry them exists now, while it is cheap.
 | [`docs/bootstrap.md`](docs/bootstrap.md) | What M0 settled: bootstrap host (Rust), extension (`.ls`), the M0 surface, what is scaffolding and what replaces it | written |
 | [`docs/canonical-ast.md`](docs/canonical-ast.md) | Canonicalisation rules and per-unit identity: what is hashed, and what a hash is allowed to change with | written, implemented |
 | `docs/memory-model.md` | Regions, escape, the escape hatches and their cost | not written — §5 and §6 settled and built regions and escape; what remains is §9's escape hatches, which M3 needs |
-| `docs/defined-behaviour.md` | Every place C and Rust leave behaviour open, and what we define it to | not written (M3) |
+| `docs/defined-behaviour.md` | Every place C and Rust leave behaviour open, and what we define it to | **written and enforced** — overflow traps, evaluation order is left to right, and §9 names the fixture behind each rule |
 
 Division already traps on a zero divisor and on `int::MIN / -1` rather than
 being undefined, with a fixture that runs the trap and asserts the process dies
@@ -344,7 +357,7 @@ M0–M3 with acceptance criteria, sequencing, risks and open decisions.
 | **M0** — native hello world ([#3](https://github.com/alpibrusl/lex-sys/issues/3)) | Lexer, parser, AST, IR, Cranelift backend, a real executable | **done** — green on both targets |
 | **M1** — typed core | Type checker, `bool`, structs, ADTs with exhaustiveness, monomorphised generics. No linearity, no effects — deliberately | **done** |
 | **M2** — the actual thesis ([#2](https://github.com/alpibrusl/lex-sys/issues/2)) | Linear ownership, effect rows and capability-passing as **one** system | **complete** — §3 through §8 of the design document, every must-reject fixture enforced |
-| **M3** — minimal but real | Slices and strings, arenas, libc FFI, settled overflow semantics, canonical printer, per-unit identity | started — per-unit identity landed, and arenas and libc FFI arrived early with M2's regions and capabilities |
+| **M3** — minimal but real | Slices and strings, arenas, libc FFI, settled overflow semantics, canonical printer, per-unit identity | started — per-unit identity, overflow semantics, arenas and libc FFI are in; slices, strings and the canonical printer remain |
 
 Deliberately excluded from "minimal": borrow checker, traits, `comptime`, own
 optimiser, incremental compilation, LSP, async. Each is "yes, later" — saying

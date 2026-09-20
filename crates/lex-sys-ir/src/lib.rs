@@ -207,11 +207,30 @@ pub enum Builtin {
     /// a program that forgets this does not compile (§8.3). It is an
     /// ordinary consumer, in the sense §4.1 means.
     Release,
+    /// `wrapping_add(a: int, b: int) -> [] int`, and its two siblings —
+    /// two's-complement arithmetic that wraps instead of trapping.
+    ///
+    /// `+` is checked (`docs/defined-behaviour.md`), because a silently
+    /// wrong answer is what the whole design refuses. But wraparound is the
+    /// *intent* in a checksum, a hash or a counter, and a language that
+    /// cannot express it forces the workaround to be worse than the thing.
+    /// So it is spelled out: wrapping is what you asked for, not what you
+    /// got away with.
+    WrappingAdd,
+    WrappingSub,
+    WrappingMul,
 }
 
 impl Builtin {
-    pub const ALL: &'static [Builtin] =
-        &[Builtin::PutChar, Builtin::Split, Builtin::Release, Builtin::Narrow];
+    pub const ALL: &'static [Builtin] = &[
+        Builtin::PutChar,
+        Builtin::Split,
+        Builtin::Release,
+        Builtin::Narrow,
+        Builtin::WrappingAdd,
+        Builtin::WrappingSub,
+        Builtin::WrappingMul,
+    ];
 
     pub fn name(self) -> &'static str {
         match self {
@@ -219,6 +238,9 @@ impl Builtin {
             Builtin::Split => "split",
             Builtin::Release => "release",
             Builtin::Narrow => "narrow",
+            Builtin::WrappingAdd => "wrapping_add",
+            Builtin::WrappingSub => "wrapping_sub",
+            Builtin::WrappingMul => "wrapping_mul",
         }
     }
 
@@ -230,7 +252,7 @@ impl Builtin {
     pub fn symbol(self) -> Option<&'static str> {
         match self {
             Builtin::PutChar => Some("putchar"),
-            Builtin::Split | Builtin::Release | Builtin::Narrow => None,
+            _ => None,
         }
     }
 
@@ -244,7 +266,7 @@ impl Builtin {
     pub fn erased_args(self) -> usize {
         match self {
             Builtin::PutChar => 1,
-            Builtin::Split | Builtin::Release | Builtin::Narrow => 0,
+            _ => 0,
         }
     }
 
@@ -253,7 +275,7 @@ impl Builtin {
     pub fn regions(self) -> usize {
         match self {
             Builtin::PutChar => 1,
-            Builtin::Split | Builtin::Release | Builtin::Narrow => 0,
+            _ => 0,
         }
     }
 
@@ -276,6 +298,9 @@ impl Builtin {
                 Type::Int,
             ),
             Builtin::Split => (vec![named(PRELUDE_WORLD)], named(PRELUDE_SPLIT)),
+            Builtin::WrappingAdd | Builtin::WrappingSub | Builtin::WrappingMul => {
+                (vec![Type::Int, Type::Int], Type::Int)
+            }
             // Both are checked at the call site rather than here, because a
             // fixed signature cannot say what they need. `release` ends any
             // capability, and there is more than one kind; `narrow` has an
@@ -298,7 +323,9 @@ impl Builtin {
             // observes nothing outside the program and releasing a
             // capability only ends one; what a capability *authorises* is
             // where the effect is.
-            Builtin::Split | Builtin::Release | Builtin::Narrow => Effects::pure(),
+            // Arithmetic is not an effect, wrapping or not: it observes
+            // nothing outside the program and needs no authority.
+            _ => Effects::pure(),
         }
     }
 
@@ -2917,6 +2944,7 @@ impl<'a> FnLowering<'a> {
                     fields_decl.iter().map(|(n, t)| (*n, t.substitute(&type_args, &[]))).collect();
 
                 let mut values: Vec<Option<Expr>> = vec![None; declared.len()];
+                let mut written_so_far: Option<usize> = None;
                 for (field, value) in fields {
                     let field_text = self.ast.name_of(*field);
                     let Some(index) = declared.iter().position(|(n, _)| n == field) else {
@@ -2931,6 +2959,26 @@ impl<'a> FnLowering<'a> {
                             span,
                         ));
                     }
+                    // The fields run in *declaration* order, because that is
+                    // the order a struct's leaves are laid out in and the
+                    // order the backend evaluates them. Writing them in some
+                    // other order would mean side effects happening in an
+                    // order the text does not show -- so it is refused
+                    // rather than silently reordered
+                    // (`docs/defined-behaviour.md`). The order you read is
+                    // the order it runs.
+                    if let Some(previous) = written_so_far
+                        && index < previous
+                    {
+                        return Err(Diagnostic::new(
+                            format!(
+                                "field `{field_text}` is written after `{}`, but `{text}` declares it before; a struct literal's fields run in declaration order, so writing them in another order would hide what runs first",
+                                self.ast.name_of(declared[previous].0)
+                            ),
+                            self.ast.expr_span(*value),
+                        ));
+                    }
+                    written_so_far = Some(index);
                     let value_span = self.ast.expr_span(*value);
                     let (lowered, found) = self.expr(*value)?;
                     self.expect_type(&declared[index].1, &found, value_span)?;
@@ -3591,14 +3639,26 @@ mod tests {
     // ---- structs -------------------------------------------------------
 
     #[test]
-    fn a_struct_literal_is_reordered_into_declaration_order() {
-        // Written y-then-x; the IR holds x-then-y, so the backend never has
-        // to consult a field name.
+    fn a_struct_literal_is_positional_and_written_in_declaration_order() {
+        // The IR holds the fields positionally, so the backend never has to
+        // consult a field name.
         let f =
-            main_fn("struct P { x: int, y: bool } fn f() -> [] P { return P { y: true, x: 7 }; }");
+            main_fn("struct P { x: int, y: bool } fn f() -> [] P { return P { x: 7, y: true }; }");
         let Stmt::Return(Expr::Struct { fields, .. }) = &f.body[0] else { panic!("{:?}", f.body) };
         assert_eq!(fields[0], Expr::Int(7));
         assert_eq!(fields[1], Expr::Bool(true));
+
+        // And writing them in another order is refused rather than silently
+        // reordered: the fields run in declaration order, so any other
+        // written order would hide which one runs first
+        // (`docs/defined-behaviour.md`). This used to reorder quietly.
+        let message = lower_src(
+            "struct P { x: int, y: bool } fn f() -> [] P { return P { y: true, x: 7 }; } \
+             fn main() -> [] int { return 0; }",
+        )
+        .expect_err("should be refused")
+        .message;
+        assert!(message.contains("declaration order"), "{message}");
     }
 
     #[test]
@@ -4239,6 +4299,82 @@ mod capability_tests {
             super::leaf_free(&main.slots[0]),
             "a `World` should occupy no machine value, got {:?}",
             main.slots[0]
+        );
+    }
+}
+
+/// Defined behaviour: `docs/defined-behaviour.md`.
+#[cfg(test)]
+mod defined_behaviour_tests {
+    use super::tests::lower_src;
+    use super::{Builtin, Callee, Expr, Program, Stmt};
+
+    fn refused(src: &str) -> String {
+        lower_src(src).expect_err("this should be refused").message
+    }
+
+    fn accepted(src: &str) -> Program {
+        lower_src(src).expect("this should be accepted")
+    }
+
+    #[test]
+    fn wrapping_arithmetic_is_spelled_out() {
+        // §2.2: `+` means arithmetic, `wrapping_add` means the bits. The
+        // asymmetry is what stops the second happening by accident.
+        let program = accepted(
+            "fn f(a: int, b: int) -> [] int { return wrapping_add(a, wrapping_mul(b, 2)); } \
+             fn main() -> [] int { return f(1, 2) - 5; }",
+        );
+        let f = program.func(program.find("f").expect("f"));
+        let Some(Stmt::Return(Expr::Call { callee, .. })) = f.body.first() else {
+            panic!("a call, got {:?}", f.body.first())
+        };
+        assert_eq!(*callee, Callee::Builtin(Builtin::WrappingAdd));
+    }
+
+    #[test]
+    fn wrapping_arithmetic_is_pure_and_needs_no_capability() {
+        // It observes nothing outside the program, so it is not an effect
+        // and an empty row still means pure.
+        let program = accepted(
+            "fn f(a: int) -> [] int { return wrapping_mul(a, 3); } \
+             fn main() -> [] int { return f(0); }",
+        );
+        let f = program.func(program.find("f").expect("f"));
+        assert!(f.effects.is_pure(), "{}", f.effects);
+    }
+
+    #[test]
+    fn a_wrapping_builtin_cannot_be_redefined() {
+        let message = refused(
+            "fn wrapping_add(a: int, b: int) -> [] int { return a; } \
+             fn main() -> [] int { return 0; }",
+        );
+        assert!(message.contains("is a builtin"), "{message}");
+    }
+
+    #[test]
+    fn a_struct_literal_runs_in_the_order_it_is_written() {
+        // §3: the order you read is the order it runs, kept true by
+        // refusing the literal that would break it rather than by
+        // reordering underneath the text.
+        let message = refused(
+            "struct P { x: int, y: int } \
+             fn main() -> [] int { let p = P { y: 2, x: 1 }; return p.x; }",
+        );
+        assert!(message.contains("declaration order"), "{message}");
+
+        // Written in declaration order, the same literal is fine.
+        accepted(
+            "struct P { x: int, y: int } \
+             fn main() -> [] int { let p = P { x: 1, y: 2 }; return p.x - 1; }",
+        );
+
+        // A single field, or fields that skip none, are unaffected: the rule
+        // is about relative order, not about naming every field in a row.
+        accepted(
+            "struct Q { a: int, b: int, c: int } \
+             fn main() -> [] int { let q = Q { a: 1, b: 2, c: 3 }; return q.a - 1; }",
         );
     }
 }
