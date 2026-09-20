@@ -14,11 +14,11 @@
 //~ EXIT 0
 
 // Write the low seven bytes of `word`, least significant first.
-fn put_word(word: int) -> [io] int {
+fn put_word[&i](io: &!i Io, word: int) -> [io] int {
     var rest = word;
     var written = 0;
     while rest > 0 {
-        putchar(rest % 256);
+        putchar(io, rest % 256);
         rest = rest / 256;
         written = written + 1;
     }
@@ -34,12 +34,28 @@ fn greeting_tail() -> [] int {
     return 2851464966991735;
 }
 
-fn main() -> [io] int {
-    let written = put_word(greeting_head()) + put_word(greeting_tail());
+fn run[&i](io: &!i Io) -> [io] int {
+    let written = put_word(io, greeting_head()) + put_word(io, greeting_tail());
     if written == 14 {
         return 0;
     } else {
         // Unreachable unless codegen is wrong, and then the exit status says so.
         return 1;
     }
+}
+
+fn main(world: World) -> [] int {
+    // §8.2: the runtime hands over exactly one `World`, and `split` consumes
+    // it. There is no other way to obtain a capability.
+    let Split { io } = split(world);
+    var status = 0;
+    // Threaded by borrow, not by move: a callee should not consume its
+    // caller's authority.
+    borrow mut io as &!i in {
+        status = run(i);
+    }
+    // Authority is a resource, so it is destroyed exactly once. A program
+    // that forgets this does not compile.
+    release(io);
+    return status;
 }

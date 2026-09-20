@@ -187,8 +187,16 @@ fn compile_to_ir(input: &Path) -> Result<lex_sys_ir::Program, Failure> {
     // contract with the C runtime rather than a matter of taste.
     if let Some(entry) = program.find("main") {
         let entry = program.func(entry);
-        if entry.n_params != 0 {
-            return Err(refused(format!("{}: error: `main` takes no arguments", file.path)));
+        // §8.2: the runtime hands over exactly one `World`, and it is the
+        // only place authority enters a program. `World` is zero-sized, so
+        // this parameter costs nothing at the machine level -- the C entry
+        // point still calls `main` with no arguments.
+        let world = program.world();
+        if entry.n_params != 1 || entry.slots.first() != Some(&world) {
+            return Err(refused(format!(
+                "{}: error: `main` takes one argument, the `World` the runtime hands it",
+                file.path
+            )));
         }
         if entry.ret != lex_sys_types::Type::Int {
             return Err(refused(format!(

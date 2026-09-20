@@ -45,6 +45,12 @@ pub struct Slot(pub u32);
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct FuncId(pub u32);
 
+/// Positions in the prelude's type table, which `collect_types` builds
+/// first so these are the same in every program.
+pub const PRELUDE_WORLD: usize = 0;
+pub const PRELUDE_IO: usize = 1;
+pub const PRELUDE_SPLIT: usize = 2;
+
 /// An effect row: a canonically ordered set of labels
 /// (`docs/linearity-and-effects.md` §7.1).
 ///
@@ -88,6 +94,11 @@ impl Effects {
         self.0.dedup();
     }
 
+    /// Drop one label, for §8.2's discharge rule.
+    pub fn remove(&mut self, label: &str) {
+        self.0.retain(|l| l != label);
+    }
+
     /// The other: subset, to check a call against a declaration. Linear in
     /// the number of labels, which is small and statically bounded.
     pub fn missing_from<'a>(&'a self, other: &Effects) -> Option<&'a str> {
@@ -108,29 +119,93 @@ impl fmt::Display for Effects {
 /// an effect, and an effect must be granted.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Builtin {
-    /// `putchar(c: int) -> int` — libc's, byte for byte.
+    /// `putchar[&i](io: &!i Io, c: int) -> [io] int` — libc's `putchar`,
+    /// byte for byte, behind the capability that authorises it.
+    ///
+    /// The `Io` is not passed to libc and has no runtime representation. It
+    /// is there so that a function which does not hold one cannot call this,
+    /// which is the whole safety story stated as a type (§8.2).
     PutChar,
+    /// `split(w: World) -> [] Split` — consumes the root of all authority
+    /// and hands back its parts (§8.2).
+    ///
+    /// The one place a capability comes from. There is no ambient
+    /// constructor, no `Io::global()`, and nothing that conjures one.
+    Split,
+    /// `release(io: Io) -> [] int` — destroys a capability.
+    ///
+    /// Authority is a resource and a resource is destroyed exactly once, so
+    /// a program that forgets this does not compile (§8.3). It is an
+    /// ordinary consumer, in the sense §4.1 means.
+    Release,
 }
 
 impl Builtin {
-    pub const ALL: &'static [Builtin] = &[Builtin::PutChar];
+    pub const ALL: &'static [Builtin] = &[Builtin::PutChar, Builtin::Split, Builtin::Release];
 
     pub fn name(self) -> &'static str {
         match self {
             Builtin::PutChar => "putchar",
+            Builtin::Split => "split",
+            Builtin::Release => "release",
         }
     }
 
-    /// The libc symbol the backend calls.
-    pub fn symbol(self) -> &'static str {
+    /// The libc symbol the backend calls, for the ones that reach libc.
+    ///
+    /// `split` and `release` reach nothing: they are the ceremony that moves
+    /// authority around, and authority erases (§8.1). The backend emits no
+    /// call for them at all.
+    pub fn symbol(self) -> Option<&'static str> {
         match self {
-            Builtin::PutChar => "putchar",
+            Builtin::PutChar => Some("putchar"),
+            Builtin::Split | Builtin::Release => None,
         }
     }
 
-    pub fn signature(self) -> (Vec<Type>, Type) {
+    /// How many leading arguments carry authority rather than data, and so
+    /// do not reach the foreign function underneath.
+    ///
+    /// `putchar`'s `Io` is a *borrowed* capability, which is one pointer at
+    /// a zero-sized value — real enough for the checker to track and
+    /// meaningless to libc, which wants the character and nothing else.
+    /// Passing it along made libc print the pointer.
+    pub fn erased_args(self) -> usize {
         match self {
-            Builtin::PutChar => (vec![Type::Int], Type::Int),
+            Builtin::PutChar => 1,
+            Builtin::Split | Builtin::Release => 0,
+        }
+    }
+
+    /// How many region parameters the builtin takes, so a call site can
+    /// instantiate them the same way it does for a written function (§5.1).
+    pub fn regions(self) -> usize {
+        match self {
+            Builtin::PutChar => 1,
+            Builtin::Split | Builtin::Release => 0,
+        }
+    }
+
+    /// Parameter types and return type, in terms of the prelude's ids.
+    ///
+    /// `prelude` is `[World, Io, Split]` — the ids `collect_types` handed
+    /// out, which are fixed because the prelude is collected first.
+    pub fn signature(self, prelude: &[DefId]) -> (Vec<Type>, Type) {
+        let named = |i: usize| Type::Named(prelude[i], Vec::new());
+        match self {
+            Builtin::PutChar => (
+                vec![
+                    Type::Ref {
+                        unique: true,
+                        region: Region::Param(0),
+                        inner: Box::new(named(PRELUDE_IO)),
+                    },
+                    Type::Int,
+                ],
+                Type::Int,
+            ),
+            Builtin::Split => (vec![named(PRELUDE_WORLD)], named(PRELUDE_SPLIT)),
+            Builtin::Release => (vec![named(PRELUDE_IO)], Type::Int),
         }
     }
 
@@ -143,6 +218,11 @@ impl Builtin {
     pub fn effects(self) -> Effects {
         match self {
             Builtin::PutChar => Effects::new(["io".to_owned()]),
+            // Moving authority around is not an effect. Splitting a `World`
+            // observes nothing outside the program and releasing a
+            // capability only ends one; what a capability *authorises* is
+            // where the effect is.
+            Builtin::Split | Builtin::Release => Effects::pure(),
         }
     }
 
@@ -369,6 +449,11 @@ impl Program {
         &self.types[def.0 as usize]
     }
 
+    /// The `World` type, for a driver that needs to check `main`'s shape.
+    pub fn world(&self) -> Type {
+        Type::Named(DefId(PRELUDE_WORLD as u32), Vec::new())
+    }
+
     pub fn find(&self, name: &str) -> Option<FuncId> {
         self.funcs.iter().position(|f| f.name == name).map(|i| FuncId(i as u32))
     }
@@ -537,6 +622,115 @@ fn reaches(defs: &[TypeDef], from: usize, target: usize, seen: &mut [bool]) -> b
     })
 }
 
+/// Does a value of this type occupy no machine values at all?
+///
+/// §8.1: "capabilities erase at compile time except where they carry data".
+/// A struct with no fields has no leaves, so threading one is free -- which
+/// is a claim worth a test rather than a comment.
+pub fn leaf_free(ty: &Type) -> bool {
+    matches!(ty, Type::Named(def, _) if matches!(def.0 as usize, PRELUDE_WORLD | PRELUDE_IO))
+}
+
+/// Is this one of the prelude's capability types?
+///
+/// §8.2: authority comes from exactly one place, and a program that could
+/// *write* `Io { }` would have an ambient constructor by another name — the
+/// very thing "no `Io::global()`, no `unsafe { }` that conjures one" rules
+/// out. So a capability has no literal form, and the only `Io` in existence
+/// is the one the runtime handed to `main` inside a `World`.
+fn is_capability(def: DefId) -> bool {
+    matches!(def.0 as usize, PRELUDE_WORLD | PRELUDE_IO | PRELUDE_SPLIT)
+}
+
+/// Is this a capability whose only consumer is `release`?
+///
+/// `Split` is not: taking it apart is the whole point of having one.
+/// `World` and `Io` are, because destructuring either would destroy
+/// authority without naming the function that knows how (§4.1) — and for
+/// `World` and `Io`, which carry no fields, it would do it silently.
+fn released_only(def: DefId) -> bool {
+    matches!(def.0 as usize, PRELUDE_WORLD | PRELUDE_IO)
+}
+
+/// What owning a value of this type authorises outright (§8.2).
+///
+/// Owning `Io` discharges `io`. Owning `World` discharges everything a
+/// `World` can be split into, because `split` is a function anyone holding
+/// one may call — authority you can reach is authority you have.
+///
+/// A *borrowed* capability discharges nothing: `&!i Io` is precisely what
+/// `[io]` on a signature means, so counting it here would make every row
+/// empty and the whole section decoration.
+fn discharged_by(defs: &[TypeDef], ty: &Type) -> Effects {
+    let Type::Named(def, _) = ty else {
+        return Effects::pure();
+    };
+    let index = def.0 as usize;
+    if index >= defs.len() {
+        return Effects::pure();
+    }
+    match index {
+        PRELUDE_WORLD | PRELUDE_IO => Effects::new(["io".to_owned()]),
+        _ => Effects::pure(),
+    }
+}
+
+/// The capability types the compiler provides (§8.1).
+///
+/// A capability is an *ordinary* `res` value — no special kind, no special
+/// syntax, and no runtime representation beyond what its type says. These
+/// two carry nothing, so they are zero-sized and threading one costs
+/// literally nothing: the backend sees a value with no leaves.
+///
+/// `World` is the root of all authority and `Io` is the console. `Split` is
+/// what `split` hands back when it consumes a `World`; it holds one field
+/// today because `io` is the only effect anything performs. A capability for
+/// an effect nothing can perform would be decoration, which is what §7.3
+/// refuses for rows and what this refuses for the same reason — `Heap`, `Fs`
+/// and `Ffi` arrive with allocation, the filesystem and FFI.
+fn prelude_types(ast: &Ast, unifier: &mut Unifier) -> Vec<TypeDef> {
+    let symbol = |name: &str| ast.symbols.get(name).expect("the prelude is interned by `Ast::new`");
+    let span = Span::new(0, 0);
+    let world = symbol("World");
+    let io = symbol("Io");
+    let split = symbol("Split");
+    // The *field* is `io`; the type it holds is `Io`. Two different names,
+    // and interning them separately is what keeps them so.
+    let io_field = symbol("io");
+
+    let world_def = unifier.declare("World");
+    let io_def = unifier.declare("Io");
+    let split_def = unifier.declare("Split");
+
+    vec![
+        TypeDef {
+            name: world,
+            def: world_def,
+            generics: Vec::new(),
+            declared_mode: Some(Mode::Res),
+            kind: DefKind::Struct(Vec::new()),
+            span,
+        },
+        TypeDef {
+            name: io,
+            def: io_def,
+            generics: Vec::new(),
+            declared_mode: Some(Mode::Res),
+            kind: DefKind::Struct(Vec::new()),
+            span,
+        },
+        // `res` by inference, because it holds one.
+        TypeDef {
+            name: split,
+            def: split_def,
+            generics: Vec::new(),
+            declared_mode: None,
+            kind: DefKind::Struct(vec![(io_field, Type::Named(io_def, Vec::new()))]),
+            span,
+        },
+    ]
+}
+
 /// Collect every type declaration, in three passes.
 ///
 /// Names first, so a member may mention a type declared later in the file;
@@ -544,7 +738,8 @@ fn reaches(defs: &[TypeDef], from: usize, target: usize, seen: &mut [bool]) -> b
 /// every member type. Each pass needs the previous one complete, which is why
 /// they are passes and not one loop.
 fn collect_types(ast: &Ast, unifier: &mut Unifier) -> Result<Vec<TypeDef>, Diagnostic> {
-    let mut defs: Vec<TypeDef> = Vec::new();
+    let mut defs: Vec<TypeDef> = prelude_types(ast, unifier);
+    let predeclared = defs.len();
 
     for (index, item) in ast.items.iter().enumerate() {
         let (name_sym, noun, generics, declared_mode) = match item {
@@ -555,7 +750,8 @@ fn collect_types(ast: &Ast, unifier: &mut Unifier) -> Result<Vec<TypeDef>, Diagn
         let span = ast.item_span(ast::ItemId(index as u32));
         let name = ast.name_of(name_sym);
 
-        if matches!(name, "int" | "bool") {
+        if matches!(name, "int" | "bool") || defs[..predeclared].iter().any(|d| d.name == name_sym)
+        {
             return Err(Diagnostic::new(
                 format!("`{name}` is a built-in type and cannot be redeclared"),
                 span,
@@ -1023,6 +1219,22 @@ fn lower_function(
         ));
     }
 
+    // §8.2: a row lists the capabilities a function *borrows*. Owning one
+    // is strictly stronger and strictly more visible -- it is right there in
+    // the parameter list -- so an effect the function has the authority for
+    // outright does not appear in its row. That is why `main(world: World)`
+    // has row `[]` while printing: it owns the authority rather than
+    // borrowing it.
+    //
+    // Taken from the signature, not from the body, so the rule lives at the
+    // boundary with every other rule.
+    let mut performed = performed;
+    for param in &params {
+        for label in discharged_by(defs, param).labels() {
+            performed.remove(label);
+        }
+    }
+
     // §7.3: the row is exact, or it is decoration. Both directions are
     // errors, and the over-wide one is not a warning -- an inexact row means
     // `[]` no longer means pure, which costs examples-as-tests and costs a
@@ -1312,6 +1524,11 @@ impl<'a> FnLowering<'a> {
         }
         let resolved = resolve_type(self.ast, self.defs, &self.generic_names, &regions, id)?;
         Ok(resolved.substitute(&self.generics, &[]))
+    }
+
+    /// The prelude's type ids, in the order `prelude_types` declared them.
+    fn prelude(&self) -> Vec<DefId> {
+        self.defs[..3].iter().map(|d| d.def).collect()
     }
 
     /// Does `outer` outlive `inner` (§5.2)?
@@ -1679,6 +1896,14 @@ impl<'a> FnLowering<'a> {
             return Err(Diagnostic::new(format!("`{text}` is not a struct"), span));
         };
         let (def_id, generic_count) = (def.def, def.generics.len());
+        if released_only(def_id) {
+            return Err(Diagnostic::new(
+                format!(
+                    "`{text}` is a capability and is destroyed by `release`, not by being taken apart; authority is a resource and the function that ends one is named"
+                ),
+                span,
+            ));
+        }
         let DefKind::Struct(declared) = &def.kind else {
             return Err(Diagnostic::new(
                 format!("`{text}` is an enum, not a struct; take it apart with `match`"),
@@ -2112,6 +2337,14 @@ impl<'a> FnLowering<'a> {
                 let Some(def) = self.defs.iter().find(|d| d.name == *name) else {
                     return Err(Diagnostic::new(format!("`{text}` is not a struct"), span));
                 };
+                if is_capability(def.def) {
+                    return Err(Diagnostic::new(
+                        format!(
+                            "`{text}` is a capability and has no literal form; authority comes from the `World` the runtime hands `main`, and from nowhere else"
+                        ),
+                        span,
+                    ));
+                }
                 let DefKind::Struct(fields_decl) = &def.kind else {
                     return Err(Diagnostic::new(
                         format!("`{text}` is an enum, not a struct"),
@@ -2388,7 +2621,17 @@ impl<'a> FnLowering<'a> {
                 };
                 self.performed.union(&performed);
                 let (params, ret) = if let Some(builtin) = Builtin::from_name(text) {
-                    builtin.signature()
+                    // A builtin's region parameters are instantiated exactly
+                    // like a written function's (§5.1): one fresh region per
+                    // parameter, solved by the arguments.
+                    let fresh: Vec<Region> =
+                        (0..builtin.regions()).map(|_| self.unifier.fresh_region()).collect();
+                    let prelude = self.prelude();
+                    let (params, ret) = builtin.signature(&prelude);
+                    (
+                        params.iter().map(|t| t.substitute(&[], &fresh)).collect::<Vec<_>>(),
+                        ret.substitute(&[], &fresh),
+                    )
                 } else {
                     let index = self.signatures.iter().position(|s| s.name == *callee).ok_or_else(
                         || {
@@ -2560,9 +2803,11 @@ mod tests {
     #[test]
     fn an_inner_block_may_shadow() {
         let f = main_fn(
-            "fn f() -> [io] int { let x = 1; if true { let x = 2; putchar(x); } return x; }",
+            "fn main[&i](io: &!i Io) -> [io] int { \
+             let x = 1; if true { let x = 2; putchar(io, x); } return x; }",
         );
-        assert_eq!(f.n_slots(), 2);
+        // The capability, `x`, and the shadowing `x`.
+        assert_eq!(f.n_slots(), 3);
     }
 
     #[test]
@@ -2604,7 +2849,10 @@ mod tests {
             error("fn g(a: int) -> [] int { return a; } fn f() -> [] int { return g(); }")
                 .contains("takes 1 argument")
         );
-        assert!(error("fn f() -> [] int { return putchar(); }").contains("takes 1 argument"));
+        assert!(
+            error("fn f[&i](io: &!i Io) -> [] int { return putchar(io); }")
+                .contains("takes 2 arguments")
+        );
     }
 
     #[test]
@@ -2697,7 +2945,7 @@ mod tests {
     #[test]
     fn an_argument_must_match_the_parameter() {
         assert!(
-            error("fn f() -> [] int { return putchar(true); }")
+            error("fn f[&i](io: &!i Io) -> [io] int { return putchar(io, true); }")
                 .contains("expected `int`, found `bool`")
         );
     }
@@ -3201,7 +3449,7 @@ mod effect_tests {
     #[test]
     fn a_call_widens_the_callers_row() {
         let message = refused(
-            "fn quiet() -> [] int { putchar(65); return 0; } \
+            "fn quiet[&i](io: &!i Io) -> [] int { putchar(io, 65); return 0; } \
              fn main() -> [] int { return 0; }",
         );
         assert!(message.contains("performs `io`"), "{message}");
@@ -3216,13 +3464,13 @@ mod effect_tests {
     #[test]
     fn a_row_is_transitive() {
         let message = refused(
-            "fn shout() -> [io] int { return putchar(33); } \
-             fn caller() -> [] int { return shout(); } fn main() -> [] int { return 0; }",
+            "fn shout[&i](io: &!i Io) -> [io] int { return putchar(io, 33); } \
+             fn caller[&i](io: &!i Io) -> [] int { return shout(io); }",
         );
         assert!(message.contains("`caller` performs `io`"), "{message}");
         accepted(
-            "fn shout() -> [io] int { return putchar(33); } \
-             fn caller() -> [io] int { return shout(); } fn main() -> [io] int { return caller(); }",
+            "fn shout[&i](io: &!i Io) -> [io] int { return putchar(io, 33); } \
+             fn caller[&i](io: &!i Io) -> [io] int { return shout(io); }",
         );
     }
 
@@ -3238,8 +3486,8 @@ mod effect_tests {
     #[test]
     fn a_duplicate_label_is_the_same_row() {
         accepted(
-            "fn f() -> [io, io] int { return putchar(33); } \
-             fn main() -> [io] int { return f(); }",
+            "fn f[&i](io: &!i Io) -> [io, io] int { return putchar(io, 33); } \
+             fn caller[&i](io: &!i Io) -> [io] int { return f(io); }",
         );
     }
 
@@ -3247,7 +3495,7 @@ mod effect_tests {
     fn a_pure_helper_inside_an_effectful_body_adds_nothing() {
         accepted(
             "fn double(n: int) -> [] int { return n * 2; } \
-             fn main() -> [io] int { return putchar(double(20)); }",
+             fn main[&i](io: &!i Io) -> [io] int { return putchar(io, double(20)); }",
         );
     }
 
@@ -3257,7 +3505,7 @@ mod effect_tests {
         // ones a particular run reaches. Anything else would need to know
         // which branch is taken.
         let message = refused(
-            "fn f(c: bool) -> [] int { if c { putchar(65); } return 0; } \
+            "fn f[&i](io: &!i Io, c: bool) -> [] int { if c { putchar(io, 65); } return 0; } \
              fn main() -> [] int { return 0; }",
         );
         assert!(message.contains("performs `io`"), "{message}");
@@ -3269,7 +3517,7 @@ mod effect_tests {
         // one row however many copies the backend emits.
         let program = accepted(
             "fn id[T](x: T) -> [] T { return x; } \
-             fn main() -> [io] int { return putchar(id(65)) - 65; }",
+             fn main[&i](io: &!i Io) -> [io] int { return putchar(io, id(65)) - 65; }",
         );
         let copies: Vec<&str> =
             program.funcs.iter().map(|f| f.name.as_str()).filter(|n| n.starts_with("id")).collect();
@@ -3280,9 +3528,115 @@ mod effect_tests {
 
     #[test]
     fn the_row_reaches_the_lowered_function() {
-        let program = accepted("fn main() -> [io] int { return putchar(65) - 65; }");
+        let program =
+            accepted("fn main[&i](io: &!i Io) -> [io] int { return putchar(io, 65) - 65; }");
         let main = program.func(program.find("main").expect("main"));
         assert_eq!(main.effects.labels(), ["io"]);
+    }
+}
+
+/// Capabilities: `docs/linearity-and-effects.md` §8.
+#[cfg(test)]
+mod capability_tests {
+    use super::Program;
+    use super::tests::lower_src;
+
+    /// Enough of a program to have authority in it.
+    const MAIN: &str = " fn main(world: World) -> [] int { \
+        let Split { io } = split(world); release(io); return 0; }";
+
+    fn refused(src: &str) -> String {
+        lower_src(src).expect_err("this should be refused").message
+    }
+
+    fn accepted(src: &str) -> Program {
+        lower_src(src).expect("this should be accepted")
+    }
+
+    #[test]
+    fn a_capability_has_no_literal_form() {
+        // The rule §8.2 rests on: if this were writable, a function given
+        // nothing could still print.
+        for name in ["Io", "World", "Split"] {
+            let src = format!("fn f() -> [] int {{ let c = {name} {{ }}; return 0; }}{MAIN}");
+            let message = refused(&src);
+            assert!(message.contains("has no literal form"), "{name}: {message}");
+        }
+    }
+
+    #[test]
+    fn a_capability_type_cannot_be_redeclared() {
+        let message = refused(&format!("res struct Io {{ fd: int }}{MAIN}"));
+        assert!(message.contains("cannot be redeclared"), "{message}");
+    }
+
+    #[test]
+    fn authority_comes_from_the_world_and_must_be_released() {
+        accepted(&format!("fn f() -> [] int {{ return 0; }}{MAIN}"));
+
+        let leaked = refused(
+            "fn main(world: World) -> [] int { let Split { io } = split(world); return 0; }",
+        );
+        assert!(leaked.contains("still live"), "{leaked}");
+
+        let world = refused("fn main(world: World) -> [] int { return 0; }");
+        assert!(world.contains("`world` is still live"), "{world}");
+    }
+
+    #[test]
+    fn a_released_capability_cannot_be_used_again() {
+        let message = refused(
+            "fn greet[&i](io: &!i Io) -> [io] int { return putchar(io, 65); } \
+             fn main(world: World) -> [] int { let Split { io } = split(world); \
+             release(io); borrow mut io as &!i in { greet(i); } return 0; }",
+        );
+        assert!(message.contains("nothing left to borrow"), "{message}");
+    }
+
+    #[test]
+    fn a_capability_is_destroyed_by_release_not_by_destructuring() {
+        let message = refused(
+            "fn main(world: World) -> [] int { let Split { io } = split(world); \
+             let Io { } = io; return 0; }",
+        );
+        assert!(message.contains("destroyed by `release`"), "{message}");
+    }
+
+    #[test]
+    fn owning_a_capability_discharges_its_label() {
+        // §8.2: a row lists what a function *borrows*. `main` prints and its
+        // row is still `[]`, because it owns the authority outright -- and
+        // that is visible in the parameter list rather than in the row.
+        let program = accepted(
+            "fn greet[&i](io: &!i Io) -> [io] int { return putchar(io, 65); } \
+             fn main(world: World) -> [] int { let Split { io } = split(world); \
+             borrow mut io as &!i in { greet(i); } release(io); return 0; }",
+        );
+        let main = program.func(program.find("main").expect("main"));
+        assert!(main.effects.is_pure(), "{}", main.effects);
+    }
+
+    #[test]
+    fn borrowing_a_capability_does_not_discharge_it() {
+        // The other half of the same rule, and the one that keeps every row
+        // in the program from being empty.
+        let message = refused("fn quiet[&i](io: &!i Io) -> [] int { putchar(io, 65); return 0; }");
+        assert!(message.contains("performs `io`"), "{message}");
+    }
+
+    #[test]
+    fn a_capability_costs_nothing_at_runtime() {
+        // §8.1: capabilities erase except where they carry data, and these
+        // carry none. `World` and `Io` are zero-sized, so threading one adds
+        // no machine parameter at all.
+        let program = accepted(&format!("fn f() -> [] int {{ return 0; }}{MAIN}"));
+        let main = program.func(program.find("main").expect("main"));
+        assert_eq!(main.n_params, 1, "`main` takes the World");
+        assert!(
+            super::leaf_free(&main.slots[0]),
+            "a `World` should occupy no machine value, got {:?}",
+            main.slots[0]
+        );
     }
 }
 

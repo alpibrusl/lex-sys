@@ -22,32 +22,32 @@
 
 // ---------------------------------------------------------------- output ---
 
-fn newline() -> [io] int {
-    return putchar(10);
+fn newline[&i](io: &!i Io) -> [io] int {
+    return putchar(io, 10);
 }
 
-fn space() -> [io] int {
-    return putchar(32);
+fn space[&i](io: &!i Io) -> [io] int {
+    return putchar(io, 32);
 }
 
-fn print_digit(d: int) -> [io] int {
-    return putchar(48 + d);
+fn print_digit[&i](io: &!i Io, d: int) -> [io] int {
+    return putchar(io, 48 + d);
 }
 
 // Recursive, so the most significant digit is written first.
-fn print_nat(n: int) -> [io] int {
+fn print_nat[&i](io: &!i Io, n: int) -> [io] int {
     if n >= 10 {
-        print_nat(n / 10);
+        print_nat(io, n / 10);
     }
-    return print_digit(n % 10);
+    return print_digit(io, n % 10);
 }
 
-fn print_int(n: int) -> [io] int {
+fn print_int[&i](io: &!i Io, n: int) -> [io] int {
     if n < 0 {
-        putchar(45);
-        return print_nat(0 - n);
+        putchar(io, 45);
+        return print_nat(io, 0 - n);
     }
-    return print_nat(n);
+    return print_nat(io, n);
 }
 
 // ------------------------------------------------------------- the types ---
@@ -163,34 +163,34 @@ fn compare(a: Rational, b: Rational) -> [] Ordering {
 
 // --------------------------------------------------------------- printing ---
 
-fn print_rational(r: Rational) -> [io] int {
-    print_int(r.num);
+fn print_rational[&i](io: &!i Io, r: Rational) -> [io] int {
+    print_int(io, r.num);
     if r.den != 1 {
-        putchar(47);
-        print_int(r.den);
+        putchar(io, 47);
+        print_int(io, r.den);
     }
     return 0;
 }
 
-fn print_error(e: Error) -> [io] int {
+fn print_error[&i](io: &!i Io, e: Error) -> [io] int {
     match e {
-        Error::DivideByZero => { return putchar(68); }
-        Error::ZeroDenominator => { return putchar(90); }
+        Error::DivideByZero => { return putchar(io, 68); }
+        Error::ZeroDenominator => { return putchar(io, 90); }
     }
 }
 
-fn print_result(r: Result[Rational]) -> [io] int {
+fn print_result[&i](io: &!i Io, r: Result[Rational]) -> [io] int {
     match r {
-        Result::Ok(value) => { return print_rational(value); }
-        Result::Err(e) => { return print_error(e); }
+        Result::Ok(value) => { return print_rational(io, value); }
+        Result::Err(e) => { return print_error(io, e); }
     }
 }
 
-fn print_ordering(o: Ordering) -> [io] int {
+fn print_ordering[&i](io: &!i Io, o: Ordering) -> [io] int {
     match o {
-        Ordering::Less => { return putchar(60); }
-        Ordering::Equal => { return putchar(61); }
-        Ordering::Greater => { return putchar(62); }
+        Ordering::Less => { return putchar(io, 60); }
+        Ordering::Equal => { return putchar(io, 61); }
+        Ordering::Greater => { return putchar(io, 62); }
     }
 }
 
@@ -216,48 +216,64 @@ fn harmonic(n: int) -> [] Result[Rational] {
     return Result::Ok(total);
 }
 
-fn main() -> [io] int {
+fn run[&i](io: &!i Io) -> [io] int {
     // Normalisation: 6/8 is 3/4, and a negative denominator moves to the top.
-    print_result(rational(6, 8));
-    space();
-    print_result(rational(3, -9));
-    newline();
+    print_result(io, rational(6, 8));
+    space(io);
+    print_result(io, rational(3, -9));
+    newline(io);
 
     let half = unwrap_or(rational(1, 2), zero());
     let third = unwrap_or(rational(1, 3), zero());
 
-    print_result(add(half, third));      // 5/6
-    space();
-    print_result(sub(half, third));      // 1/6
-    space();
-    print_result(mul(half, third));      // 1/6
-    space();
-    print_result(div(half, third));      // 3/2
-    newline();
+    print_result(io, add(half, third));      // 5/6
+    space(io);
+    print_result(io, sub(half, third));      // 1/6
+    space(io);
+    print_result(io, mul(half, third));      // 1/6
+    space(io);
+    print_result(io, div(half, third));      // 3/2
+    newline(io);
 
     // The failures, reported rather than trapped.
-    print_result(div(half, zero()));     // D
-    space();
-    print_result(rational(1, 0));        // Z
-    newline();
+    print_result(io, div(half, zero()));     // D
+    space(io);
+    print_result(io, rational(1, 0));        // Z
+    newline(io);
 
     // `is_ok` and `unwrap_or` at two different instantiations.
-    if is_ok(rational(1, 2)) { putchar(89); } else { putchar(78); }
-    if is_ok(div(one(), zero())) { putchar(89); } else { putchar(78); }
-    space();
-    print_int(unwrap_or(Result::Ok(7), 0));
-    space();
-    if unwrap_or(Result::Err(Error::DivideByZero), true) { putchar(84); } else { putchar(70); }
-    newline();
+    if is_ok(rational(1, 2)) { putchar(io, 89); } else { putchar(io, 78); }
+    if is_ok(div(one(), zero())) { putchar(io, 89); } else { putchar(io, 78); }
+    space(io);
+    print_int(io, unwrap_or(Result::Ok(7), 0));
+    space(io);
+    if unwrap_or(Result::Err(Error::DivideByZero), true) { putchar(io, 84); } else { putchar(io, 70); }
+    newline(io);
 
     // Ordering, matched exhaustively.
-    print_ordering(compare(third, half));
-    print_ordering(compare(half, half));
-    print_ordering(compare(half, third));
-    newline();
+    print_ordering(io, compare(third, half));
+    print_ordering(io, compare(half, half));
+    print_ordering(io, compare(half, third));
+    newline(io);
 
     // H(6) = 49/20.
-    print_result(harmonic(6));
-    newline();
+    print_result(io, harmonic(6));
+    newline(io);
     return 0;
+}
+
+fn main(world: World) -> [] int {
+    // §8.2: the runtime hands over exactly one `World`, and `split` consumes
+    // it. There is no other way to obtain a capability.
+    let Split { io } = split(world);
+    var status = 0;
+    // Threaded by borrow, not by move: a callee should not consume its
+    // caller's authority.
+    borrow mut io as &!i in {
+        status = run(i);
+    }
+    // Authority is a resource, so it is destroyed exactly once. A program
+    // that forgets this does not compile.
+    release(io);
+    return status;
 }

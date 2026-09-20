@@ -240,7 +240,11 @@ impl<'a> Emitter<'a> {
         putchar_sig.returns.push(AbiParam::new(types::I32));
         let putchar = self
             .module
-            .declare_function(Builtin::PutChar.symbol(), Linkage::Import, &putchar_sig)
+            .declare_function(
+                Builtin::PutChar.symbol().expect("putchar reaches libc"),
+                Linkage::Import,
+                &putchar_sig,
+            )
             .map_err(|e| CodegenError(e.to_string()))?;
 
         let mut ctx = Context::new();
@@ -867,8 +871,28 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
                 vec![self.binary(*op, a, b)]
             }
             Expr::Call { callee, args } => {
-                let args: Vec<Value> = args.iter().flat_map(|a| self.expr(a)).collect();
+                // Evaluated per argument rather than all at once, because a
+                // builtin may take an argument it does not pass on: every
+                // argument still runs, and only the values travel.
+                let evaluated: Vec<Vec<Value>> = args.iter().map(|a| self.expr(a)).collect();
+                let skip = match callee {
+                    Callee::Builtin(b) => b.erased_args(),
+                    Callee::Fn(_) => 0,
+                };
+                let args: Vec<Value> = evaluated.into_iter().skip(skip).flatten().collect();
                 match callee {
+                    // §8.1: "capabilities erase at compile time except where
+                    // they carry data". These two carry none, so there is
+                    // nothing to emit — `split` hands back a value with no
+                    // leaves and `release` ends one that was never there.
+                    //
+                    // The arguments are still evaluated above, because a
+                    // capability's *journey* is what the checker tracked and
+                    // an argument may have side effects on the way in.
+                    Callee::Builtin(Builtin::Split) => Vec::new(),
+                    Callee::Builtin(Builtin::Release) => {
+                        vec![self.builder.ins().iconst(types::I64, 0)]
+                    }
                     Callee::Fn(id) => {
                         let callee = &self.program.funcs[id.0 as usize];
                         let ret = callee.ret.clone();
@@ -966,8 +990,14 @@ mod tests {
     use lex_sys_syntax::parse;
     use object::{Object, ObjectSymbol, SymbolKind};
 
-    const SOURCE: &str = "fn shout() -> [io] int { return putchar(33); } \
-                          fn main() -> [io] int { return shout(); }";
+    const SOURCE: &str = "fn shout[&i](io: &!i Io) -> [io] int { return putchar(io, 33); } \
+                          fn main(world: World) -> [] int { \
+                              let Split { io } = split(world); \
+                              var status = 0; \
+                              borrow mut io as &!i in { status = shout(i); } \
+                              release(io); \
+                              return status; \
+                          }";
 
     /// The two targets to check: this host's architecture, once per binary
     /// format, paired with the symbol prefix that format calls for.

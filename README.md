@@ -17,16 +17,16 @@ defined behaviour, and a canonical content-addressable AST designed in from day 
 > outlives relation is a stack. That is §3, §4 and §5 of the now-settled
 > [`docs/linearity-and-effects.md`](docs/linearity-and-effects.md).
 >
-> **Effect rows work too.** Every signature declares one between `->` and
-> the return type, `[]` means pure, and the row is *exact* in both
-> directions — §7.1–7.3.
+> **And the thesis holds.** Effect rows are exact, capabilities are ordinary
+> linear values, and the two are one system: `[io]` on a signature means the
+> function was handed an `&!i Io` it did not create. A function that is not
+> given a capability cannot perform its effect — the whole safety story,
+> stated as a type. That is §3 through §8 of the design document.
 >
-> **Capabilities are not here yet** (§8), and that is the gap that matters:
-> a row currently *describes* what a function does rather than *permitting*
-> it. `putchar` performs `io` because the compiler says so, not because the
-> caller was handed an `Io`. There are also no strings, no slices, no
-> allocation and no FFI: those are M3. Do not mistake this for a usable
-> language yet.
+> **Still missing:** arenas, effect narrowing and FFI (§6, §7.4, §8.4), all
+> of which need capabilities that *carry data*. There are also no strings,
+> no slices and no allocation: those are M3. Do not mistake this for a
+> usable language yet.
 
 ## What this is
 
@@ -104,6 +104,7 @@ cargo run -p lex-sys -- run examples/tour.ls
 # M2 borrow: 4 8 12
 # M2 unique: 3 5 5
 # M2 effects: 42
+# M2 capability: 88
 ```
 
 `examples/tour.ls` is the shortest honest answer to "what can this language
@@ -115,7 +116,8 @@ with a generic `Result[T]` threaded through every fallible operation.
 comparison, `&&`/`||` with short-circuiting, `if`/`else`, `while`, `let`/`var`
 bindings, structs, enums with exhaustive `match`, generics over both,
 `res`/`val` modes with exactly-once linearity and destructuring `let`,
-shared and unique borrows with lexical regions, and exact effect rows.
+shared and unique borrows with lexical regions, exact effect rows, and
+capabilities.
 
 ```
 res struct Ticket { serial: int }
@@ -149,12 +151,30 @@ nothing else may touch the value at all, not even a read, which is what makes
 fn advance[&r](m: &!r Meter) -> int { m.reading = m.reading + m.step; return m.reading; }
 ```
 
-Every signature declares what it does:
+Every signature declares what it does, and holds what lets it:
 
 ```
-fn triple(n: int) -> [] int { return n * 3; }      // pure, and says so
-fn show(n: int) -> [io] int { return print_nat(n); }
+fn triple(n: int) -> [] int { return n * 3; }               // pure, and says so
+fn show[&i](io: &!i Io, n: int) -> [io] int { ... }         // borrows the console
+
+fn main(world: World) -> [] int {
+    let Split { io } = split(world);      // the one place authority comes from
+    borrow mut io as &!i in { show(i, 7); }
+    release(io);                          // a resource, destroyed exactly once
+    return 0;
+}
 ```
+
+An effect **is** a borrowed capability. `[io]` on a signature means the
+function was handed an `&!i Io` it did not create — so reading the row and
+reading the parameter list are the same act, and a function that was given
+nothing cannot print however much it wants to. There is no ambient
+constructor: `Io { }` is refused, `main`'s `World` is the only authority in
+the program, and it is linear, so forgetting to release it does not compile.
+
+`main`'s own row is `[]` even though it prints, because it *owns* the
+capability rather than borrowing one — and ownership is already visible in
+the parameter list.
 
 A row is a canonically ordered **set** — `[io, io]` is `[io]`, `[fs, io]` and
 `[io, fs]` are one signature — so it hashes, which is what per-unit identity
@@ -225,7 +245,7 @@ carry them exists now, while it is cheap.
 
 | Doc | What | Status |
 |---|---|---|
-| [`docs/linearity-and-effects.md`](docs/linearity-and-effects.md) | The M2 gate: linear ownership, capability-typed effects, how they unify, and 23 must-reject fixtures written out as the conformance suite | settled; §3–5 and §7.1–7.3 implemented, §6/§7.4/§8 still design |
+| [`docs/linearity-and-effects.md`](docs/linearity-and-effects.md) | The M2 gate: linear ownership, capability-typed effects, how they unify, and 23 must-reject fixtures written out as the conformance suite | settled; §3–5, §7.1–7.3 and §8.1–8.3 implemented |
 | [`docs/bootstrap.md`](docs/bootstrap.md) | What M0 settled: bootstrap host (Rust), extension (`.ls`), the M0 surface, what is scaffolding and what replaces it | written |
 | [`docs/canonical-ast.md`](docs/canonical-ast.md) | Canonicalisation rules and per-unit identity: what is hashed, and what a hash is allowed to change with | written, implemented |
 | `docs/memory-model.md` | Regions, escape, the escape hatches and their cost | not written (M2) |
@@ -245,7 +265,7 @@ M0–M3 with acceptance criteria, sequencing, risks and open decisions.
 |---|---|---|
 | **M0** — native hello world ([#3](https://github.com/alpibrusl/lex-sys/issues/3)) | Lexer, parser, AST, IR, Cranelift backend, a real executable | **done** — green on both targets |
 | **M1** — typed core | Type checker, `bool`, structs, ADTs with exhaustiveness, monomorphised generics. No linearity, no effects — deliberately | **done** |
-| **M2** — the actual thesis ([#2](https://github.com/alpibrusl/lex-sys/issues/2)) | Linear ownership, effect rows and capability-passing as **one** system | ownership (§3–5) and effect rows (§7.1–7.3) land; capabilities (§8) are what unify them |
+| **M2** — the actual thesis ([#2](https://github.com/alpibrusl/lex-sys/issues/2)) | Linear ownership, effect rows and capability-passing as **one** system | **done** — §3–§5, §7.1–7.3 and §8.1–8.3; arenas, narrowing and FFI wait for capabilities that carry data |
 | **M3** — minimal but real | Slices and strings, arenas, libc FFI, settled overflow semantics, canonical printer, per-unit identity | started — per-unit identity landed |
 
 Deliberately excluded from "minimal": borrow checker, traits, `comptime`, own

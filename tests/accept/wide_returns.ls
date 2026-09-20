@@ -34,23 +34,39 @@ fn total(w: Wide) -> [] int {
     }
 }
 
-fn main() -> [io] int {
+fn run[&i](io: &!i Io) -> [io] int {
     let t = three(1, 2, 3);
-    putchar(48 + t.a);                       // 1
+    putchar(io, 48 + t.a);                       // 1
 
     let n = nest(true);
-    putchar(48 + n.right.c - 6 + 7);         // 7
+    putchar(io, 48 + n.right.c - 6 + 7);         // 7
     if n.flag {
-        putchar(48 + n.left.b + 1);          // 3
+        putchar(io, 48 + n.left.b + 1);          // 3
     } else {
-        putchar(48);
+        putchar(io, 48);
     }
 
     // The wide path: `Wide::Big` carries a three-field struct, so the enum is
     // four leaves and comes back through the buffer.
     let big = total(widen(7));               // Big(7, 7, 7) -> 21
-    putchar(48 + big / 10);                  // 2
-    putchar(48 + big % 10);                  // 1
-    putchar(10);
+    putchar(io, 48 + big / 10);                  // 2
+    putchar(io, 48 + big % 10);                  // 1
+    putchar(io, 10);
     return 0;
+}
+
+fn main(world: World) -> [] int {
+    // §8.2: the runtime hands over exactly one `World`, and `split` consumes
+    // it. There is no other way to obtain a capability.
+    let Split { io } = split(world);
+    var status = 0;
+    // Threaded by borrow, not by move: a callee should not consume its
+    // caller's authority.
+    borrow mut io as &!i in {
+        status = run(i);
+    }
+    // Authority is a resource, so it is destroyed exactly once. A program
+    // that forgets this does not compile.
+    release(io);
+    return status;
 }

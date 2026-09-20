@@ -4,15 +4,17 @@
 // enclosing function's declared row. `putchar` performs `io` and this row is
 // empty, so the signature is a lie about what calling it costs.
 //
-// The fix the message names is deliberate in that order: narrow the *body*,
-// not the signature. Widening the row is always available and always the
-// second choice.
+// Holding the capability is not enough on its own: `quiet` *borrows* an
+// `Io`, and a borrowed capability is exactly what a row names (§8.2). Owning
+// one would discharge the label; borrowing one is what declares it.
 
-fn quiet() -> [] int {
-    putchar(65);
+fn quiet[&i](io: &!i Io) -> [] int {
+    putchar(io, 65);
     return 0;
 }
 
-fn main() -> [] int {
+fn main(world: World) -> [] int {
+    let Split { io } = split(world);
+    release(io);
     return 0;
 }

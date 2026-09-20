@@ -29,19 +29,35 @@ fn describe(s: Shape) -> [] int {
     }
 }
 
-fn digits(n: int) -> [io] int {
-    putchar(48 + n / 10);
-    putchar(48 + n % 10);
+fn digits[&i](io: &!i Io, n: int) -> [io] int {
+    putchar(io, 48 + n / 10);
+    putchar(io, 48 + n % 10);
     return n;
 }
 
-fn main() -> [io] int {
-    digits(area(Shape::Empty));            // 00
-    digits(area(Shape::Circle(2)));        // 12
-    digits(area(Shape::Rect(4, 5)));       // 20
-    digits(area(Shape::At(Point { x: 1, y: 2 }, 3)));  // 06
-    digits(describe(Shape::Circle(1)));    // 99
-    digits(describe(Shape::Empty));        // 01
-    putchar(10);
+fn run[&i](io: &!i Io) -> [io] int {
+    digits(io, area(Shape::Empty));            // 00
+    digits(io, area(Shape::Circle(2)));        // 12
+    digits(io, area(Shape::Rect(4, 5)));       // 20
+    digits(io, area(Shape::At(Point { x: 1, y: 2 }, 3)));  // 06
+    digits(io, describe(Shape::Circle(1)));    // 99
+    digits(io, describe(Shape::Empty));        // 01
+    putchar(io, 10);
     return 0;
+}
+
+fn main(world: World) -> [] int {
+    // §8.2: the runtime hands over exactly one `World`, and `split` consumes
+    // it. There is no other way to obtain a capability.
+    let Split { io } = split(world);
+    var status = 0;
+    // Threaded by borrow, not by move: a callee should not consume its
+    // caller's authority.
+    borrow mut io as &!i in {
+        status = run(i);
+    }
+    // Authority is a resource, so it is destroyed exactly once. A program
+    // that forgets this does not compile.
+    release(io);
+    return status;
 }

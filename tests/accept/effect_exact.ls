@@ -18,20 +18,36 @@ fn double(n: int) -> [] int {
 
 // The grounding: `putchar` is the builtin that performs `io`, and every `io`
 // in every row above this one traces back to it.
-fn emit(c: int) -> [io] int {
-    return putchar(c);
+fn emit[&i](io: &!i Io, c: int) -> [io] int {
+    return putchar(io, c);
 }
 
 // Performs `io` twice; the row is still `[io]`, because a row is a set.
-fn banner() -> [io] int {
-    emit(65);
-    return emit(66);
+fn banner[&i](io: &!i Io) -> [io] int {
+    emit(io, 65);
+    return emit(io, 66);
 }
 
-fn main() -> [io] int {
-    banner();
+fn run[&i](io: &!i Io) -> [io] int {
+    banner(io);
     // A pure call inside an effectful function adds nothing to the row.
-    let last = emit(48 + double(3));
-    emit(10);
+    let last = emit(io, 48 + double(3));
+    emit(io, 10);
     return last - 54;
+}
+
+fn main(world: World) -> [] int {
+    // §8.2: the runtime hands over exactly one `World`, and `split` consumes
+    // it. There is no other way to obtain a capability.
+    let Split { io } = split(world);
+    var status = 0;
+    // Threaded by borrow, not by move: a callee should not consume its
+    // caller's authority.
+    borrow mut io as &!i in {
+        status = run(i);
+    }
+    // Authority is a resource, so it is destroyed exactly once. A program
+    // that forgets this does not compile.
+    release(io);
+    return status;
 }

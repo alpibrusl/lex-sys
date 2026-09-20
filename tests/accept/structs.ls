@@ -17,18 +17,34 @@ fn shift(p: Point, by: int) -> [] Point {
     return Point { x: p.x + by, y: p.y + by };
 }
 
-fn main() -> [io] int {
+fn run[&i](io: &!i Io) -> [io] int {
     let a = Point { x: 1, y: 2 };
     let b = shift(a, 3);
     let l = Line { from: a, to: b, dashed: false };
     // (4-1)^2 + (5-2)^2 = 9 + 9 = 18
-    putchar(48 + length_squared(l) / 10);
-    putchar(48 + length_squared(l) % 10);
+    putchar(io, 48 + length_squared(l) / 10);
+    putchar(io, 48 + length_squared(l) % 10);
     if l.dashed {
-        putchar(33);
+        putchar(io, 33);
     } else {
-        putchar(46);
+        putchar(io, 46);
     }
-    putchar(10);
+    putchar(io, 10);
     return 0;
+}
+
+fn main(world: World) -> [] int {
+    // §8.2: the runtime hands over exactly one `World`, and `split` consumes
+    // it. There is no other way to obtain a capability.
+    let Split { io } = split(world);
+    var status = 0;
+    // Threaded by borrow, not by move: a callee should not consume its
+    // caller's authority.
+    borrow mut io as &!i in {
+        status = run(i);
+    }
+    // Authority is a resource, so it is destroyed exactly once. A program
+    // that forgets this does not compile.
+    release(io);
+    return status;
 }

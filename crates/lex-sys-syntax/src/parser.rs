@@ -9,7 +9,7 @@ use crate::span::{Diagnostic, Span};
 
 pub fn parse(source: &str) -> Result<Ast, Diagnostic> {
     let tokens = tokenize(source)?;
-    let mut p = Parser { source, tokens, pos: 0, ast: Ast::default(), no_struct_literal: false };
+    let mut p = Parser { source, tokens, pos: 0, ast: Ast::new(), no_struct_literal: false };
     p.unit()?;
     Ok(p.ast)
 }
