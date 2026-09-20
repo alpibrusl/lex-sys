@@ -829,25 +829,37 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
         let bytes = self.expr(&args[2]);
         let path = self.checked_path(prefix, &path);
 
-        // `O_CREAT` and `O_TRUNC` are not the same numbers on Linux and
-        // darwin, which is exactly the kind of thing a language with
-        // defined behaviour should not be guessing at.
-        let darwin = matches!(
-            self.module.isa().triple().operating_system,
-            target_lexicon::OperatingSystem::Darwin(_) | target_lexicon::OperatingSystem::MacOSX(_)
-        );
-        let (flags, mode) = match (write, darwin) {
-            (false, _) => (0, 0),
-            (true, true) => (1 | 0x200 | 0x400, 0o644),
-            (true, false) => (1 | 0o100 | 0o1000, 0o644),
+        // **Neither call here is `open(path, flags, mode)`**, and that is
+        // deliberate. `open` is variadic — `int open(const char *, int, ...)`
+        // — and on Apple ARM64 a variadic argument is passed on the *stack*
+        // while a fixed one is passed in a register. Declaring it with three
+        // fixed arguments puts `mode` in a register the callee never reads,
+        // so the file is created with whatever was on the stack: the write
+        // succeeds, the permissions are junk, and reading the file back
+        // fails. Linux x86-64 hides this, because there varargs and fixed
+        // arguments share the same registers.
+        //
+        // So: `creat(path, mode)` for writing, which is exactly
+        // `open(path, O_WRONLY|O_CREAT|O_TRUNC, mode)` and is *not*
+        // variadic — it also deletes the platform-dependent flag constants,
+        // which were the other thing here a portable language should not be
+        // guessing at. And `open(path, O_RDONLY)` for reading, declared with
+        // two arguments: that is the non-variadic prefix, so no argument of
+        // ours lands anywhere the callee is not looking, and `O_RDONLY` is
+        // zero on both platforms.
+        let fd = if write {
+            let creat = self.libc_fn("creat", &[pointer, types::I32], &[types::I32]);
+            let creat = self.module.declare_func_in_func(creat, self.builder.func);
+            let mode = self.builder.ins().iconst(types::I32, 0o644);
+            let call = self.builder.ins().call(creat, &[path, mode]);
+            self.builder.inst_results(call)[0]
+        } else {
+            let open = self.libc_fn("open", &[pointer, types::I32], &[types::I32]);
+            let open = self.module.declare_func_in_func(open, self.builder.func);
+            let read_only = self.builder.ins().iconst(types::I32, 0);
+            let call = self.builder.ins().call(open, &[path, read_only]);
+            self.builder.inst_results(call)[0]
         };
-
-        let open = self.libc_fn("open", &[pointer, types::I32, types::I32], &[types::I32]);
-        let open = self.module.declare_func_in_func(open, self.builder.func);
-        let flags = self.builder.ins().iconst(types::I32, flags);
-        let mode = self.builder.ins().iconst(types::I32, mode);
-        let call = self.builder.ins().call(open, &[path, flags, mode]);
-        let fd = self.builder.inst_results(call)[0];
 
         // A missing file is an ordinary outcome, not a broken promise, so
         // it is `-1` rather than a trap (§3).

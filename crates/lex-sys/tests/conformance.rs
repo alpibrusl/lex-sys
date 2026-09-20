@@ -557,6 +557,65 @@ fn a_sibling_of_the_granted_directory_traps() {
 }
 
 #[test]
+fn a_written_file_is_readable_by_its_owner() {
+    // The regression guard for a real bug, and the reason it is worth a test
+    // of its own rather than leaving it to `file_roundtrip.ls`.
+    //
+    // `open` is variadic -- `int open(const char *, int, ...)` -- and on
+    // Apple ARM64 a variadic argument travels on the stack while a fixed one
+    // travels in a register. Calling it with three *fixed* arguments
+    // therefore created files with whatever mode happened to be on the
+    // stack: the write succeeded and reported the right byte count, and the
+    // file was unreadable afterwards. Linux x86-64 cannot see this, because
+    // there varargs and fixed arguments share the same registers.
+    //
+    // So the mode is checked directly, from outside the program, rather than
+    // inferred from a read that happens to succeed.
+    let dir = scratch("fs-mode");
+    let source = dir.join("mode.ls");
+    let target = dir.join("written.txt");
+    let path = target.to_string_lossy().into_owned();
+    std::fs::write(
+        &source,
+        format!(
+            "fn main(world: World) -> [] int {{\n\
+                 let Split {{ io, ffi, fs }} = split(world); release(ffi); release(io);\n\
+                 let one = narrow(fs, \"{path}\");\n\
+                 var wrote = 0;\n\
+                 borrow one as &f in {{ wrote = fs_write(f, \"{path}\", \"written\\n\"); }}\n\
+                 release(one);\n\
+                 return wrote - 8;\n\
+             }}\n"
+        ),
+    )
+    .expect("a writable fixture");
+
+    let exe = dir.join("mode");
+    let build = Command::new(BIN)
+        .args(["build".as_ref(), source.as_os_str(), "-o".as_ref(), exe.as_os_str()])
+        .output()
+        .expect("the compiler runs");
+    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+
+    let run = Command::new(&exe).output().expect("the compiled program runs");
+    assert_eq!(run.status.code(), Some(0), "the write should have reported 8 bytes");
+
+    let written = std::fs::read(&target).expect("the file the program wrote is readable");
+    assert_eq!(written, b"written\n");
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&target).expect("the file exists").permissions().mode();
+        // `creat` asks for 0644 and the umask may clear group and other
+        // bits, but never the owner's. A mode that lost them is the bug.
+        assert_eq!(mode & 0o600, 0o600, "created with mode {:o}", mode & 0o777);
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn a_missing_file_is_minus_one_rather_than_a_trap() {
     // §3. The distinction `defined-behaviour.md` draws everywhere: `-1` for
     // an outcome a program should handle, a trap for a broken promise. A

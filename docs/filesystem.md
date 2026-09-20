@@ -96,6 +96,37 @@ Containment against a *hostile* program is a sandbox's job — `lex-os` runs
 one, and this language is what runs inside it. Containment against an
 *honest* program's mistakes is what types do, and that is what this is.
 
+### 2.2 And they do not call `open`
+
+A note from building it, because it cost a CI cycle and the reason is not
+obvious.
+
+`open` is **variadic** — `int open(const char *, int, ...)` — and on Apple
+ARM64 a variadic argument is passed on the *stack* while a fixed one is
+passed in a register. Declaring it with three fixed arguments therefore put
+the mode somewhere the callee never looked: the write succeeded and
+returned the right byte count, and the file was created with whatever
+happened to be on the stack, usually unreadable. Linux x86-64 cannot show
+this, because there varargs and fixed arguments share the same registers —
+so it passed locally and failed on the other CI target, which is what the
+second target is for.
+
+So the backend calls two non-variadic functions instead:
+
+* `creat(path, mode)` to write, which is exactly
+  `open(path, O_WRONLY|O_CREAT|O_TRUNC, mode)` — and which also deletes the
+  platform-dependent flag constants, the other thing here a portable
+  language should not be guessing at;
+* `open(path, O_RDONLY)` to read, declared with two arguments. That is the
+  non-variadic prefix, so no argument lands anywhere the callee is not
+  looking, and `O_RDONLY` is zero on both platforms.
+
+The rule this generalises to: **the backend does not call variadic C
+functions**, because their ABI differs from the fixed one and Cranelift
+signatures do not express the difference. A conformance test checks the
+mode of a file a program wrote, from outside the program, rather than
+inferring it from a read that happens to succeed.
+
 ---
 
 ## 3. Two operations, whole-file
@@ -212,3 +243,4 @@ that only *compiles* would not reach them:
 | `a_path_containing_dot_dot_traps` | `..` is refused rather than normalised | 4.1 |
 | `a_sibling_of_the_granted_directory_traps` | §1.1 again, on the path this time | 1.1 |
 | `a_missing_file_is_minus_one_rather_than_a_trap` | An outcome is not a broken promise | 3 |
+| `a_written_file_is_readable_by_its_owner` | The mode reaches the callee — no variadic C call | 2.2 |
