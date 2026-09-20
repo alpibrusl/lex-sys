@@ -201,7 +201,7 @@ fn division_by_zero_traps_rather_than_being_undefined() {
         &source,
         "fn divide(a: int, b: int) -> [] int { return a / b; }\n\
          fn main(world: World) -> [] int {\n\
-             let Split { io } = split(world);\n\
+             let Split { io, ffi } = split(world); release(ffi);\n\
              release(io);\n\
              return divide(1, 0);\n\
          }\n",

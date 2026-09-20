@@ -49,7 +49,16 @@ pub struct FuncId(pub u32);
 /// first so these are the same in every program.
 pub const PRELUDE_WORLD: usize = 0;
 pub const PRELUDE_IO: usize = 1;
-pub const PRELUDE_SPLIT: usize = 2;
+pub const PRELUDE_FFI: usize = 2;
+pub const PRELUDE_SPLIT: usize = 3;
+
+/// The library an unnarrowed `Ffi` names: none of them yet.
+///
+/// §7.4's narrowing is prefix extension — `Fs("/var")` becomes
+/// `Fs("/var/log/app")` — and the empty string is the prefix of everything,
+/// so the capability `split` hands out can still become any library and no
+/// narrowed one can become another.
+pub const FFI_ROOT: &str = "";
 
 /// An effect row: a canonically ordered set of labels
 /// (`docs/linearity-and-effects.md` §7.1).
@@ -63,7 +72,45 @@ pub const PRELUDE_SPLIT: usize = 2;
 /// index is a fact about which names a *file* happened to mention first and
 /// a hash must not depend on that.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Default)]
-pub struct Effects(Vec<String>);
+pub struct Effects(Vec<Label>);
+
+/// One label, and the value it was narrowed to (§7.4).
+///
+/// `ffi` and `ffi("libc")` are different labels, and the second is narrower.
+/// The argument is a compile-time literal, never a runtime value, which is
+/// what lets the refinement be checked structurally.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub struct Label {
+    pub name: String,
+    pub argument: Option<String>,
+}
+
+impl Label {
+    /// Does holding the authority for `self` also authorise `other`?
+    ///
+    /// The same prefix-extension rule narrowing itself uses (§7.4), and for
+    /// the same reason: what a capability covers is exactly what it can be
+    /// narrowed to. `ffi("")` covers every library, `ffi("libc")` covers
+    /// `ffi("libc")` and nothing else, and a label with no argument covers
+    /// only itself.
+    pub fn covers(&self, other: &Label) -> bool {
+        self.name == other.name
+            && match (&self.argument, &other.argument) {
+                (None, None) => true,
+                (Some(mine), Some(theirs)) => theirs.starts_with(mine.as_str()),
+                _ => false,
+            }
+    }
+}
+
+impl fmt::Display for Label {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.argument {
+            Some(arg) => write!(f, "{}(\"{}\")", self.name, arg),
+            None => write!(f, "{}", self.name),
+        }
+    }
+}
 
 impl Effects {
     pub fn pure() -> Self {
@@ -71,14 +118,19 @@ impl Effects {
     }
 
     /// Canonicalise whatever was written: sorted, deduplicated.
-    pub fn new(labels: impl IntoIterator<Item = String>) -> Self {
-        let mut labels: Vec<String> = labels.into_iter().collect();
+    pub fn new(labels: impl IntoIterator<Item = Label>) -> Self {
+        let mut labels: Vec<Label> = labels.into_iter().collect();
         labels.sort();
         labels.dedup();
         Effects(labels)
     }
 
-    pub fn labels(&self) -> &[String] {
+    /// A row of plain labels, for the common case of no narrowing.
+    pub fn plain(names: impl IntoIterator<Item = &'static str>) -> Self {
+        Effects::new(names.into_iter().map(|n| Label { name: n.to_owned(), argument: None }))
+    }
+
+    pub fn labels(&self) -> &[Label] {
         &self.0
     }
 
@@ -94,21 +146,26 @@ impl Effects {
         self.0.dedup();
     }
 
-    /// Drop one label, for §8.2's discharge rule.
-    pub fn remove(&mut self, label: &str) {
-        self.0.retain(|l| l != label);
+    /// Drop everything `authority` covers, for §8.2's discharge rule.
+    ///
+    /// Covering rather than equality: a function owning the capability a
+    /// label narrows *from* has the authority for the narrowed label too,
+    /// because narrowing is a call anyone holding one may make.
+    pub fn discharge(&mut self, authority: &Effects) {
+        self.0.retain(|label| !authority.0.iter().any(|held| held.covers(label)));
     }
 
     /// The other: subset, to check a call against a declaration. Linear in
     /// the number of labels, which is small and statically bounded.
-    pub fn missing_from<'a>(&'a self, other: &Effects) -> Option<&'a str> {
-        self.0.iter().find(|l| !other.0.contains(l)).map(String::as_str)
+    pub fn missing_from<'a>(&'a self, other: &Effects) -> Option<&'a Label> {
+        self.0.iter().find(|l| !other.0.contains(l))
     }
 }
 
 impl fmt::Display for Effects {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "[{}]", self.0.join(", "))
+        let labels: Vec<String> = self.0.iter().map(Label::to_string).collect();
+        write!(f, "[{}]", labels.join(", "))
     }
 }
 
@@ -132,6 +189,18 @@ pub enum Builtin {
     /// The one place a capability comes from. There is no ambient
     /// constructor, no `Io::global()`, and nothing that conjures one.
     Split,
+    /// `narrow(f: Ffi(a), "libc") -> [] Ffi("libc")` — attenuation (§7.4).
+    ///
+    /// Consumes the wider capability and hands back the narrower one, which
+    /// is what makes it a trade rather than a copy: a program cannot keep
+    /// the broad authority *and* the narrow one.
+    ///
+    /// Narrowing only, in both directions — the same commitment `lex-os`
+    /// makes for manifests, for the same reason: a program must not be able
+    /// to grant itself what it was not given. The literal argument is what
+    /// makes the refinement checkable structurally, which is why §7.4
+    /// requires one.
+    Narrow,
     /// `release(io: Io) -> [] int` — destroys a capability.
     ///
     /// Authority is a resource and a resource is destroyed exactly once, so
@@ -141,13 +210,15 @@ pub enum Builtin {
 }
 
 impl Builtin {
-    pub const ALL: &'static [Builtin] = &[Builtin::PutChar, Builtin::Split, Builtin::Release];
+    pub const ALL: &'static [Builtin] =
+        &[Builtin::PutChar, Builtin::Split, Builtin::Release, Builtin::Narrow];
 
     pub fn name(self) -> &'static str {
         match self {
             Builtin::PutChar => "putchar",
             Builtin::Split => "split",
             Builtin::Release => "release",
+            Builtin::Narrow => "narrow",
         }
     }
 
@@ -159,7 +230,7 @@ impl Builtin {
     pub fn symbol(self) -> Option<&'static str> {
         match self {
             Builtin::PutChar => Some("putchar"),
-            Builtin::Split | Builtin::Release => None,
+            Builtin::Split | Builtin::Release | Builtin::Narrow => None,
         }
     }
 
@@ -173,7 +244,7 @@ impl Builtin {
     pub fn erased_args(self) -> usize {
         match self {
             Builtin::PutChar => 1,
-            Builtin::Split | Builtin::Release => 0,
+            Builtin::Split | Builtin::Release | Builtin::Narrow => 0,
         }
     }
 
@@ -182,7 +253,7 @@ impl Builtin {
     pub fn regions(self) -> usize {
         match self {
             Builtin::PutChar => 1,
-            Builtin::Split | Builtin::Release => 0,
+            Builtin::Split | Builtin::Release | Builtin::Narrow => 0,
         }
     }
 
@@ -205,7 +276,12 @@ impl Builtin {
                 Type::Int,
             ),
             Builtin::Split => (vec![named(PRELUDE_WORLD)], named(PRELUDE_SPLIT)),
-            Builtin::Release => (vec![named(PRELUDE_IO)], Type::Int),
+            // Both are checked at the call site rather than here, because a
+            // fixed signature cannot say what they need. `release` ends any
+            // capability, and there is more than one kind; `narrow` has an
+            // argument *and* a result that depend on the literal written at
+            // the call.
+            Builtin::Release | Builtin::Narrow => (Vec::new(), Type::Unit),
         }
     }
 
@@ -217,12 +293,12 @@ impl Builtin {
     /// in an exact row (§7.3).
     pub fn effects(self) -> Effects {
         match self {
-            Builtin::PutChar => Effects::new(["io".to_owned()]),
+            Builtin::PutChar => Effects::plain(["io"]),
             // Moving authority around is not an effect. Splitting a `World`
             // observes nothing outside the program and releasing a
             // capability only ends one; what a capability *authorises* is
             // where the effect is.
-            Builtin::Split | Builtin::Release => Effects::pure(),
+            Builtin::Split | Builtin::Release | Builtin::Narrow => Effects::pure(),
         }
     }
 
@@ -273,6 +349,23 @@ impl BinOp {
 pub enum Callee {
     Fn(FuncId),
     Builtin(Builtin),
+    /// A foreign function (§8.4). Indexes [`Program::externs`].
+    Extern(u32),
+}
+
+/// A foreign signature, as the backend needs it: the symbol to bind and the
+/// shape of the call.
+///
+/// The capability parameters are still in `params` — the checker tracked a
+/// real value through them — but they carry no data, so the backend drops
+/// them on the way out to C exactly as it does for `putchar`.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct ExternFn {
+    pub name: String,
+    pub symbol: String,
+    pub params: Vec<Type>,
+    pub effects: Effects,
+    pub ret: Type,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -436,6 +529,8 @@ impl TypeInfo {
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct Program {
     pub funcs: Vec<Func>,
+    /// Foreign functions the unit declared, in declaration order.
+    pub externs: Vec<ExternFn>,
     /// Indexed by [`DefId`].
     pub types: Vec<TypeInfo>,
 }
@@ -628,7 +723,8 @@ fn reaches(defs: &[TypeDef], from: usize, target: usize, seen: &mut [bool]) -> b
 /// A struct with no fields has no leaves, so threading one is free -- which
 /// is a claim worth a test rather than a comment.
 pub fn leaf_free(ty: &Type) -> bool {
-    matches!(ty, Type::Named(def, _) if matches!(def.0 as usize, PRELUDE_WORLD | PRELUDE_IO))
+    matches!(ty, Type::Named(def, _)
+        if matches!(def.0 as usize, PRELUDE_WORLD | PRELUDE_IO | PRELUDE_FFI))
 }
 
 /// Is this one of the prelude's capability types?
@@ -639,7 +735,7 @@ pub fn leaf_free(ty: &Type) -> bool {
 /// out. So a capability has no literal form, and the only `Io` in existence
 /// is the one the runtime handed to `main` inside a `World`.
 fn is_capability(def: DefId) -> bool {
-    matches!(def.0 as usize, PRELUDE_WORLD | PRELUDE_IO | PRELUDE_SPLIT)
+    matches!(def.0 as usize, PRELUDE_WORLD | PRELUDE_IO | PRELUDE_FFI | PRELUDE_SPLIT)
 }
 
 /// Is this a capability whose only consumer is `release`?
@@ -649,7 +745,7 @@ fn is_capability(def: DefId) -> bool {
 /// authority without naming the function that knows how (§4.1) — and for
 /// `World` and `Io`, which carry no fields, it would do it silently.
 fn released_only(def: DefId) -> bool {
-    matches!(def.0 as usize, PRELUDE_WORLD | PRELUDE_IO)
+    matches!(def.0 as usize, PRELUDE_WORLD | PRELUDE_IO | PRELUDE_FFI)
 }
 
 /// What owning a value of this type authorises outright (§8.2).
@@ -662,7 +758,7 @@ fn released_only(def: DefId) -> bool {
 /// `[io]` on a signature means, so counting it here would make every row
 /// empty and the whole section decoration.
 fn discharged_by(defs: &[TypeDef], ty: &Type) -> Effects {
-    let Type::Named(def, _) = ty else {
+    let Type::Named(def, args) = ty else {
         return Effects::pure();
     };
     let index = def.0 as usize;
@@ -670,7 +766,29 @@ fn discharged_by(defs: &[TypeDef], ty: &Type) -> Effects {
         return Effects::pure();
     }
     match index {
-        PRELUDE_WORLD | PRELUDE_IO => Effects::new(["io".to_owned()]),
+        PRELUDE_IO => Effects::plain(["io"]),
+        // A `World` is the root, so it discharges what every capability it
+        // splits into discharges: the console, and the unnarrowed `Ffi`,
+        // which covers every library there could be. Owning a `World` and
+        // declaring `[]` is not a gap in the row — it is the parameter list
+        // saying something stronger.
+        PRELUDE_WORLD => {
+            let mut all = Effects::plain(["io"]);
+            all.union(&Effects::new([Label {
+                name: "ffi".to_owned(),
+                argument: Some(FFI_ROOT.to_owned()),
+            }]));
+            all
+        }
+        // Owning an `Ffi("libc")` discharges `ffi("libc")`, and owning the
+        // root discharges `ffi("")`, which *covers* every library because
+        // its holder can narrow to any of them.
+        PRELUDE_FFI => match args.first() {
+            Some(Type::Lit(library)) => {
+                Effects::new([Label { name: "ffi".to_owned(), argument: Some(library.clone()) }])
+            }
+            _ => Effects::pure(),
+        },
         _ => Effects::pure(),
     }
 }
@@ -693,13 +811,17 @@ fn prelude_types(ast: &Ast, unifier: &mut Unifier) -> Vec<TypeDef> {
     let span = Span::new(0, 0);
     let world = symbol("World");
     let io = symbol("Io");
+    let ffi = symbol("Ffi");
     let split = symbol("Split");
+    let library = symbol("L");
     // The *field* is `io`; the type it holds is `Io`. Two different names,
     // and interning them separately is what keeps them so.
     let io_field = symbol("io");
+    let ffi_field = symbol("ffi");
 
     let world_def = unifier.declare("World");
     let io_def = unifier.declare("Io");
+    let ffi_def = unifier.declare("Ffi");
     let split_def = unifier.declare("Split");
 
     vec![
@@ -719,13 +841,30 @@ fn prelude_types(ast: &Ast, unifier: &mut Unifier) -> Vec<TypeDef> {
             kind: DefKind::Struct(Vec::new()),
             span,
         },
-        // `res` by inference, because it holds one.
+        // §8.4's capability, and the first one that carries data: `Ffi` is
+        // indexed by the library it names, so `Ffi("libc")` and `Ffi("libm")`
+        // are different types and a program cannot use one where the other
+        // was granted.
+        TypeDef {
+            name: ffi,
+            def: ffi_def,
+            generics: vec![library],
+            declared_mode: Some(Mode::Res),
+            kind: DefKind::Struct(Vec::new()),
+            span,
+        },
+        // `res` by inference, because it holds two.
         TypeDef {
             name: split,
             def: split_def,
             generics: Vec::new(),
             declared_mode: None,
-            kind: DefKind::Struct(vec![(io_field, Type::Named(io_def, Vec::new()))]),
+            kind: DefKind::Struct(vec![
+                (io_field, Type::Named(io_def, Vec::new())),
+                // Unnarrowed: the root authority to call out, which names no
+                // library until someone narrows it to one.
+                (ffi_field, Type::Named(ffi_def, vec![Type::Lit(FFI_ROOT.to_owned())])),
+            ]),
             span,
         },
     ]
@@ -745,7 +884,7 @@ fn collect_types(ast: &Ast, unifier: &mut Unifier) -> Result<Vec<TypeDef>, Diagn
         let (name_sym, noun, generics, declared_mode) = match item {
             Item::Struct(decl) => (decl.name, "struct", decl.generics.clone(), decl.mode),
             Item::Enum(decl) => (decl.name, "enum", decl.generics.clone(), decl.mode),
-            Item::Fn(_) => continue,
+            Item::Fn(_) | Item::Extern(_) => continue,
         };
         let span = ast.item_span(ast::ItemId(index as u32));
         let name = ast.name_of(name_sym);
@@ -829,7 +968,7 @@ fn collect_types(ast: &Ast, unifier: &mut Unifier) -> Result<Vec<TypeDef>, Diagn
                 }
                 defs[position].kind = DefKind::Enum(variants);
             }
-            Item::Fn(_) => {}
+            Item::Fn(_) | Item::Extern(_) => {}
         }
     }
 
@@ -880,6 +1019,128 @@ pub fn lower(ast: &Ast) -> Result<Program, Diagnostic> {
     // Every function is visible to every other, so collect signatures before
     // checking any body. Definition order in the file is irrelevant, and no
     // body is ever consulted to type a call.
+    // §8.4: a foreign signature is written once, here, and every caller is
+    // checked against it exactly as against a written function's.
+    let mut externs: Vec<ExternFn> = Vec::new();
+    for (index, item) in ast.items.iter().enumerate() {
+        let Item::Extern(decl) = item else { continue };
+        let name = ast.name_of(decl.name);
+        let span = ast.item_span(ast::ItemId(index as u32));
+        if Builtin::from_name(name).is_some() {
+            return Err(Diagnostic::new(
+                format!("`{name}` is a builtin and cannot be declared foreign"),
+                span,
+            ));
+        }
+        if externs.iter().any(|e| e.name == name) {
+            return Err(Diagnostic::new(
+                format!("foreign function `{name}` is declared twice"),
+                span,
+            ));
+        }
+        let region_scope = check_region_names(ast, &decl.regions, &[], span)?;
+        let params = decl
+            .params
+            .iter()
+            .map(|p| resolve_type(ast, &defs, &[], &region_scope, p.ty))
+            .collect::<Result<Vec<_>, _>>()?;
+        let ret = resolve_type(ast, &defs, &[], &region_scope, decl.ret)?;
+        let declared =
+            Effects::new(decl.effects.iter().map(|e| Label {
+                name: ast.name_of(e.name).to_owned(),
+                argument: e.argument.clone(),
+            }));
+
+        // §8.4: what crosses the boundary is what C can name. Aggregates
+        // have no layout contract here yet, and a reference to anything but
+        // a capability would be a pointer this compiler has not promised to
+        // lay out — so both are refused at the declaration, where the author
+        // can still write something else, rather than at the call.
+        for (param, decl_param) in params.iter().zip(&decl.params) {
+            let what = ast.name_of(decl_param.name);
+            match param {
+                Type::Int | Type::Bool => {}
+                Type::Ref { inner, .. } if matches!(inner.as_ref(), Type::Named(def, _) if is_capability(*def)) =>
+                    {}
+                Type::Ref { .. } => {
+                    return Err(Diagnostic::new(
+                        format!(
+                            "`{name}` takes `{what}` by reference, but the only reference that crosses a foreign boundary is a borrowed capability: C is not told about regions"
+                        ),
+                        span,
+                    ));
+                }
+                other => {
+                    return Err(Diagnostic::new(
+                        format!(
+                            "`{name}` takes `{what}` of type `{}`, which has no agreed layout across a foreign boundary; a foreign parameter is `int`, `bool`, or a borrowed capability",
+                            unifier.display(other)
+                        ),
+                        span,
+                    ));
+                }
+            }
+        }
+        if !matches!(ret, Type::Int | Type::Bool | Type::Unit) {
+            return Err(Diagnostic::new(
+                format!(
+                    "`{name}` returns `{}`, which has no agreed layout across a foreign boundary; a foreign result is `int`, `bool`, or `()`",
+                    unifier.display(&ret)
+                ),
+                span,
+            ));
+        }
+
+        // §8.4: the capability is the only way to reach the foreign call, so
+        // the row and the capability parameters have to agree. A declaration
+        // that named one library and borrowed another would be the one place
+        // a foreign signature is written, written wrong.
+        let mut authorised = Effects::pure();
+        for param in &params {
+            if let Type::Ref { inner, .. } = param {
+                authorised.union(&discharged_by(&defs, inner));
+            }
+        }
+        for param in &params {
+            let Type::Ref { inner, .. } = param else { continue };
+            if let Type::Named(def, args) = inner.as_ref()
+                && def.0 as usize == PRELUDE_FFI
+                && matches!(args.first(), Some(Type::Lit(library)) if library == FFI_ROOT)
+            {
+                return Err(Diagnostic::new(
+                    format!(
+                        "`{name}` borrows the unnarrowed `Ffi(\"\")`, which names no library; a foreign declaration names the library it calls into, so narrow before declaring"
+                    ),
+                    span,
+                ));
+            }
+        }
+        if let Some(label) = declared.missing_from(&authorised) {
+            return Err(Diagnostic::new(
+                format!(
+                    "`{name}` declares `{label}` but holds no capability that authorises it; a foreign call is reached through the capability that names its library"
+                ),
+                span,
+            ));
+        }
+        if let Some(label) = authorised.missing_from(&declared) {
+            return Err(Diagnostic::new(
+                format!(
+                    "`{name}` borrows a capability authorising `{label}`, which its row {declared} does not declare"
+                ),
+                span,
+            ));
+        }
+
+        externs.push(ExternFn {
+            name: name.to_owned(),
+            symbol: decl.symbol.clone(),
+            params,
+            effects: declared,
+            ret,
+        });
+    }
+
     let mut signatures: Vec<Signature> = Vec::new();
     for (index, item) in ast.items.iter().enumerate() {
         let Item::Fn(decl) = item else { continue };
@@ -894,6 +1155,14 @@ pub fn lower(ast: &Ast) -> Result<Program, Diagnostic> {
         }
         if signatures.iter().any(|s| s.name == decl.name) {
             return Err(Diagnostic::new(format!("function `{name}` is defined twice"), span));
+        }
+        // A foreign declaration and a written function are two answers to
+        // the same call, and a call resolves to one thing.
+        if externs.iter().any(|e| e.name == name) {
+            return Err(Diagnostic::new(
+                format!("`{name}` is already declared foreign, so this name is taken"),
+                span,
+            ));
         }
         check_generic_names(ast, &decl.generics, span)?;
         let region_scope = check_region_names(ast, &decl.regions, &decl.generics, span)?;
@@ -938,7 +1207,10 @@ pub fn lower(ast: &Ast) -> Result<Program, Diagnostic> {
             generics: decl.generics.clone(),
             regions: decl.regions.clone(),
             outlives,
-            effects: Effects::new(decl.effects.iter().map(|e| ast.name_of(*e).to_owned())),
+            effects: Effects::new(decl.effects.iter().map(|e| Label {
+                name: ast.name_of(e.name).to_owned(),
+                argument: e.argument.clone(),
+            })),
             params,
             ret,
             item: index,
@@ -957,7 +1229,16 @@ pub fn lower(ast: &Ast) -> Result<Program, Diagnostic> {
         }
         let rigid: Vec<Type> = (0..signature.generics.len() as u32).map(Type::Param).collect();
         let mut checking = Mono::new(false);
-        lower_function(ast, &defs, &signatures, &mut unifier, index, &rigid, &mut checking)?;
+        lower_function(
+            ast,
+            &defs,
+            &signatures,
+            &externs,
+            &mut unifier,
+            index,
+            &rigid,
+            &mut checking,
+        )?;
     }
 
     // Pass 2: emit a copy of every function actually reachable, starting from
@@ -973,8 +1254,16 @@ pub fn lower(ast: &Ast) -> Result<Program, Diagnostic> {
     while let Some(instance) = mono.pending.pop() {
         let (signature, args) =
             (mono.instances[instance].signature, mono.instances[instance].args.clone());
-        let func =
-            lower_function(ast, &defs, &signatures, &mut unifier, signature, &args, &mut mono)?;
+        let func = lower_function(
+            ast,
+            &defs,
+            &signatures,
+            &externs,
+            &mut unifier,
+            signature,
+            &args,
+            &mut mono,
+        )?;
         if funcs.len() <= instance {
             funcs.resize_with(instance + 1, || None);
         }
@@ -983,6 +1272,7 @@ pub fn lower(ast: &Ast) -> Result<Program, Diagnostic> {
 
     Ok(Program {
         funcs: funcs.into_iter().map(|f| f.expect("every requested instance is lowered")).collect(),
+        externs,
         types: defs
             .iter()
             .map(|d| match &d.kind {
@@ -1090,10 +1380,12 @@ fn settle_expr(expr: &mut Expr, unifier: &Unifier) {
 }
 
 /// Check and lower one function at one instantiation.
+#[allow(clippy::too_many_arguments)]
 fn lower_function(
     ast: &Ast,
     defs: &[TypeDef],
     signatures: &[Signature],
+    externs: &[ExternFn],
     unifier: &mut Unifier,
     index: usize,
     args: &[Type],
@@ -1126,6 +1418,7 @@ fn lower_function(
     let mut f = FnLowering {
         ast,
         signatures,
+        externs,
         defs,
         unifier,
         mono,
@@ -1229,11 +1522,11 @@ fn lower_function(
     // Taken from the signature, not from the body, so the rule lives at the
     // boundary with every other rule.
     let mut performed = performed;
+    let mut authority = Effects::pure();
     for param in &params {
-        for label in discharged_by(defs, param).labels() {
-            performed.remove(label);
-        }
+        authority.union(&discharged_by(defs, param));
     }
+    performed.discharge(&authority);
 
     // §7.3: the row is exact, or it is decoration. Both directions are
     // errors, and the over-wide one is not a warning -- an inexact row means
@@ -1370,8 +1663,15 @@ fn resolve_type(
         });
     }
 
+    // `Ffi("libc")`: a literal stands where a type argument does, because
+    // what a capability is narrowed to is part of its type (§7.4). It names
+    // nothing to look up and has no arguments of its own.
+    if let TypeExpr::Lit(text) = ast.ty(id) {
+        return Ok(Type::Lit(text.clone()));
+    }
+
     let TypeExpr::Name { name: written_name, args: written_args } = ast.ty(id) else {
-        unreachable!("a reference was handled above");
+        unreachable!("a reference and a literal were handled above");
     };
     let (written_name, written_args) = (*written_name, written_args.clone());
     let name = ast.name_of(written_name);
@@ -1438,6 +1738,7 @@ struct Binding {
 struct FnLowering<'a> {
     ast: &'a Ast,
     signatures: &'a [Signature],
+    externs: &'a [ExternFn],
     defs: &'a [TypeDef],
     unifier: &'a mut Unifier,
     mono: &'a mut Mono,
@@ -1526,9 +1827,117 @@ impl<'a> FnLowering<'a> {
         Ok(resolved.substitute(&self.generics, &[]))
     }
 
+    /// `release(cap)` — end a capability (§8.2).
+    ///
+    /// Checked here rather than through a written signature because there is
+    /// no one type to write: every capability a program can hold by value
+    /// ends the same way, and which ones those are is `released_only`'s
+    /// answer, not the unifier's. A `Split` is excluded on purpose — taking
+    /// one apart is what it is for, so releasing one whole would be
+    /// discarding the authority inside it by accident.
+    fn release(&mut self, args: &[ExprId], span: Span) -> Result<(Expr, Type), Diagnostic> {
+        let [capability] = args else {
+            return Err(Diagnostic::new(
+                format!("`release` takes 1 argument, but {} were given", args.len()),
+                span,
+            ));
+        };
+        let (value, found) = self.expr(*capability)?;
+        let resolved = self.unifier.resolve(&found);
+        let is_releasable = matches!(&resolved, Type::Named(def, _) if released_only(*def));
+        if !is_releasable {
+            return Err(Diagnostic::new(
+                format!(
+                    "`{}` is not a capability and so has nothing to release",
+                    self.unifier.display(&resolved)
+                ),
+                self.ast.expr_span(*capability),
+            ));
+        }
+        Ok((Expr::Call { callee: Callee::Builtin(Builtin::Release), args: vec![value] }, Type::Int))
+    }
+
+    /// `narrow(cap, "libc")` — attenuate a capability (§7.4).
+    ///
+    /// Narrowing is prefix extension, exactly as the document's own example
+    /// has it (`Fs("/var")` becomes `Fs("/var/log/app")`). The unnarrowed
+    /// root is the empty string, which is a prefix of everything, so the
+    /// capability `split` hands out can still become any library — and a
+    /// capability already narrowed to one can never become another.
+    fn narrow(&mut self, args: &[ExprId], span: Span) -> Result<(Expr, Type), Diagnostic> {
+        let [capability, literal] = args else {
+            return Err(Diagnostic::new(
+                format!("`narrow` takes 2 arguments, but {} were given", args.len()),
+                span,
+            ));
+        };
+        let AstExpr::Str(target) = self.ast.expr(*literal) else {
+            return Err(Diagnostic::new(
+                "`narrow` takes a literal, so the refinement can be checked where it is written",
+                self.ast.expr_span(*literal),
+            ));
+        };
+        let target = target.clone();
+
+        let (value, found) = self.expr(*capability)?;
+        let resolved = self.unifier.resolve(&found);
+        // Narrowing consumes what it attenuates, which is what makes the
+        // wider capability unreachable afterwards. A borrow is precisely the
+        // promise to give it back, so there is nothing here to consume.
+        if let Type::Ref { inner, .. } = &resolved {
+            return Err(Diagnostic::new(
+                format!(
+                    "`{}` is borrowed, and narrowing consumes what it attenuates; narrow the capability itself, before lending it",
+                    self.unifier.display(inner)
+                ),
+                span,
+            ));
+        }
+        let Type::Named(def, args) = &resolved else {
+            return Err(Diagnostic::new(
+                format!(
+                    "`{}` is not a capability and cannot be narrowed",
+                    self.unifier.display(&resolved)
+                ),
+                span,
+            ));
+        };
+        if def.0 as usize != PRELUDE_FFI {
+            return Err(Diagnostic::new(
+                format!(
+                    "`{}` carries no value to narrow; `Ffi` is the capability that names one",
+                    self.unifier.display(&resolved)
+                ),
+                span,
+            ));
+        }
+        let Some(Type::Lit(current)) = args.first() else {
+            return Err(Diagnostic::new(
+                "cannot tell what this capability was narrowed to; add an annotation",
+                span,
+            ));
+        };
+        if !target.starts_with(current.as_str()) {
+            return Err(Diagnostic::new(
+                format!(
+                    "`{current}` cannot be narrowed to `{target}`: a capability is attenuated, never widened, and a program must not be able to grant itself what it was not given"
+                ),
+                span,
+            ));
+        }
+        if &target == current {
+            return Err(Diagnostic::new(
+                format!("this narrows `{current}` to itself, which grants nothing new"),
+                span,
+            ));
+        }
+
+        Ok((value, Type::Named(DefId(PRELUDE_FFI as u32), vec![Type::Lit(target)])))
+    }
+
     /// The prelude's type ids, in the order `prelude_types` declared them.
     fn prelude(&self) -> Vec<DefId> {
-        self.defs[..3].iter().map(|d| d.def).collect()
+        self.defs[..4].iter().map(|d| d.def).collect()
     }
 
     /// Does `outer` outlive `inner` (§5.2)?
@@ -2306,6 +2715,15 @@ impl<'a> FnLowering<'a> {
         let span = self.ast.expr_span(id);
         Ok(match self.ast.expr(id) {
             AstExpr::Int(v) => (Expr::Int(*v), Type::Int),
+            // A literal the checker reads and the program never holds.
+            // `narrow` intercepts its own argument before it reaches here,
+            // so anywhere else is a place a string cannot be.
+            AstExpr::Str(_) => {
+                return Err(Diagnostic::new(
+                    "a string literal is only a narrowing argument here; there are no strings yet (M3)",
+                    span,
+                ));
+            }
             AstExpr::Bool(v) => (Expr::Bool(*v), Type::Bool),
             AstExpr::Name(name) => {
                 let text = self.ast.name_of(*name);
@@ -2607,6 +3025,7 @@ impl<'a> FnLowering<'a> {
                 // is ever checked against, generic or not.
                 let mut instantiate: Option<(usize, Vec<Type>)> = None;
                 let mut region_args: Vec<Region> = Vec::new();
+                let mut foreign: Option<u32> = None;
                 // §7.2: a body's row is a union over its calls. Taken here,
                 // at the one place a call is resolved, so there is no second
                 // walk that could disagree about what the body does.
@@ -2617,9 +3036,20 @@ impl<'a> FnLowering<'a> {
                         .iter()
                         .find(|sig| sig.name == *callee)
                         .map(|sig| sig.effects.clone())
+                        .or_else(|| {
+                            self.externs.iter().find(|e| e.name == text).map(|e| e.effects.clone())
+                        })
                         .unwrap_or_default(),
                 };
                 self.performed.union(&performed);
+                // §7.4: narrowing is checked here because both its argument
+                // and its result depend on the literal that was written.
+                if Builtin::from_name(text) == Some(Builtin::Narrow) {
+                    return self.narrow(args, span);
+                }
+                if Builtin::from_name(text) == Some(Builtin::Release) {
+                    return self.release(args, span);
+                }
                 let (params, ret) = if let Some(builtin) = Builtin::from_name(text) {
                     // A builtin's region parameters are instantiated exactly
                     // like a written function's (§5.1): one fresh region per
@@ -2628,6 +3058,28 @@ impl<'a> FnLowering<'a> {
                         (0..builtin.regions()).map(|_| self.unifier.fresh_region()).collect();
                     let prelude = self.prelude();
                     let (params, ret) = builtin.signature(&prelude);
+                    (
+                        params.iter().map(|t| t.substitute(&[], &fresh)).collect::<Vec<_>>(),
+                        ret.substitute(&[], &fresh),
+                    )
+                } else if let Some(index) = self.externs.iter().position(|e| e.name == text) {
+                    // A foreign call is checked against its declaration and
+                    // nothing else, exactly like a written function's (§8.4).
+                    // Its region parameters are instantiated here too, since
+                    // the capability it takes is borrowed.
+                    let ext = &self.externs[index];
+                    let (params, ret) = (ext.params.clone(), ext.ret.clone());
+                    let count = params
+                        .iter()
+                        .filter_map(|t| match t {
+                            Type::Ref { region: Region::Param(i), .. } => Some(*i + 1),
+                            _ => None,
+                        })
+                        .max()
+                        .unwrap_or(0) as usize;
+                    let fresh: Vec<Region> =
+                        (0..count).map(|_| self.unifier.fresh_region()).collect();
+                    foreign = Some(index as u32);
                     (
                         params.iter().map(|t| t.substitute(&[], &fresh)).collect::<Vec<_>>(),
                         ret.substitute(&[], &fresh),
@@ -2705,6 +3157,9 @@ impl<'a> FnLowering<'a> {
                 }
 
                 let callee_ref = match instantiate {
+                    None if foreign.is_some() => {
+                        Callee::Extern(foreign.expect("checked by the guard"))
+                    }
                     None => Callee::Builtin(
                         Builtin::from_name(text).expect("only a builtin skips instantiation"),
                     ),
@@ -3414,7 +3869,7 @@ mod tests {
 #[cfg(test)]
 mod effect_tests {
     use super::tests::lower_src;
-    use super::{Effects, Program};
+    use super::{Effects, Label, Program};
 
     fn refused(src: &str) -> String {
         lower_src(src).expect_err("this should be refused").message
@@ -3428,22 +3883,32 @@ mod effect_tests {
     fn a_row_is_a_canonically_ordered_set() {
         // §7.1: no duplicates, and an order that does not depend on which
         // label a file happened to mention first.
-        let a = Effects::new(["io".to_owned(), "fs".to_owned(), "io".to_owned()]);
-        let b = Effects::new(["fs".to_owned(), "io".to_owned()]);
+        let a = Effects::plain(["io", "fs", "io"]);
+        let b = Effects::plain(["fs", "io"]);
         assert_eq!(a, b);
-        assert_eq!(a.labels(), ["fs", "io"]);
         assert_eq!(a.to_string(), "[fs, io]");
+        // §7.4: a label's argument is part of its identity, and the order is
+        // still the text's rather than the order of mention.
+        let narrowed = Effects::new([
+            Label { name: "ffi".to_owned(), argument: Some("libm".to_owned()) },
+            Label { name: "ffi".to_owned(), argument: Some("libc".to_owned()) },
+            Label { name: "ffi".to_owned(), argument: Some("libc".to_owned()) },
+        ]);
+        assert_eq!(narrowed.to_string(), "[ffi(\"libc\"), ffi(\"libm\")]");
     }
 
     #[test]
     fn union_and_subset_are_the_only_operations_needed() {
         let mut row = Effects::pure();
         assert!(row.is_pure());
-        row.union(&Effects::new(["io".to_owned()]));
-        row.union(&Effects::new(["io".to_owned(), "fs".to_owned()]));
-        assert_eq!(row.labels(), ["fs", "io"]);
-        assert_eq!(row.missing_from(&Effects::new(["fs".to_owned(), "io".to_owned()])), None);
-        assert_eq!(row.missing_from(&Effects::new(["io".to_owned()])), Some("fs"));
+        row.union(&Effects::plain(["io"]));
+        row.union(&Effects::plain(["io", "fs"]));
+        assert_eq!(row.to_string(), "[fs, io]");
+        assert_eq!(row.missing_from(&Effects::plain(["fs", "io"])), None);
+        assert_eq!(
+            row.missing_from(&Effects::plain(["io"])).map(Label::to_string),
+            Some("fs".to_owned())
+        );
     }
 
     #[test]
@@ -3531,7 +3996,7 @@ mod effect_tests {
         let program =
             accepted("fn main[&i](io: &!i Io) -> [io] int { return putchar(io, 65) - 65; }");
         let main = program.func(program.find("main").expect("main"));
-        assert_eq!(main.effects.labels(), ["io"]);
+        assert_eq!(main.effects.to_string(), "[io]");
     }
 }
 
@@ -3543,7 +4008,7 @@ mod capability_tests {
 
     /// Enough of a program to have authority in it.
     const MAIN: &str = " fn main(world: World) -> [] int { \
-        let Split { io } = split(world); release(io); return 0; }";
+        let Split { io, ffi } = split(world); release(ffi); release(io); return 0; }";
 
     fn refused(src: &str) -> String {
         lower_src(src).expect_err("this should be refused").message
@@ -3575,7 +4040,7 @@ mod capability_tests {
         accepted(&format!("fn f() -> [] int {{ return 0; }}{MAIN}"));
 
         let leaked = refused(
-            "fn main(world: World) -> [] int { let Split { io } = split(world); return 0; }",
+            "fn main(world: World) -> [] int { let Split { io, ffi } = split(world); release(ffi); return 0; }",
         );
         assert!(leaked.contains("still live"), "{leaked}");
 
@@ -3587,7 +4052,7 @@ mod capability_tests {
     fn a_released_capability_cannot_be_used_again() {
         let message = refused(
             "fn greet[&i](io: &!i Io) -> [io] int { return putchar(io, 65); } \
-             fn main(world: World) -> [] int { let Split { io } = split(world); \
+             fn main(world: World) -> [] int { let Split { io, ffi } = split(world); release(ffi); \
              release(io); borrow mut io as &!i in { greet(i); } return 0; }",
         );
         assert!(message.contains("nothing left to borrow"), "{message}");
@@ -3596,7 +4061,7 @@ mod capability_tests {
     #[test]
     fn a_capability_is_destroyed_by_release_not_by_destructuring() {
         let message = refused(
-            "fn main(world: World) -> [] int { let Split { io } = split(world); \
+            "fn main(world: World) -> [] int { let Split { io, ffi } = split(world); release(ffi); \
              let Io { } = io; return 0; }",
         );
         assert!(message.contains("destroyed by `release`"), "{message}");
@@ -3609,7 +4074,7 @@ mod capability_tests {
         // that is visible in the parameter list rather than in the row.
         let program = accepted(
             "fn greet[&i](io: &!i Io) -> [io] int { return putchar(io, 65); } \
-             fn main(world: World) -> [] int { let Split { io } = split(world); \
+             fn main(world: World) -> [] int { let Split { io, ffi } = split(world); release(ffi); \
              borrow mut io as &!i in { greet(i); } release(io); return 0; }",
         );
         let main = program.func(program.find("main").expect("main"));
@@ -3637,6 +4102,212 @@ mod capability_tests {
             "a `World` should occupy no machine value, got {:?}",
             main.slots[0]
         );
+    }
+}
+
+/// Narrowing and foreign calls: `docs/linearity-and-effects.md` §7.4 and §8.4.
+#[cfg(test)]
+mod foreign_tests {
+    use super::tests::lower_src;
+    use super::{Callee, Expr, Program, Stmt};
+
+    /// libc's `long labs(long)`, which is the smallest foreign function that
+    /// takes an argument, returns a result and cannot be mistaken for a
+    /// builtin.
+    const LABS: &str = "extern fn labs[&f](ffi: &f Ffi(\"libc\"), n: int) -> [ffi(\"libc\")] int; ";
+
+    fn refused(src: &str) -> String {
+        lower_src(src).expect_err("this should be refused").message
+    }
+
+    fn accepted(src: &str) -> Program {
+        lower_src(src).expect("this should be accepted")
+    }
+
+    /// A `main` that takes the authority it is given and gives it back, for
+    /// the cases whose subject is a declaration rather than a body.
+    const MAIN: &str = " fn main(world: World) -> [] int { \
+        let Split { io, ffi } = split(world); release(ffi); release(io); return 0; }";
+
+    /// A `main` that narrows to libc, runs `body` inside the borrow, and
+    /// gives everything back.
+    fn with_libc(body: &str) -> String {
+        format!(
+            "{LABS} fn main(world: World) -> [] int {{ \
+             let Split {{ io, ffi }} = split(world); release(io); \
+             let libc = narrow(ffi, \"libc\"); var n = 0; \
+             borrow libc as &f in {{ {body} }} \
+             release(libc); return n; }}"
+        )
+    }
+
+    #[test]
+    fn a_foreign_call_needs_the_capability_that_names_its_library() {
+        // §8.4, and the reason the declaration is where this is checked: it
+        // is the only place a foreign signature is written.
+        let message = refused(
+            "extern fn labs(n: int) -> [ffi(\"libc\")] int; \
+             fn main(world: World) -> [] int { let Split { io, ffi } = split(world); \
+             release(ffi); release(io); return labs(0); }",
+        );
+        assert!(message.contains("holds no capability that authorises it"), "{message}");
+    }
+
+    #[test]
+    fn a_foreign_row_is_exact_in_both_directions() {
+        let quiet =
+            refused(&format!("extern fn labs[&f](ffi: &f Ffi(\"libc\"), n: int) -> [] int;{MAIN}"));
+        assert!(quiet.contains("does not declare"), "{quiet}");
+
+        let wrong_library = refused(&format!(
+            "extern fn labs[&f](ffi: &f Ffi(\"libc\"), n: int) -> [ffi(\"libm\")] int;{MAIN}"
+        ));
+        assert!(
+            wrong_library.contains("holds no capability that authorises it"),
+            "{wrong_library}"
+        );
+    }
+
+    #[test]
+    fn a_foreign_declaration_names_a_library() {
+        // The unnarrowed root names none, so a declaration borrowing one
+        // would be a foreign call with no library behind it.
+        let message = refused(&format!(
+            "extern fn labs[&f](ffi: &f Ffi(\"\"), n: int) -> [ffi(\"\")] int;{MAIN}"
+        ));
+        assert!(message.contains("names no library"), "{message}");
+    }
+
+    #[test]
+    fn only_what_c_can_name_crosses_the_boundary() {
+        let aggregate = refused(&format!(
+            "struct P {{ x: int }} \
+             extern fn f[&c](ffi: &c Ffi(\"libc\"), p: P) -> [ffi(\"libc\")] int;{MAIN}"
+        ));
+        assert!(aggregate.contains("no agreed layout"), "{aggregate}");
+
+        let reference = refused(&format!(
+            "struct P {{ x: int }} \
+             extern fn f[&c, &r](ffi: &c Ffi(\"libc\"), p: &r P) -> [ffi(\"libc\")] int;{MAIN}"
+        ));
+        assert!(reference.contains("borrowed capability"), "{reference}");
+    }
+
+    #[test]
+    fn a_foreign_name_is_not_also_a_written_function() {
+        // Two answers to one call is one answer too many.
+        let message = refused(&format!("{LABS} fn labs(n: int) -> [] int {{ return n; }}{MAIN}"));
+        assert!(message.contains("already declared foreign"), "{message}");
+    }
+
+    #[test]
+    fn narrowing_goes_one_way() {
+        // §7.4: prefix extension, and `libc` is a prefix of `libcrypto`, so
+        // the capability over `libcrypto` is the narrower of the two.
+        let message = refused(
+            "fn main(world: World) -> [] int { let Split { io, ffi } = split(world); \
+             release(io); let crypto = narrow(ffi, \"libcrypto\"); \
+             let wider = narrow(crypto, \"libc\"); release(wider); return 0; }",
+        );
+        assert!(message.contains("never widened"), "{message}");
+    }
+
+    #[test]
+    fn narrowing_to_the_same_thing_is_refused() {
+        let message = refused(
+            "fn main(world: World) -> [] int { let Split { io, ffi } = split(world); \
+             release(io); let a = narrow(ffi, \"libc\"); let b = narrow(a, \"libc\"); \
+             release(b); return 0; }",
+        );
+        assert!(message.contains("grants nothing new"), "{message}");
+    }
+
+    #[test]
+    fn narrowing_consumes_the_wider_capability() {
+        // The point of the whole section: after narrowing there is no way
+        // back to what was narrowed, because it was spent.
+        let message = refused(
+            "fn main(world: World) -> [] int { let Split { io, ffi } = split(world); \
+             release(io); let libc = narrow(ffi, \"libc\"); release(libc); \
+             let libm = narrow(ffi, \"libm\"); release(libm); return 0; }",
+        );
+        assert!(message.contains("has already been consumed"), "{message}");
+    }
+
+    #[test]
+    fn a_borrowed_capability_cannot_be_narrowed() {
+        let message = refused(
+            "fn main(world: World) -> [] int { let Split { io, ffi } = split(world); \
+             release(io); borrow ffi as &f in { let libc = narrow(f, \"libc\"); release(libc); } \
+             release(ffi); return 0; }",
+        );
+        assert!(message.contains("narrowing consumes"), "{message}");
+    }
+
+    #[test]
+    fn owning_the_world_discharges_every_library() {
+        // §8.2's discharge rule, with a label that carries a value. `main`
+        // owns the `World`, which can be split and narrowed to anything, so
+        // the authority for `ffi("libc")` is already in its parameter list.
+        let program = accepted(&with_libc("n = labs(f, 0 - 7);"));
+        let main = program.func(program.find("main").expect("main"));
+        assert!(main.effects.is_pure(), "{}", main.effects);
+    }
+
+    #[test]
+    fn a_borrowed_narrowed_capability_declares_the_label_it_names() {
+        let program = accepted(&format!(
+            "{LABS} \
+             fn size[&f](ffi: &f Ffi(\"libc\"), n: int) -> [ffi(\"libc\")] int \
+             {{ return labs(ffi, n); }} \
+             fn main(world: World) -> [] int {{ let Split {{ io, ffi }} = split(world); \
+             release(io); let libc = narrow(ffi, \"libc\"); var n = 0; \
+             borrow libc as &f in {{ n = size(f, 0 - 7); }} release(libc); return n - 7; }}"
+        ));
+        let size = program.func(program.find("size").expect("size"));
+        assert_eq!(size.effects.to_string(), "[ffi(\"libc\")]");
+
+        // And it is not interchangeable with the label for another library.
+        let message = refused(&format!(
+            "{LABS} \
+             fn size[&f](ffi: &f Ffi(\"libc\"), n: int) -> [ffi(\"libm\")] int \
+             {{ return labs(ffi, n); }}{MAIN}"
+        ));
+        assert!(message.contains("does not declare"), "{message}");
+    }
+
+    #[test]
+    fn the_capability_travels_as_far_as_the_check_and_no_further() {
+        // The IR keeps the capability as an argument, because a capability's
+        // *journey* is what was checked and the argument still has to be
+        // evaluated. Dropping it is the backend's job (§8.1), and
+        // `tests/accept/narrowed_capability.ls` is what proves it happens.
+        let program = accepted(&with_libc("n = labs(f, 0 - 7);"));
+        let main = program.func(program.find("main").expect("main"));
+        let mut foreign_calls = 0;
+        for stmt in main.body.iter() {
+            walk(stmt, &mut foreign_calls);
+        }
+        assert_eq!(foreign_calls, 1, "the foreign call should survive lowering");
+    }
+
+    /// Count `Callee::Extern` calls, checking each one's shape as it goes.
+    fn walk(stmt: &Stmt, found: &mut u32) {
+        let mut visit = |expr: &Expr| {
+            if let Expr::Call { callee: Callee::Extern(_), args } = expr {
+                assert_eq!(args.len(), 2, "the capability is still an argument here");
+                *found += 1;
+            }
+        };
+        match stmt {
+            Stmt::Store { value, .. } | Stmt::Eval(value) | Stmt::Return(value) => visit(value),
+            Stmt::Borrow { body, .. } => {
+                for inner in body {
+                    walk(inner, found);
+                }
+            }
+            _ => {}
+        }
     }
 }
 

@@ -14,6 +14,7 @@
 //~ STDOUT M2 unique: 3 5 5
 //~ STDOUT M2 effects: 42
 //~ STDOUT M2 capability: 88
+//~ STDOUT M2 foreign: 7 9
 //~ EXIT 0
 
 // ---------------------------------------------------------------- output ---
@@ -438,19 +439,68 @@ fn m2_capability[&i](io: &!i Io) -> [io] int {
     return newline(io);
 }
 
+// ------------------------------------------------------- M2: foreign ----
+// C's effects stop being invisible at the exact point they enter the
+// program. A foreign call is an effect like any other, and the capability
+// that authorises it names the library: `Ffi("libc")` reaches libc and
+// nothing else.
+//
+// Where does one come from? `split` hands out an `Ffi` that names *no*
+// library -- authority over nothing. `narrow` is the only way to get one
+// that names something, and narrowing goes one way only: `Ffi("")` can
+// become `Ffi("libc")`, and `Ffi("libc")` can never become anything wider.
+// That is the same commitment `lex-os` makes for manifests, and for the
+// same reason -- a program must not be able to grant itself what it was not
+// given.
+//
+// The `extern` declaration is the only place a foreign signature is
+// written. It says which library, and the row says it again, and the two
+// have to agree: a declaration that took no capability, or took one for a
+// different library, is refused where it is written rather than where it is
+// called.
+
+// libc's `long labs(long)`. The capability parameter is the door, and there
+// is no other.
+extern fn labs[&f](ffi: &f Ffi("libc"), n: int) -> [ffi("libc")] int;
+
+// Borrows both capabilities, so it declares both labels. A caller reading
+// this signature knows this function reaches one named library and the
+// console, and that it can do nothing else -- there is nothing else it was
+// handed.
+fn m2_foreign[&f, &i](libc: &f Ffi("libc"), io: &!i Io) -> [ffi("libc"), io] int {
+    putchar(io, 77); putchar(io, 50); space(io);          // "M2 "
+    putchar(io, 102); putchar(io, 111); putchar(io, 114); putchar(io, 101);
+    putchar(io, 105); putchar(io, 103); putchar(io, 110); putchar(io, 58); space(io);
+
+    // The capability is checked and then erased: what libc receives is the
+    // integer and nothing else, because a capability carries no data.
+    print_nat(io, labs(libc, 0 - 7));                     // 7
+    space(io); print_nat(io, labs(libc, 9));              // 9
+    return newline(io);
+}
+
 fn main(world: World) -> [] int {
     // §8.2: the runtime hands over exactly one `World`, and `split` consumes
     // it. There is no other way to obtain a capability.
-    let Split { io } = split(world);
+    let Split { io, ffi } = split(world);
+    // §7.4: attenuation, and the one narrowing in this program. From here
+    // the foreign authority in this file reaches libc and no other library.
+    let libc = narrow(ffi, "libc");
+
     var status = 0;
     // Threaded by borrow, not by move: a callee should not consume its
     // caller's authority.
-    borrow mut io as &!i in {
-        status = run(i);
-        m2_capability(i);
+    borrow libc as &f in {
+        borrow mut io as &!i in {
+            status = run(i);
+            m2_capability(i);
+            m2_foreign(f, i);
+        }
     }
-    // Authority is a resource, so it is destroyed exactly once. A program
-    // that forgets this does not compile.
+
+    // Both are resources, so both are destroyed exactly once. A program that
+    // forgets either does not compile.
+    release(libc);
     release(io);
     return status;
 }

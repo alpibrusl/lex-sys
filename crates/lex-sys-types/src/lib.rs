@@ -78,6 +78,12 @@ pub enum Type {
         region: Region,
         inner: Box<Type>,
     },
+    /// A type indexed by a literal: the `"libc"` in `Ffi("libc")` (§7.4).
+    ///
+    /// A singleton — it unifies with itself and nothing else — which is what
+    /// makes a narrowed capability a different *type* from a wider one
+    /// rather than a differently-tagged value.
+    Lit(String),
     /// An unsolved inference variable.
     Var(TyVar),
 }
@@ -364,7 +370,15 @@ impl Unifier {
                 self.param_names.get(i as usize).cloned().unwrap_or_else(|| format!("T{i}"))
             }
             Type::Var(v) => format!("?{}", v.0),
+            Type::Lit(text) => format!("\"{text}\""),
             Type::Named(def, args) if args.is_empty() => self.name_of(def).to_owned(),
+            // A literal argument is written the way the source writes it:
+            // `Ffi("libc")`, not `Ffi["libc"]`. What a capability is
+            // narrowed to travels in its type, but it is not a type.
+            Type::Named(def, args) if args.iter().all(|a| matches!(a, Type::Lit(_))) => {
+                let inner: Vec<String> = args.iter().map(|a| self.display(a)).collect();
+                format!("{}({})", self.name_of(def), inner.join(", "))
+            }
             Type::Named(def, args) => {
                 let inner: Vec<String> = args.iter().map(|a| self.display(a)).collect();
                 format!("{}[{}]", self.name_of(def), inner.join(", "))

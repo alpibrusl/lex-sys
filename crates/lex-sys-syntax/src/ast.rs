@@ -92,6 +92,12 @@ pub enum TypeExpr {
     /// `&r T` and `&!r T` (`docs/linearity-and-effects.md` §5). The region is
     /// a name the parser does not resolve, exactly like a type's name.
     Ref { unique: bool, region: Symbol, inner: TypeId },
+    /// The `"libc"` in `Ffi("libc")` — a type indexed by a literal (§7.4).
+    ///
+    /// It is a *type*, not a value: `Ffi("libc")` and `Ffi("libm")` are two
+    /// different types, which is how a narrowed capability differs from a
+    /// wider one in a way the checker can see.
+    Lit(String),
 }
 
 impl TypeExpr {
@@ -100,14 +106,14 @@ impl TypeExpr {
     pub fn head(&self) -> Option<Symbol> {
         match self {
             TypeExpr::Name { name, .. } => Some(*name),
-            TypeExpr::Ref { .. } => None,
+            TypeExpr::Ref { .. } | TypeExpr::Lit(_) => None,
         }
     }
 
     pub fn args(&self) -> &[TypeId] {
         match self {
             TypeExpr::Name { args, .. } => args,
-            TypeExpr::Ref { .. } => &[],
+            TypeExpr::Ref { .. } | TypeExpr::Lit(_) => &[],
         }
     }
 }
@@ -143,6 +149,13 @@ pub enum Expr {
     /// spelling, so `007` and `7` are the same node.
     Int(i64),
     Bool(bool),
+    /// A string literal, which exists only to be *read by the checker*.
+    ///
+    /// There are no runtime strings — those are M3 — and this never becomes
+    /// a value: the only place one may appear is a narrowing call, where
+    /// §7.4 requires a literal so the refinement is checkable where it is
+    /// written. The checker refuses it anywhere else.
+    Str(String),
     Name(Symbol),
     /// `Point { x: 1, y: 2 }` — fields in the order written, which need not be
     /// the order they were declared.
@@ -250,6 +263,35 @@ pub enum Stmt {
     Return(ExprId),
 }
 
+/// One label in an effect row, with the value it was narrowed to.
+///
+/// §7.4: "an effect label may carry a value, which is what makes
+/// `[fs_write("/tmp/x")]` different from `[fs_write]`". The value is a
+/// compile-time literal and never a runtime one — narrowing is checkable
+/// structurally precisely because it is.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct EffectLabel {
+    pub name: Symbol,
+    pub argument: Option<String>,
+}
+
+/// `extern fn name(params) -> [row] ret;` — a foreign signature (§8.4).
+///
+/// No body: the implementation is somebody else's, which is the whole point.
+/// The declaration is the only place a foreign signature is written, so
+/// there is exactly one place to get it wrong.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct ExternDecl {
+    pub name: Symbol,
+    pub regions: Vec<Symbol>,
+    pub params: Vec<Param>,
+    pub effects: Vec<EffectLabel>,
+    pub ret: TypeId,
+    /// The symbol the linker binds, which is the function's own name: a
+    /// foreign function is named by what it is called out there.
+    pub symbol: String,
+}
+
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Param {
     pub name: Symbol,
@@ -277,7 +319,7 @@ pub struct FnDecl {
     /// Always present: `[]` is how a signature says pure, and §7.2 requires
     /// every signature to declare its row. An absent row would be an
     /// inferred one, which is the thing §7.2 exists to refuse.
-    pub effects: Vec<Symbol>,
+    pub effects: Vec<EffectLabel>,
     pub ret: TypeId,
     pub body: Block,
 }
@@ -345,6 +387,7 @@ pub struct EnumDecl {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Item {
     Fn(FnDecl),
+    Extern(ExternDecl),
     Struct(StructDecl),
     Enum(EnumDecl),
 }
@@ -375,7 +418,7 @@ pub struct Ast {
 /// rather than "first appearance", which is still a deterministic function
 /// of the source. Nothing downstream notices, because a hash encodes a
 /// name's *text* and never its index (`docs/canonical-ast.md` §4.1).
-pub const PRELUDE: &[&str] = &["World", "Io", "Split", "io"];
+pub const PRELUDE: &[&str] = &["World", "Io", "Split", "io", "Ffi", "ffi", "L"];
 
 impl Ast {
     /// An AST whose interner already knows the prelude's names.

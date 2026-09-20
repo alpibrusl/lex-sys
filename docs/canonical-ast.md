@@ -51,7 +51,9 @@ fn odd(n: int) -> bool  { if n == 0 { return false; } return even(n - 1); }
 neither `SigId` contains either body. A Merkle graph over cyclic source.
 
 Struct and enum declarations have a single `TypeId`, since they have no body to
-separate.
+separate. A foreign declaration (`extern fn`) is a signature with no body, so
+its `SigId` and `BodyId` are the same hash — there is nothing else a body hash
+could be a hash of.
 
 ---
 

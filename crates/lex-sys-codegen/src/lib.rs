@@ -247,6 +247,30 @@ impl<'a> Emitter<'a> {
             )
             .map_err(|e| CodegenError(e.to_string()))?;
 
+        // §8.4: a foreign function is an import under the symbol its
+        // declaration named. Its capability parameters carry no data and so
+        // never reach C; everything else crosses at lex-sys's own widths,
+        // which is why the boundary admits `int` and `bool` and nothing that
+        // would need a layout agreement neither side has made.
+        let mut foreign: Vec<FuncId> = Vec::with_capacity(self.program.externs.len());
+        for ext in &self.program.externs {
+            let mut sig = self.module.make_signature();
+            sig.call_conv = call_conv;
+            for param in ext.params.iter().filter(|t| !matches!(t, Type::Ref { .. })) {
+                for leaf in leaves(param, self.program, pointer) {
+                    sig.params.push(AbiParam::new(leaf));
+                }
+            }
+            for leaf in leaves(&ext.ret, self.program, pointer) {
+                sig.returns.push(AbiParam::new(leaf));
+            }
+            let id = self
+                .module
+                .declare_function(&ext.symbol, Linkage::Import, &sig)
+                .map_err(|e| CodegenError(e.to_string()))?;
+            foreign.push(id);
+        }
+
         let mut ctx = Context::new();
         let mut fb_ctx = FunctionBuilderContext::new();
 
@@ -257,8 +281,15 @@ impl<'a> Emitter<'a> {
 
             {
                 let builder = FunctionBuilder::new(&mut ctx.func, &mut fb_ctx);
-                let mut body =
-                    BodyEmitter::new(builder, &mut self.module, &declared, putchar, func, program);
+                let mut body = BodyEmitter::new(
+                    builder,
+                    &mut self.module,
+                    &declared,
+                    &foreign,
+                    putchar,
+                    func,
+                    program,
+                );
                 body.emit_func(func);
                 body.builder.finalize();
             }
@@ -316,6 +347,8 @@ struct BodyEmitter<'a, 'f> {
     builder: FunctionBuilder<'f>,
     module: &'a mut ObjectModule,
     declared: &'a [FuncId],
+    /// The foreign imports, in `Program::externs` order.
+    foreign: &'a [FuncId],
     putchar: FuncId,
     func: &'a Func,
     program: &'a Program,
@@ -335,6 +368,7 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
         builder: FunctionBuilder<'f>,
         module: &'a mut ObjectModule,
         declared: &'a [FuncId],
+        foreign: &'a [FuncId],
         putchar: FuncId,
         func: &'a Func,
         program: &'a Program,
@@ -350,6 +384,7 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
             builder,
             module,
             declared,
+            foreign,
             putchar,
             func,
             program,
@@ -875,11 +910,24 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
                 // builtin may take an argument it does not pass on: every
                 // argument still runs, and only the values travel.
                 let evaluated: Vec<Vec<Value>> = args.iter().map(|a| self.expr(a)).collect();
-                let skip = match callee {
-                    Callee::Builtin(b) => b.erased_args(),
-                    Callee::Fn(_) => 0,
+                let args: Vec<Value> = match callee {
+                    Callee::Builtin(b) => {
+                        evaluated.into_iter().skip(b.erased_args()).flatten().collect()
+                    }
+                    // A foreign function's capability parameters are the
+                    // checker's business, not C's: they carry no data, so
+                    // they stop here (§8.1). Every reference an `extern`
+                    // declaration takes is a borrowed capability — the
+                    // collector refuses any other — so dropping the
+                    // references is exact whatever order they were written in.
+                    Callee::Extern(index) => evaluated
+                        .into_iter()
+                        .zip(&self.program.externs[*index as usize].params)
+                        .filter(|(_, param)| !matches!(param, Type::Ref { .. }))
+                        .flat_map(|(values, _)| values)
+                        .collect(),
+                    Callee::Fn(_) => evaluated.into_iter().flatten().collect(),
                 };
-                let args: Vec<Value> = evaluated.into_iter().skip(skip).flatten().collect();
                 match callee {
                     // §8.1: "capabilities erase at compile time except where
                     // they carry data". These two carry none, so there is
@@ -889,7 +937,19 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
                     // The arguments are still evaluated above, because a
                     // capability's *journey* is what the checker tracked and
                     // an argument may have side effects on the way in.
-                    Callee::Builtin(Builtin::Split) => Vec::new(),
+                    Callee::Extern(index) => {
+                        let ext = &self.program.externs[*index as usize];
+                        let f = self
+                            .module
+                            .declare_func_in_func(self.foreign[*index as usize], self.builder.func);
+                        let call = self.builder.ins().call(f, &args);
+                        let results = self.builder.inst_results(call).to_vec();
+                        if matches!(ext.ret, Type::Unit) { Vec::new() } else { results }
+                    }
+                    // `narrow` is a compile-time fact: the capability it
+                    // returns names a smaller library than the one it
+                    // consumed, and neither carries a bit at runtime (§7.4).
+                    Callee::Builtin(Builtin::Split | Builtin::Narrow) => Vec::new(),
                     Callee::Builtin(Builtin::Release) => {
                         vec![self.builder.ins().iconst(types::I64, 0)]
                     }
@@ -992,7 +1052,7 @@ mod tests {
 
     const SOURCE: &str = "fn shout[&i](io: &!i Io) -> [io] int { return putchar(io, 33); } \
                           fn main(world: World) -> [] int { \
-                              let Split { io } = split(world); \
+                              let Split { io, ffi } = split(world); release(ffi); \
                               var status = 0; \
                               borrow mut io as &!i in { status = shout(i); } \
                               release(io); \
@@ -1012,7 +1072,11 @@ mod tests {
 
     /// Compile for a target and read back the object's symbol table.
     fn symbols(triple: &str) -> Vec<(String, bool)> {
-        let ast = parse(SOURCE).expect("should parse");
+        symbols_of(SOURCE, triple)
+    }
+
+    fn symbols_of(source: &str, triple: &str) -> Vec<(String, bool)> {
+        let ast = parse(source).expect("should parse");
         let program = lower(&ast).expect("should lower");
         let bytes = compile_object_for(&program, "main", triple.parse().expect("a valid triple"))
             .expect("should compile");
@@ -1087,6 +1151,37 @@ mod tests {
             let triple: Triple = triple.parse().expect("a valid triple");
             compile_object_for(&program, "main", triple.clone())
                 .unwrap_or_else(|e| panic!("`{triple}` should emit: {e}"));
+        }
+    }
+
+    /// §8.4: a foreign declaration becomes an import under the symbol it
+    /// named, and the capability that authorised it does not travel.
+    ///
+    /// That the capability does not travel is what `tests/accept/
+    /// narrowed_capability.ls` proves end to end: it calls `labs(-7)` and
+    /// prints `7`, which it could not do if a zero-sized capability were
+    /// pushed in front of the integer. That failure mode is not
+    /// hypothetical — `putchar` printed `0xA0` three times before
+    /// `erased_args` existed.
+    #[test]
+    fn a_foreign_declaration_becomes_an_import_and_its_capability_does_not() {
+        const FOREIGN: &str = "\
+            extern fn labs[&f](ffi: &f Ffi(\"libc\"), n: int) -> [ffi(\"libc\")] int; \
+            fn main(world: World) -> [] int { \
+                let Split { io, ffi } = split(world); release(io); \
+                let libc = narrow(ffi, \"libc\"); var n = 0; \
+                borrow libc as &f in { n = labs(f, 0 - 7); } \
+                release(libc); return n - 7; \
+            }";
+        for (triple, prefix) in targets() {
+            let names: Vec<String> =
+                symbols_of(FOREIGN, &triple).into_iter().map(|(n, _)| n).collect();
+            let expected = format!("{prefix}labs");
+            assert!(names.contains(&expected), "{triple} should import `{expected}`: {names:?}");
+            assert!(
+                !names.iter().any(|n| n.contains("narrow") || n.contains("Ffi")),
+                "{triple}: narrowing is a compile-time fact and emits nothing: {names:?}"
+            );
         }
     }
 
