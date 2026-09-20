@@ -18,10 +18,19 @@
 // `free` in this file. `unbox` is the only thing that ends a box, a `Box`
 // is a `res` value, and §4's rule is that a `res` value is consumed exactly
 // once on every path — so a node this program forgot would be a *compile
-// error*, not a leak a profiler finds next month. The walk that reads the
-// tree and the proof that it released every node are the same code.
+// error*, not a leak a profiler finds next month.
+//
+// **And the tree can be read without being spent.** When this example was
+// written it could not: `match` required ownership, so the only walk
+// available was the one that freed. `docs/reading-references.md` closed
+// that — matching a *reference* binds each payload as a reference into the
+// tree, so `contains`, `deepest` and `tally` below take `&t Tree`, touch no
+// capability at all, and leave the tree exactly as owned as they found it.
+// Their rows are `[]`, which is the strongest available statement that they
+// free nothing.
 //~ STDOUT 1 3 4 5 7 8 9
 //~ STDOUT sum 37 count 7 depth 3
+//~ STDOUT has 4: 1  has 6: 0  deepest 9
 //~ EXIT 0
 
 // ---------------------------------------------------------------------
@@ -59,6 +68,13 @@ fn write_all[&r, &i](io: &!i Io, s: &r [byte]) -> [io] int {
         n = n + 1;
     }
     return len(s);
+}
+
+fn yes_no(b: bool) -> [] int {
+    if b {
+        return 1;
+    }
+    return 0;
 }
 
 fn larger(a: int, b: int) -> [] int {
@@ -100,17 +116,70 @@ fn insert[&h](heap: &!h Heap, t: Tree, v: int) -> [heap] Tree {
 }
 
 // ---------------------------------------------------------------------
-// Walking, which is the same thing as freeing
+// Reading, without spending
 // ---------------------------------------------------------------------
 
-// In-order traversal. It prints the values in sorted order, sums them,
-// counts them, measures the depth, and frees every node — in one pass,
-// because there is no second pass available: reading a recursive structure
-// means consuming it (§4.1).
+// Every function in this section takes `&t Tree` and returns an ordinary
+// value. None of them can free anything: their rows are `[]`, so they hold
+// no capability, and their bindings are references into a tree somebody
+// else owns.
 //
-// `left` and `right` are the boxes the match produced. `unbox` frees each
-// node and yields what it held, and the recursion does the same to that.
-// Exactly one `free` per node, and the checker is what guarantees it.
+// `left` and `right` come back as `&t Box[Tree]`. `contents` follows each
+// box to `&t Tree`, for exactly as long as `t` lasts, and the recursion
+// borrows no longer than this frame does.
+fn contains[&t](tree: &t Tree, wanted: int) -> [] bool {
+    match tree {
+        Tree::Leaf => { return false; }
+        Tree::Node(left, value, right) => {
+            // `value` is `&t int`, so `*value` reads it.
+            if *value == wanted {
+                return true;
+            }
+            if wanted < *value {
+                return contains(contents(left), wanted);
+            }
+            return contains(contents(right), wanted);
+        }
+    }
+}
+
+// The right spine, which in a search tree is the largest value.
+fn deepest[&t](tree: &t Tree, fallback: int) -> [] int {
+    match tree {
+        Tree::Leaf => { return fallback; }
+        Tree::Node(_, value, right) => { return deepest(contents(right), *value); }
+    }
+}
+
+fn tally[&t](tree: &t Tree) -> [] Walk {
+    match tree {
+        Tree::Leaf => { return Walk { sum: 0, count: 0, depth: 0 }; }
+        Tree::Node(left, value, right) => {
+            let low = tally(contents(left));
+            let high = tally(contents(right));
+            return Walk {
+                sum: low.sum + *value + high.sum,
+                count: low.count + high.count + 1,
+                depth: larger(low.depth, high.depth) + 1,
+            };
+        }
+    }
+}
+
+// ---------------------------------------------------------------------
+// Walking one last time, which is what frees
+// ---------------------------------------------------------------------
+
+// In-order traversal, and the one that ends the tree. It still prints and
+// still counts, because it is a convenient place to, but it no longer has
+// to: the section above can answer any of those questions without spending
+// anything.
+//
+// `left` and `right` are the boxes the match produced — the *boxes*, not
+// references to them, because this match takes the tree by value. `unbox`
+// frees each node and yields what it held, and the recursion does the same
+// to that. Exactly one `free` per node, and the checker is what guarantees
+// it.
 fn drain[&h, &i](heap: &!h Heap, io: &!i Io, t: Tree, first: bool) -> [heap, io] Walk {
     match t {
         Tree::Leaf => {
@@ -151,6 +220,19 @@ fn run[&h, &i](heap: &!h Heap, io: &!i Io) -> [heap, io] int {
     tree = insert(heap, tree, 7);
     tree = insert(heap, tree, 9);
 
+    // Read it, repeatedly, without spending it. Each of these borrows the
+    // tree and hands it back.
+    var has_four = false;
+    var has_six = false;
+    var biggest = 0;
+    var counted = 0;
+    borrow tree as &t in {
+        has_four = contains(t, 4);
+        has_six = contains(t, 6);
+        biggest = deepest(t, 0);
+        counted = tally(t).count;
+    }
+
     // The only path that ends the tree. After this line there is no tree,
     // and there is also nothing left allocated.
     let found = drain(heap, io, tree, true);
@@ -163,7 +245,18 @@ fn run[&h, &i](heap: &!h Heap, io: &!i Io) -> [heap, io] int {
     write_all(io, " depth ");
     print_nat(io, found.depth);
     putchar(io, 10);
-    return found.sum;
+
+    // The read-only pass agreed with the consuming one about the count,
+    // which is the point: both walked the same tree, and only one of them
+    // was allowed to end it.
+    write_all(io, "has 4: ");
+    print_nat(io, yes_no(has_four));
+    write_all(io, "  has 6: ");
+    print_nat(io, yes_no(has_six));
+    write_all(io, "  deepest ");
+    print_nat(io, biggest);
+    putchar(io, 10);
+    return found.sum + counted - found.count;
 }
 
 fn main(world: World) -> [] int {

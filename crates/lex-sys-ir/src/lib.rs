@@ -564,6 +564,16 @@ pub enum Expr {
         ty: Type,
         value: Box<Expr>,
     },
+    /// `*r` — read what a reference points at
+    /// (`docs/reading-references.md` §3).
+    ///
+    /// `ty` is what was read, which is how the backend knows how many
+    /// leaves to load. It is always `val`: copying a `res` out of a
+    /// reference would duplicate an obligation, which §4 exists to prevent.
+    Deref {
+        ty: Type,
+        value: Box<Expr>,
+    },
     /// `contents(b)` (§3): the dereference, which is one load.
     ///
     /// No type is needed. A reference to a box is a pointer to where the
@@ -623,6 +633,9 @@ pub enum Place {
     /// `s[i] = e`. `base` evaluates to a slice — a pointer and a length —
     /// and the write is bounds-checked exactly as a read is.
     Element { base: Expr, index: Expr, element: Type },
+    /// `*r = e` (`docs/reading-references.md` §3). `base` evaluates to a
+    /// unique reference and the whole referent is replaced.
+    Deref { base: Expr, ty: Type },
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -649,6 +662,13 @@ pub enum Stmt {
         def: DefId,
         args: Vec<Type>,
         arms: Vec<Arm>,
+        /// Was the scrutinee a *reference* to the enum rather than the enum
+        /// (`docs/reading-references.md` §2)?
+        ///
+        /// It changes what the arms bind — references into the referent
+        /// rather than the payload itself — and it changes what the whole
+        /// statement costs: nothing is consumed, because nothing was owned.
+        by_reference: bool,
     },
     /// `region a { .. }` (§6).
     ///
@@ -1644,6 +1664,10 @@ fn settle_types(stmts: &mut [Stmt], unifier: &Unifier) {
                             *arg = unifier.resolve(arg);
                         }
                     }
+                    Place::Deref { base, ty } => {
+                        settle_expr(base, unifier);
+                        *ty = unifier.resolve(ty);
+                    }
                     Place::Element { base, index, element } => {
                         settle_expr(base, unifier);
                         settle_expr(index, unifier);
@@ -1704,6 +1728,10 @@ fn settle_expr(expr: &mut Expr, unifier: &Unifier) {
             settle_expr(value, unifier);
         }
         Expr::Contents(inner) => settle_expr(inner, unifier),
+        Expr::Deref { ty, value } => {
+            *ty = unifier.resolve(ty);
+            settle_expr(value, unifier);
+        }
         Expr::AllocSlice { element, count, fill, .. } => {
             *element = unifier.resolve(element);
             settle_expr(count, unifier);
@@ -2885,6 +2913,43 @@ impl<'a> FnLowering<'a> {
                 self.trace.emit(Event::Assign { slot, span });
                 Ok((Place::Slot(slot), ty))
             }
+            // `*r = e` — replace what a unique reference points at
+            // (`docs/reading-references.md` §3).
+            AstExpr::Unary { op: ast::UnOp::Deref, operand } => {
+                let operand_id = *operand;
+                let operand_span = self.ast.expr_span(operand_id);
+                let (base_expr, base_ty) = self.expr(operand_id)?;
+                let resolved = self.unifier.resolve(&base_ty);
+                let Type::Ref { unique, inner, .. } = &resolved else {
+                    return Err(Diagnostic::new(
+                        format!(
+                            "`{}` is not a reference, so there is nothing for `*` to follow",
+                            self.unifier.display(&resolved)
+                        ),
+                        operand_span,
+                    ));
+                };
+                if !*unique {
+                    return Err(Diagnostic::new(
+                        "this is a shared reference `&`, which promises its referent will not change; `borrow mut` hands back a unique one"
+                            .to_owned(),
+                        operand_span,
+                    ));
+                }
+                let referent = self.unifier.resolve(inner);
+                // Overwriting a `res` ends it without naming a consumer,
+                // which is the silent drop §4 refuses however it is spelled.
+                if mode_of(self.defs, self.unifier, &referent) == Mode::Res {
+                    return Err(Diagnostic::new(
+                        format!(
+                            "`{}` is `res`, so this would discard a live resource without naming what ends it",
+                            self.unifier.display(&referent)
+                        ),
+                        operand_span,
+                    ));
+                }
+                Ok((Place::Deref { base: base_expr, ty: referent.clone() }, referent))
+            }
             AstExpr::Index { base, index } => {
                 let (base_id, index_id) = (*base, *index);
                 let base_span = self.ast.expr_span(base_id);
@@ -3265,6 +3330,36 @@ impl<'a> FnLowering<'a> {
         ))
     }
 
+    /// `*r` — read what a reference points at
+    /// (`docs/reading-references.md` §3).
+    ///
+    /// Copying, so the referent has to be `val`. A `res` behind a reference
+    /// is read by borrowing it further or by naming a field; ending one is
+    /// the owner's business, and duplicating the obligation is nobody's.
+    fn deref(&mut self, inner: Expr, found: &Type, span: Span) -> Result<(Expr, Type), Diagnostic> {
+        let resolved = self.unifier.resolve(found);
+        let Type::Ref { inner: referent, .. } = &resolved else {
+            return Err(Diagnostic::new(
+                format!(
+                    "`{}` is not a reference, so there is nothing for `*` to follow",
+                    self.unifier.display(&resolved)
+                ),
+                span,
+            ));
+        };
+        let referent = self.unifier.resolve(referent);
+        if mode_of(self.defs, self.unifier, &referent) == Mode::Res {
+            return Err(Diagnostic::new(
+                format!(
+                    "`{}` is `res`, so `*` would copy it and leave two values where one obligation is owed; borrow it further or name a field instead",
+                    self.unifier.display(&referent)
+                ),
+                span,
+            ));
+        }
+        Ok((Expr::Deref { ty: referent.clone(), value: Box::new(inner) }, referent))
+    }
+
     /// The `&!x Heap` a heap operation is reached through (§2).
     fn expect_heap(&mut self, heap: ExprId) -> Result<(), Diagnostic> {
         let span = self.ast.expr_span(heap);
@@ -3442,10 +3537,25 @@ impl<'a> FnLowering<'a> {
         let (value, scrutinee_ty) = self.expr(scrutinee)?;
         let resolved = self.unifier.resolve(&scrutinee_ty);
 
-        let Type::Named(def_id, type_args) = resolved else {
+        // `docs/reading-references.md` §2: a reference gives references.
+        // Matching through one binds each payload as a reference into the
+        // referent, carrying the scrutinee's mode and its region -- so
+        // nothing is moved out, nothing is consumed, and the value is as
+        // owned after the match as it was before.
+        let (by_reference, borrow) = match &resolved {
+            Type::Ref { unique, region, inner } => {
+                (true, Some((*unique, *region, self.unifier.resolve(inner))))
+            }
+            _ => (false, None),
+        };
+        let matched = match &borrow {
+            Some((_, _, inner)) => inner.clone(),
+            None => resolved.clone(),
+        };
+        let Type::Named(def_id, type_args) = matched else {
             return Err(Diagnostic::new(
                 format!(
-                    "`{}` cannot be matched (M1 matches enums)",
+                    "`{}` cannot be matched; `match` takes an enum, or a reference to one",
                     self.unifier.display(&resolved)
                 ),
                 scrutinee_span,
@@ -3533,10 +3643,14 @@ impl<'a> FnLowering<'a> {
             self.scopes.push(Vec::new());
             self.trace.open();
             let mut slots: Vec<Option<Slot>> = Vec::new();
-            if variant_index.is_none() {
+            if variant_index.is_none() && !by_reference {
                 // A `_` arm consumes the scrutinee and never names its parts.
                 // For a `val` enum that is a discard and costs nothing; for a
                 // `res` one it is the silent drop §4 exists to forbid.
+                //
+                // Through a reference there is nothing to discard: the match
+                // never owned the value, so `_` is simply "look at none of
+                // it" (`docs/reading-references.md` §2).
                 self.trace.emit(Event::Discard {
                     ty: scrutinee_ty.clone(),
                     what: "the value matched here",
@@ -3549,7 +3663,22 @@ impl<'a> FnLowering<'a> {
                 let payload: Vec<Type> = variants[index as usize]
                     .1
                     .iter()
-                    .map(|t| t.substitute(&type_args, &[]))
+                    .map(|t| {
+                        let field = t.substitute(&type_args, &[]);
+                        // §2: the scrutinee's mode and region, on every
+                        // binding. Several unique references at once is
+                        // sound because a variant's payload positions are
+                        // *disjoint* -- different offsets in one value, no
+                        // two patterns naming the same one (§2.2).
+                        match &borrow {
+                            Some((unique, region, _)) => Type::Ref {
+                                unique: *unique,
+                                region: *region,
+                                inner: Box::new(field),
+                            },
+                            None => field,
+                        }
+                    })
                     .collect();
                 for (binding, ty) in bindings.iter().zip(payload) {
                     match binding {
@@ -3571,7 +3700,11 @@ impl<'a> FnLowering<'a> {
                         // no name, so the backend drops the value — which is
                         // only allowed when there is nothing to drop.
                         None => {
-                            self.trace.emit(Event::Discard { ty, what: "this payload", span });
+                            // Through a reference the payload was never
+                            // owned, so there is nothing here to drop.
+                            if !by_reference {
+                                self.trace.emit(Event::Discard { ty, what: "this payload", span });
+                            }
                             slots.push(None);
                         }
                     }
@@ -3600,7 +3733,13 @@ impl<'a> FnLowering<'a> {
         // A `match` is exhaustive by the check above, so its arms are the
         // whole branch: there is no implicit fall-through arm to join.
         self.trace.emit(Event::Branch { arms: arm_events, span });
-        Ok(Stmt::Match { scrutinee: value, def: def_id, args: type_args, arms: lowered })
+        Ok(Stmt::Match {
+            scrutinee: value,
+            def: def_id,
+            args: type_args,
+            arms: lowered,
+            by_reference,
+        })
     }
 
     /// A condition is a `bool`. M0 tested "non-zero"; M1 has a type for the
@@ -3888,6 +4027,7 @@ impl<'a> FnLowering<'a> {
                         self.expect_type(&Type::Bool, &found, operand_span)?;
                         (Expr::Not(Box::new(inner)), Type::Bool)
                     }
+                    ast::UnOp::Deref => self.deref(inner, &found, operand_span)?,
                 }
             }
             AstExpr::Binary { op, lhs, rhs } => {
@@ -6455,6 +6595,89 @@ mod linearity_tests {
              fn main() -> [] int { return 0; }",
         );
         assert!(message.contains("is not a borrowed `Box`"), "{message}");
+    }
+
+    #[test]
+    fn matching_a_reference_binds_references() {
+        // `docs/reading-references.md` §2: the whole type rule. Nothing
+        // moves out of a reference, so a `res` payload binds as a borrow
+        // and the scrutinee is as owned after the match as before it.
+        let message = refused(
+            "enum Holder { None, Some(File) } \
+             fn peek[&r](h: &r Holder) -> [] int { \
+             match h { Holder::None => { return 0; } \
+             Holder::Some(f) => { return close(f); } } } \
+             fn main() -> [] int { return 0; }",
+        );
+        // `close` takes a `File`; this is a `&r File`.
+        assert!(message.contains("expected `File`"), "{message}");
+    }
+
+    #[test]
+    fn matching_a_reference_consumes_nothing() {
+        // The counterpart: the same enum read through a reference twice,
+        // then consumed once. Before this rule the first read *was* the
+        // consumption and the second would not compile.
+        assert!(
+            check(
+                "enum Holder { None, Some(File) } \
+                 fn tag[&r](h: &r Holder) -> [] int { \
+                 match h { Holder::None => { return 0; } Holder::Some(_) => { return 1; } } } \
+                 fn main() -> [] int { let h = Holder::Some(open(1)); var n = 0; \
+                 borrow h as &r in { n = tag(r) + tag(r); } \
+                 match h { Holder::None => { return n; } \
+                 Holder::Some(f) => { return n + close(f); } } }",
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_wildcard_through_a_reference_drops_nothing() {
+        // `_` on an owned `res` enum is the silent drop §4 forbids. Through
+        // a reference there is nothing to drop, because the match never
+        // owned it.
+        assert!(
+            check(
+                "enum Holder { None, Some(File) } \
+                 fn tag[&r](h: &r Holder) -> [] int { match h { _ => { return 1; } } } \
+                 fn main() -> [] int { return 0; }",
+            )
+            .is_ok()
+        );
+        let message = refused(
+            "enum Holder { None, Some(File) } \
+             fn take(h: Holder) -> [] int { match h { _ => { return 1; } } } \
+             fn main() -> [] int { return 0; }",
+        );
+        assert!(message.contains("cannot be discarded"), "{message}");
+    }
+
+    #[test]
+    fn a_deref_copies_only_a_val() {
+        // §3: copying a `res` out of a reference would leave two values
+        // where one obligation is owed.
+        let message = refused(
+            "fn peek[&r](f: &r File) -> [] File { return *f; } \
+             fn main() -> [] int { return 0; }",
+        );
+        assert!(message.contains("`*` would copy it"), "{message}");
+    }
+
+    #[test]
+    fn a_deref_needs_a_reference() {
+        let message =
+            refused("fn f() -> [] int { let n = 1; return *n; } fn main() -> [] int { return 0; }");
+        assert!(message.contains("is not a reference"), "{message}");
+    }
+
+    #[test]
+    fn writing_through_a_deref_needs_a_unique_reference() {
+        let message = refused(
+            "fn set[&r](n: &r int) -> [] int { *n = 9; return 0; } \
+             fn main() -> [] int { return 0; }",
+        );
+        assert!(message.contains("shared reference"), "{message}");
     }
 
     #[test]

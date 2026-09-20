@@ -676,6 +676,12 @@ impl<'a> Parser<'a> {
             let span = bang.span.to(self.ast.expr_span(operand));
             return Ok(self.ast.push_expr(Expr::Unary { op: UnOp::Not, operand }, span));
         }
+        if self.peek().kind == TokenKind::Star {
+            let star = self.bump();
+            let operand = self.unary()?;
+            let span = star.span.to(self.ast.expr_span(operand));
+            return Ok(self.ast.push_expr(Expr::Unary { op: UnOp::Deref, operand }, span));
+        }
         if self.peek().kind == TokenKind::Minus {
             let minus = self.bump();
             // `-9223372036854775808` is one literal, not a negated one: the

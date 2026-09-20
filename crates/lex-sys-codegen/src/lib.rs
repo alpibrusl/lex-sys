@@ -600,8 +600,8 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
                         return true;
                     }
                 }
-                Stmt::Match { scrutinee, def, args, arms } => {
-                    if self.match_stmt(scrutinee, *def, args, arms) {
+                Stmt::Match { scrutinee, def, args, arms, by_reference } => {
+                    if self.match_stmt(scrutinee, *def, args, arms, *by_reference) {
                         return true;
                     }
                 }
@@ -1124,6 +1124,12 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
                 let address = self.element_address(base, index, element);
                 self.store_leaves(address, &values);
             }
+            // `*r = e` — the whole referent replaced, at the address the
+            // reference holds (`docs/reading-references.md` §3).
+            Place::Deref { base, .. } => {
+                let address = self.scalar(base);
+                self.store_leaves(address, &values);
+            }
             Place::Field { base, def, args, index } => {
                 let address = self.scalar(base);
                 let TypeInfo::Struct { fields, .. } = self.program.type_info(*def) else {
@@ -1221,9 +1227,23 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
     /// A jump table would be faster and is the obvious later move; a chain is
     /// what M1 needs and is easier to be sure of. Returns whether every arm
     /// returned, which makes the whole `match` a terminator.
-    fn match_stmt(&mut self, scrutinee: &Expr, def: DefId, args: &[Type], arms: &[Arm]) -> bool {
+    fn match_stmt(
+        &mut self,
+        scrutinee: &Expr,
+        def: DefId,
+        args: &[Type],
+        arms: &[Arm],
+        by_reference: bool,
+    ) -> bool {
         let values = self.expr(scrutinee);
-        let tag = values[0];
+        // Through a reference the scrutinee is one pointer, so the tag is a
+        // load rather than a leaf already in hand
+        // (`docs/reading-references.md` §2).
+        let tag = if by_reference {
+            self.builder.ins().load(types::I64, MemFlags::trusted(), values[0], 0)
+        } else {
+            values[0]
+        };
         let merge = self.builder.create_block();
 
         let mut all_returned = true;
@@ -1245,7 +1265,7 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
 
                     self.builder.switch_to_block(body_block);
                     self.builder.seal_block(body_block);
-                    self.bind_payload(def, args, variant, arm, &values);
+                    self.bind_payload(def, args, variant, arm, &values, by_reference);
                     let returned = self.stmts(&arm.body);
                     if !returned {
                         self.builder.ins().jump(merge, &[]);
@@ -1291,15 +1311,38 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
         variant: u32,
         arm: &Arm,
         values: &[Value],
+        by_reference: bool,
     ) {
         let (offset, widths) = self.variant_layout(def, args, variant);
         let mut at = offset as usize;
         for (binding, width) in arm.bindings.iter().zip(widths) {
             if let Some(slot) = binding {
                 let base = self.slot_base[slot.0 as usize];
-                for index in 0..width {
-                    let value = values[at + index as usize];
-                    self.builder.def_var(Variable::from_u32(base + index), value);
+                if by_reference {
+                    // A reference is one leaf -- except to a slice, and an
+                    // unsized payload is refused long before here. Asserted
+                    // rather than assumed, because the write below fills
+                    // exactly one variable.
+                    debug_assert_eq!(
+                        leaf_count(&self.func.slots[slot.0 as usize], self.program, self.pointer),
+                        1,
+                        "a binding through a matched reference is one pointer"
+                    );
+                    // Each binding is an *address* inside the referent, not
+                    // a copy of what is there: `values[0]` is where the enum
+                    // lives and this payload starts `at` leaves into it. No
+                    // load at all, which is why several unique references
+                    // out of one match cost nothing (§2.2).
+                    let address = self
+                        .builder
+                        .ins()
+                        .iadd_imm(values[0], at as i64 * i64::from(RETURN_SLOT_STRIDE));
+                    self.builder.def_var(Variable::from_u32(base), address);
+                } else {
+                    for index in 0..width {
+                        let value = values[at + index as usize];
+                        self.builder.def_var(Variable::from_u32(base + index), value);
+                    }
                 }
             }
             // A `_` binding still occupies its payload position; there is
@@ -1362,6 +1405,15 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
             // One load. A reference to a box points at where the box's own
             // pointer lives, so reading it *is* the reference to what the
             // box holds -- same region, same mode, nothing to check.
+            // `*r` — the leaves at the address, loaded
+            // (`docs/reading-references.md` §3). The same arithmetic a
+            // field access does, over the whole referent rather than one
+            // member of it.
+            Expr::Deref { ty, value } => {
+                let address = self.scalar(value);
+                let kinds = leaves(ty, self.program, self.pointer);
+                self.load_leaves(address, &kinds)
+            }
             Expr::Contents(inner) => {
                 let reference = self.expr(inner)[0];
                 let pointer = self.pointer;
