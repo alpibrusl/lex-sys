@@ -30,7 +30,7 @@ usage:
     lex-sys check <file.ls>... [--std]
     lex-sys run   <file.ls>... [--std]
     lex-sys ids   <file.ls>... [--std]
-    lex-sys authority <file.ls>... [--std]
+    lex-sys authority <file.ls>... [--std] [--output json]
     lex-sys print <file.ls>
     lex-sys --version
 
@@ -38,6 +38,7 @@ options:
     -o <output>     where to write the result (default: the first input's stem)
     --emit exe|obj  emit a linked executable (default) or a bare object file
     --std           make the standard library's source available
+    --output json   `authority` as data rather than prose
 
 A program is the set of files named on the command line, in any order.
 Each file is in a module -- the root, unless it says `module a.b;` -- and
@@ -116,14 +117,14 @@ fn run(args: &[String]) -> Result<ExitCode, Failure> {
             Ok(ExitCode::SUCCESS)
         }
         "check" => {
-            let (inputs, _, _, with_std) = parse_args(&args[1..], false)?;
+            let Invocation { inputs, with_std, .. } = parse_args(&args[1..], false)?;
             compile_to_ir(&inputs, with_std)?;
             Ok(ExitCode::SUCCESS)
         }
         // `docs/many-files.md` §5: printing is about text, and text is
         // what a file is -- so this renders exactly one.
         "print" => {
-            let (inputs, _, _, _) = parse_args(&args[1..], false)?;
+            let Invocation { inputs, .. } = parse_args(&args[1..], false)?;
             let [input] = &inputs[..] else {
                 return Err(usage("`print` renders one file at a time"));
             };
@@ -135,23 +136,23 @@ fn run(args: &[String]) -> Result<ExitCode, Failure> {
             Ok(ExitCode::SUCCESS)
         }
         "ids" => {
-            let (inputs, _, _, with_std) = parse_args(&args[1..], false)?;
+            let Invocation { inputs, with_std, .. } = parse_args(&args[1..], false)?;
             print_ids(&inputs, with_std)?;
             Ok(ExitCode::SUCCESS)
         }
         "authority" => {
-            let (inputs, _, _, with_std) = parse_args(&args[1..], false)?;
-            print_authority(&inputs, with_std)?;
+            let Invocation { inputs, with_std, json, .. } = parse_args(&args[1..], false)?;
+            print_authority(&inputs, with_std, json)?;
             Ok(ExitCode::SUCCESS)
         }
         "build" => {
-            let (inputs, output, emit, with_std) = parse_args(&args[1..], true)?;
+            let Invocation { inputs, output, emit, with_std, .. } = parse_args(&args[1..], true)?;
             let output = output.unwrap_or_else(|| default_output(&inputs[0], emit));
             build(&inputs, &output, emit, with_std)?;
             Ok(ExitCode::SUCCESS)
         }
         "run" => {
-            let (inputs, _, _, with_std) = parse_args(&args[1..], false)?;
+            let Invocation { inputs, with_std, .. } = parse_args(&args[1..], false)?;
             let dir = std::env::temp_dir().join(format!("lex-sys-run-{}", std::process::id()));
             std::fs::create_dir_all(&dir)
                 .map_err(|e| environment(format!("cannot create `{}`: {e}", dir.display())))?;
@@ -192,14 +193,27 @@ const STD: &[(&str, &str)] = &[
     ("<std>/vec.ls", include_str!("../../../std/vec.ls")),
 ];
 
-fn parse_args(
-    args: &[String],
-    allow_output: bool,
-) -> Result<(Vec<PathBuf>, Option<PathBuf>, Emit, bool), Failure> {
+/// What a command line asked for.
+///
+/// A struct rather than a tuple because the fifth field is where a tuple
+/// stops being readable at the call site -- the same reason
+/// `resolve_type_at` became a `Resolving`.
+struct Invocation {
+    inputs: Vec<PathBuf>,
+    output: Option<PathBuf>,
+    emit: Emit,
+    with_std: bool,
+    /// `--output json` (`docs/authority.md` §3): the report as data rather
+    /// than as prose, for a consumer that checks it against a grant.
+    json: bool,
+}
+
+fn parse_args(args: &[String], allow_output: bool) -> Result<Invocation, Failure> {
     let mut inputs: Vec<PathBuf> = Vec::new();
     let mut output = None;
     let mut emit = Emit::Exe;
     let mut with_std = false;
+    let mut json = false;
     let mut it = args.iter();
 
     while let Some(arg) = it.next() {
@@ -221,6 +235,11 @@ fn parse_args(
             // *source* is present, never whether a name is in scope. A
             // program still writes `import std.io;` where it uses it.
             "--std" => with_std = true,
+            "--output" => match it.next().map(String::as_str) {
+                Some("json") => json = true,
+                Some(other) => return Err(usage(format!("unknown output form `{other}`"))),
+                None => return Err(usage("`--output` needs a form")),
+            },
             other if other.starts_with('-') => {
                 return Err(usage(format!("unknown option `{other}`")));
             }
@@ -233,7 +252,7 @@ fn parse_args(
     if inputs.is_empty() {
         return Err(usage("no input file given"));
     }
-    Ok((inputs, output, emit, with_std))
+    Ok(Invocation { inputs, output, emit, with_std, json })
 }
 
 fn default_output(input: &Path, emit: Emit) -> PathBuf {
@@ -314,6 +333,20 @@ fn compile_to_ir(inputs: &[PathBuf], with_std: bool) -> Result<lex_sys_ir::Progr
 ///
 /// The program is checked first: hashing something that does not compile would
 /// hand out an identity for a thing that is not a program.
+/// A JSON string array, with each element escaped.
+fn quoted(values: &[&str]) -> String {
+    let each: Vec<String> = values.iter().map(|v| format!("\"{}\"", escaped(v))).collect();
+    each.join(", ")
+}
+
+/// The two characters a JSON string may not carry raw. An effect label is
+/// an identifier and a narrowing is a path or a library name, so neither
+/// can contain a control character -- but escaping here rather than
+/// trusting that is what keeps the output parseable if either widens.
+fn escaped(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
 /// `lex-sys authority <file>` — what a program can do
 /// (`docs/authority.md`).
 ///
@@ -328,22 +361,36 @@ fn compile_to_ir(inputs: &[PathBuf], with_std: bool) -> Result<lex_sys_ir::Progr
 /// Rows are exact in both directions (§7.3), so this is precise rather
 /// than conservative: a label here is an effect the program performs on
 /// some path, not one it might.
-fn print_authority(inputs: &[PathBuf], with_std: bool) -> Result<(), Failure> {
+fn print_authority(inputs: &[PathBuf], with_std: bool, json: bool) -> Result<(), Failure> {
     let program = compile_to_ir(inputs, with_std)?;
 
-    let mut labels: Vec<String> = Vec::new();
+    // Every distinct label the reachable set performs, with the value it
+    // was narrowed to. Sorted so the report is a function of the program
+    // rather than of declaration order.
+    let mut performed: Vec<(String, Option<String>)> = Vec::new();
     for func in &program.funcs {
         for label in func.performs.labels() {
-            let rendered = match &label.argument {
-                Some(value) => format!("{}(\"{value}\")", label.name),
-                None => label.name.clone(),
-            };
-            if !labels.contains(&rendered) {
-                labels.push(rendered);
+            let entry = (label.name.clone(), label.argument.clone());
+            if !performed.contains(&entry) {
+                performed.push(entry);
             }
         }
     }
-    labels.sort();
+    performed.sort();
+
+    let labels: Vec<String> = performed
+        .iter()
+        .map(|(name, argument)| match argument {
+            Some(value) => format!("{name}(\"{value}\")"),
+            None => name.clone(),
+        })
+        .collect();
+
+    // The distinct *kinds*, which is the coarse question a grant is
+    // written against -- `lex-os-check`'s `CheckReport` draws the same
+    // line, keeping the arguments separately for the precise one.
+    let mut kinds: Vec<&str> = performed.iter().map(|(name, _)| name.as_str()).collect();
+    kinds.dedup();
 
     let mut symbols: Vec<&str> =
         program.externs.iter().map(|declared| declared.symbol.as_str()).collect();
@@ -352,6 +399,34 @@ fn print_authority(inputs: &[PathBuf], with_std: bool) -> Result<(), Failure> {
 
     let stdout = io::stdout();
     let mut out = stdout.lock();
+    if json {
+        let written = (|| -> io::Result<()> {
+            writeln!(out, "{{")?;
+            writeln!(out, "  \"effects\": [{}],", quoted(&kinds))?;
+            writeln!(out, "  \"labels\": [")?;
+            for (i, (name, argument)) in performed.iter().enumerate() {
+                let comma = if i + 1 == performed.len() { "" } else { "," };
+                let argument = match argument {
+                    Some(value) => format!("\"{}\"", escaped(value)),
+                    None => "null".to_owned(),
+                };
+                writeln!(
+                    out,
+                    "    {{ \"name\": \"{}\", \"argument\": {argument} }}{comma}",
+                    escaped(name)
+                )?;
+            }
+            writeln!(out, "  ],")?;
+            writeln!(out, "  \"foreign_symbols\": [{}]", quoted(&symbols))?;
+            writeln!(out, "}}")?;
+            out.flush()
+        })();
+        return match written {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::BrokenPipe => Ok(()),
+            Err(e) => Err(environment(format!("cannot write to stdout: {e}"))),
+        };
+    }
     let written = (|| -> io::Result<()> {
         if labels.is_empty() {
             writeln!(out, "performs nothing")?;
