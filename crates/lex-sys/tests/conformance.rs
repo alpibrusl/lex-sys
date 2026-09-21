@@ -965,6 +965,74 @@ fn the_module_rules_are_enforced_across_files() {
     assert!(renamed.status.success(), "{}", String::from_utf8_lossy(&renamed.stderr));
 }
 
+/// `docs/collections.md` §5: a `match` names an enum through the same
+/// qualifier every other reference uses.
+///
+/// This is not decoration. `Pattern::Variant` carried no qualifier, so a
+/// `match` could only name an enum its own module declared — which makes
+/// an imported enum a type a program can hold, pass around and **never
+/// take apart**. `std.option` is unusable without this, and so is every
+/// enum any library will ever export.
+#[test]
+fn a_match_names_an_enum_through_its_qualifier() {
+    const SHAPES: &str = "module shapes;\n\
+                          pub enum Shape { Flat, Tall(int) }\n\
+                          pub fn tall(n: int) -> [] Shape { return Shape::Tall(n); }\n";
+
+    let (exe, build) = build_many(
+        "modules-qualified-pattern",
+        &[
+            (
+                "main.ls",
+                "import shapes;\n\
+                 fn height(s: shapes.Shape) -> [] int {\n\
+                     match s {\n\
+                         shapes.Shape::Flat => { return 0; }\n\
+                         shapes.Shape::Tall(n) => { return n; }\n\
+                     }\n\
+                 }\n\
+                 fn main(world: World) -> [] int {\n\
+                     let Split { io, ffi, fs, heap, args } = split(world);\n\
+                     release(args); release(ffi); release(fs); release(heap); release(io);\n\
+                     return height(shapes.tall(7)) + height(shapes.Shape::Flat) - 7;\n\
+                 }\n",
+            ),
+            ("shapes.ls", SHAPES),
+        ],
+    );
+    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+    let run = Command::new(&exe).output().expect("the compiled program runs");
+    assert_eq!(run.status.code(), Some(0));
+
+    // And the qualifier is checked rather than decorative: a name that is
+    // not an import here is an error, not something skipped over because
+    // the scrutinee already said which enum this is.
+    let (_, wrong) = build_many(
+        "modules-qualified-pattern-unbound",
+        &[
+            (
+                "main.ls",
+                "import shapes;\n\
+                 fn height(s: shapes.Shape) -> [] int {\n\
+                     match s {\n\
+                         forms.Shape::Flat => { return 0; }\n\
+                         forms.Shape::Tall(n) => { return n; }\n\
+                     }\n\
+                 }\n\
+                 fn main(world: World) -> [] int {\n\
+                     let Split { io, ffi, fs, heap, args } = split(world);\n\
+                     release(args); release(ffi); release(fs); release(heap); release(io);\n\
+                     return height(shapes.Shape::Flat);\n\
+                 }\n",
+            ),
+            ("shapes.ls", SHAPES),
+        ],
+    );
+    assert!(!wrong.status.success(), "`forms` is not imported");
+    let text = String::from_utf8_lossy(&wrong.stderr);
+    assert!(text.contains("`forms` is not an imported module here"), "{text}");
+}
+
 /// `examples/modular/` — two modules and a root, with a qualifier, an
 /// `as`, a private helper and a module importing another.
 #[test]
@@ -1001,7 +1069,9 @@ fn the_standard_library_compiles_on_its_own() {
     let root = repo_root().join("std");
     let mut command = Command::new(BIN);
     command.arg("check");
-    for name in ["bytes.ls", "math.ls", "io.ls", "buffer.ls"] {
+    for name in
+        ["bytes.ls", "math.ls", "io.ls", "buffer.ls", "option.ls", "result.ls", "list.ls", "vec.ls"]
+    {
         command.arg(root.join(name));
     }
     let out = command.output().expect("the compiler runs");

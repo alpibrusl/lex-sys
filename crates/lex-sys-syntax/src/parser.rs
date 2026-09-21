@@ -319,7 +319,7 @@ impl<'a> Parser<'a> {
         let start = mode_span.unwrap_or(self.peek().span);
         self.expect(TokenKind::Struct)?;
         let name = self.ident()?;
-        let generics = self.generic_params()?;
+        let (generics, bounds) = self.generic_params(mode)?;
         self.expect(TokenKind::LBrace)?;
 
         let mut fields = Vec::new();
@@ -334,7 +334,7 @@ impl<'a> Parser<'a> {
         }
         let end = self.expect(TokenKind::RBrace)?.span;
         Ok(self.push_decl(
-            Item::Struct(StructDecl { name, public, mode, generics, fields }),
+            Item::Struct(StructDecl { name, public, mode, generics, bounds, fields }),
             start.to(end),
         ))
     }
@@ -348,7 +348,7 @@ impl<'a> Parser<'a> {
         let start = mode_span.unwrap_or(self.peek().span);
         self.expect(TokenKind::Enum)?;
         let name = self.ident()?;
-        let generics = self.generic_params()?;
+        let (generics, bounds) = self.generic_params(mode)?;
         self.expect(TokenKind::LBrace)?;
 
         let mut variants = Vec::new();
@@ -371,29 +371,38 @@ impl<'a> Parser<'a> {
         }
         let end = self.expect(TokenKind::RBrace)?.span;
         Ok(self.push_decl(
-            Item::Enum(EnumDecl { name, public, mode, generics, variants }),
+            Item::Enum(EnumDecl { name, public, mode, generics, bounds, variants }),
             start.to(end),
         ))
     }
 
-    /// `[A, B]` after a declaration's name, or nothing.
-    fn generic_params(&mut self) -> Result<Vec<Symbol>, Diagnostic> {
+    /// `[A, B]` or `[A: val, B]` after a declaration's name, or nothing.
+    ///
+    /// `docs/collections.md` §3: a bound is written where it is not already
+    /// implied. A `val` aggregate bounds every parameter by saying `val` --
+    /// `val struct Wrap[T]` *is* `val struct Wrap[T: val]` -- so writing it
+    /// there is a second way to say one thing. A `res` aggregate implies
+    /// nothing about its parameters, and an undeclared one's mode is
+    /// computed from them, so in both the bound says something new. That is
+    /// what `res struct Vec[T: val]` needs: the vector owns an allocation,
+    /// and its elements are copyable because a boxed slice holds `val` data
+    /// only.
+    fn generic_params(
+        &mut self,
+        mode: Option<Mode>,
+    ) -> Result<(Vec<Symbol>, Vec<Option<Mode>>), Diagnostic> {
         let (generics, bounds, regions, _) = self.declaration_params()?;
         if let Some(region) = regions.first() {
             let _ = region;
             return Err(self
                 .err("a type declaration has no region parameters; only a function can take one"));
         }
-        // `docs/mode-polymorphism.md` §3: a generic *type*'s parameters are
-        // bounded by its own declared mode -- `val struct Wrap[T]` is
-        // `val struct Wrap[T: val]` -- so writing the bound as well would be
-        // a second way to say one thing. §6 keeps writing it open.
-        if bounds.iter().any(Option::is_some) {
+        if mode == Some(Mode::Val) && bounds.iter().any(Option::is_some) {
             return Err(self.err(
-                "a generic type's parameters are bounded by its own mode: `val struct X[T]` already means `T` is `val`",
+                "a `val` declaration already bounds its parameters: `val struct X[T]` means `T` is `val`, so the bound says nothing new; a `res` or undeclared one is where writing it means something",
             ));
         }
-        Ok(generics)
+        Ok((generics, bounds))
     }
 
     /// `[io, fs]` between `->` and the return type -- §7's effect row.
@@ -805,6 +814,17 @@ impl<'a> Parser<'a> {
         if self.eat(TokenKind::Underscore) {
             return Ok(Pattern::Wildcard);
         }
+        // `m.Shape::Round` — the enum reached through an import
+        // (`docs/modules.md` §4). Two tokens of lookahead is enough here,
+        // unlike in an expression: a pattern position has no field access
+        // to tell it apart from, so `a.B` can only be a qualified name.
+        let qualifier = if self.peek_kind(1) == TokenKind::Dot {
+            let qualifier = self.ident()?;
+            self.expect(TokenKind::Dot)?;
+            Some(qualifier)
+        } else {
+            None
+        };
         let enum_name = self.ident()?;
         self.expect(TokenKind::ColonColon)?;
         let variant = self.ident()?;
@@ -823,7 +843,7 @@ impl<'a> Parser<'a> {
             }
             self.expect(TokenKind::RParen)?;
         }
-        Ok(Pattern::Variant { enum_name, variant, bindings })
+        Ok(Pattern::Variant { enum_name, qualifier, variant, bindings })
     }
 
     fn while_stmt(&mut self) -> Result<StmtId, Diagnostic> {
@@ -1756,5 +1776,56 @@ mod tests {
         let (ast, decl) = one_fn("fn f(a: bool, b: bool) -> [] bool { return a && b; }");
         let Stmt::Return(value) = ast.stmt(decl.body.stmts[0]) else { panic!() };
         assert!(matches!(ast.expr(*value), Expr::Binary { op: BinOp::And, .. }));
+    }
+
+    /// The declaration a `res` aggregate needs (`docs/collections.md` §3):
+    /// the vector owns an allocation, and its elements are copyable.
+    #[test]
+    fn a_res_declaration_may_bound_its_parameters() {
+        let ast = parse("res struct Vec[T: val] { held: Box[[T]], used: int }").expect("parses");
+        let Item::Struct(decl) = &ast.items[0] else { panic!() };
+        assert_eq!(decl.mode, Some(Mode::Res));
+        assert_eq!(decl.bounds, vec![Some(Mode::Val)]);
+    }
+
+    /// And an undeclared one may too: its mode is *computed* from its
+    /// members, so a bound restricts what may instantiate it rather than
+    /// repeating something already said.
+    #[test]
+    fn an_undeclared_aggregate_may_bound_its_parameters() {
+        let ast = parse("enum Pair[A: val, B] { One(A), Two(B) }").expect("parses");
+        let Item::Enum(decl) = &ast.items[0] else { panic!() };
+        assert_eq!(decl.mode, None);
+        assert_eq!(decl.bounds, vec![Some(Mode::Val), None]);
+    }
+
+    /// A `val` one may not: saying `val` is the bound (§3).
+    #[test]
+    fn a_val_declaration_may_not_restate_its_bound() {
+        let err = parse("val struct Wrap[T: val] { held: T }").unwrap_err();
+        assert!(err.message.contains("already bounds its parameters"), "{}", err.message);
+    }
+
+    /// And there is no `res` bound on a type any more than on a function.
+    #[test]
+    fn a_type_takes_no_res_bound() {
+        let err = parse("res struct Holder[T: res] { held: T }").unwrap_err();
+        assert!(err.message.contains("no `res` bound"), "{}", err.message);
+    }
+
+    /// `docs/collections.md` §5: a `match` reaches an enum through the
+    /// same qualifier every other reference uses. Without it an imported
+    /// enum is a type a program can hold and never take apart.
+    #[test]
+    fn a_pattern_may_name_an_enum_through_a_qualifier() {
+        let (ast, decl) =
+            one_fn("fn f(s: m.Shape) -> [] int { match s { m.Shape::Flat => { return 0; } } }");
+        let Stmt::Match { arms, .. } = ast.stmt(decl.body.stmts[0]) else { panic!() };
+        let Pattern::Variant { enum_name, qualifier, variant, .. } = &arms[0].pattern else {
+            panic!()
+        };
+        assert_eq!(ast.name_of(qualifier.expect("a qualifier")), "m");
+        assert_eq!(ast.name_of(*enum_name), "Shape");
+        assert_eq!(ast.name_of(*variant), "Flat");
     }
 }

@@ -51,7 +51,10 @@ decision to revisit first when a package story exists (§6).
 
 ## 3. The surface
 
-Four modules. Each one earns its place below.
+Eight modules. The four below earned their place first; the four
+collections that followed are `docs/collections.md`'s, and the short
+version is that `std.list` holds resources, `std.vec` does not, and the
+difference is the shape rather than the generics.
 
 ### 3.1 `std.bytes` — text, which here means bytes
 
@@ -101,7 +104,7 @@ right answer stops rather than inventing one. A library that quietly
 returned the negative number would be exactly the silently-wrong answer
 the language exists to refuse.
 
-### 3.4 `std.buffer` — the one data structure
+### 3.4 `std.buffer` — bytes, growable
 
 A growable byte buffer: `Buffer`, `empty`, `reserve`, `push`, `append`,
 `push_nat`, `size`, `write` and `drop`.
@@ -116,6 +119,20 @@ written once instead of once per program. The doubling policy lives
 here now, which is the *only* thing that changed: it is still policy,
 still in a library, still not in the compiler.
 
+`std.vec` is this with the element type lifted out, and it stays a
+separate module rather than replacing this one: a byte buffer's
+`append` and `push_nat` are about bytes, and a `Vec[byte]` that had
+them would be a byte buffer wearing a type parameter.
+
+### 3.5 The collections
+
+`std.option`, `std.result`, `std.list` and `std.vec` —
+`docs/collections.md`. What is worth carrying back here is that three
+of the four needed **no language change**: a generic container has
+worked at both modes since M2, and what was missing was a library that
+said so. The fourth needed a bound on a type declaration, because
+`res struct Vec[T: val]` is two modes about two different things.
+
 ---
 
 ## 4. What is deliberately not in it
@@ -124,21 +141,23 @@ still in a library, still not in the compiler.
   §3 is explicit that a generational handle is an escape hatch and
   "neither is reached for by default" — putting it in `std` would say
   the opposite.
-* **No `Option` or `Result`** — *and the reason given here was wrong.*
-  This said they "want generics over a mode", which the language does
-  not have. It does: `docs/mode-polymorphism.md` §1 shows a generic
-  container used at a resource type and a copyable one in the same
-  program, and it has worked since M2. The claim was taken from §12's
-  open list rather than from a test.
+* ~~**No `Option` or `Result`.**~~ **Both are in**, along with
+  `std.list` and `std.vec` — see `docs/collections.md`. The reason first
+  given here was wrong twice over, and the second wrong reason was the
+  correction to the first.
 
-  What they actually want is a place to put the value that is **not**
-  returned: `unwrap_or` needs `T: val`, and a resource version needs a
-  different signature. That is a library design question, and now that a
-  bound can say which version is which, an ordinary one.
-* **No collections beyond a byte buffer.** Same correction: a `Vec[T]`
-  over a resource type is expressible. What a byte buffer does not need
-  is a decision about what its emptying and copying operations mean for
-  a linear element, which is the design that has not been done.
+  It said they "want generics over a mode", which the language does not
+  have. It does, and has since M2 (`mode-polymorphism.md` §1); that
+  claim was taken from §12's open list rather than from a test.
+
+  The correction then said a `Vec[T]` over a resource type **is**
+  expressible. It is not. A `Vec` keeps its elements in a boxed slice,
+  and `collections.md` §2 gives two independent reasons a boxed slice
+  holds `val` data only — the fill is copied into every element, and
+  freeing the run is one `free` that *runs nothing*. `std.vec` is
+  therefore `[T: val]`, honestly, and `std.list` is the collection that
+  holds resources. The difference is the **shape**, which is what both
+  earlier answers missed by looking at the generics.
 * **No allocation-free string formatting.** `print_*` writes to the
   console. Formatting *into* a buffer is a second surface and wants
   §6's open question about writers answered first.
@@ -213,6 +232,7 @@ run, and its rules have fixtures.
 | `std_declarations_cost_nothing_unless_called` | §5.2: a program built with `--std` and one built without it emit **byte-identical** object files. This was false when it was first written down, which is why it is a test |
 | `abs_of_the_most_negative_integer_traps` | §3.3 |
 | `examples/wordcount.ls` | Rewritten on `std` — five helpers gone — and prints exactly what it printed before |
+| `examples/queue.ls` | The collections at work: jobs that own memory, held in a `List`, ended exactly once each |
 | `printing_preserves_every_identity_and_is_idempotent` | `std/` walks with everything else: the library is code and gets the same contract |
 
 Every example is now built with `--std` passed unconditionally, which is

@@ -162,7 +162,7 @@ impl Printer<'_> {
             visibility(decl.public),
             mode_prefix(decl.mode),
             self.name(decl.name),
-            self.generic_params(&decl.generics)
+            self.declaration_params(&decl.generics, &decl.bounds, &[], &[])
         );
         self.line(&header);
         self.depth += 1;
@@ -180,7 +180,7 @@ impl Printer<'_> {
             visibility(decl.public),
             mode_prefix(decl.mode),
             self.name(decl.name),
-            self.generic_params(&decl.generics)
+            self.declaration_params(&decl.generics, &decl.bounds, &[], &[])
         );
         self.line(&header);
         self.depth += 1;
@@ -232,14 +232,6 @@ impl Printer<'_> {
         }
         text.push(']');
         text
-    }
-
-    fn generic_params(&self, generics: &[Symbol]) -> String {
-        if generics.is_empty() {
-            return String::new();
-        }
-        let names: Vec<&str> = generics.iter().map(|g| self.name(*g)).collect();
-        format!("[{}]", names.join(", "))
     }
 
     fn params(&self, params: &[Param]) -> String {
@@ -347,9 +339,12 @@ impl Printer<'_> {
                 for arm in arms {
                     let pattern = match &arm.pattern {
                         Pattern::Wildcard => "_".to_owned(),
-                        Pattern::Variant { enum_name, variant, bindings } => {
-                            let head =
-                                format!("{}::{}", self.name(*enum_name), self.name(*variant));
+                        Pattern::Variant { enum_name, qualifier, variant, bindings } => {
+                            let head = format!(
+                                "{}::{}",
+                                self.qualified(*qualifier, *enum_name),
+                                self.name(*variant)
+                            );
                             if bindings.is_empty() {
                                 head
                             } else {

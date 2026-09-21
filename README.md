@@ -219,9 +219,40 @@ and requires every hash to survive.
 > and its **types** through two different lookups, so a function calling
 > into C could declare `[]` and compile. Fixed — one resolution.
 >
-> **Still missing:** a writer abstraction, and `Option`/`Result` over
-> resources — neither blocked by the language any more, both wanting a
-> library design. Do not mistake this for a usable language yet.
+> **And there are collections.** `std.option`, `std.result`, `std.list`
+> and `std.vec` — and the answer turned out to be about **shape**
+> rather than about generics. `Option`, `Result` and `List` hold
+> resources and needed no language change to do it: a generic container
+> has worked at both modes since M2, and what was missing was a library
+> that said so. A **`Vec` cannot**, and no API design gets around it —
+> a vector keeps its elements in a boxed slice, and freeing one is a
+> single `free` that *runs nothing*, so an obligation sitting in
+> element 3 would be dropped rather than discharged. There are no
+> destructors here, by design.
+>
+> A list is the opposite shape: taking it apart *produces* its
+> elements, one at a time, so the walk that reads it is the walk that
+> frees it. Which meant `std.vec` had to say `res struct Vec[T: val]`
+> — the vector owns an allocation, its elements are copyable — and a
+> bound on a type declaration was refused outright. It is allowed now
+> where it says something new, and still refused on a `val` aggregate,
+> which already implies it.
+>
+> Two bugs fell out. A `[T: val]` function could not name a `val`
+> aggregate at `T` **at all**, because keeping the aggregate's bound
+> read the argument against no bounds and a rigid `T` came out `res` —
+> the bound was refused in exactly the position it exists for. And a
+> `match` could not name an enum another module declared, so
+> `std.option` would have been a type a program could hold and never
+> take apart. That is [`docs/collections.md`](docs/collections.md),
+> which corrects a claim in each of the two documents before it —
+> including one I wrote last slice.
+>
+> **Still missing:** a writer abstraction, and reading a `res` field
+> through a reference — `match` on a reference borrows while field
+> access copies, so a struct with a `res` field cannot be read through
+> one at all while the equivalent enum can. Two library modules have
+> now paid for that. Do not mistake this for a usable language yet.
 
 ## What this is
 

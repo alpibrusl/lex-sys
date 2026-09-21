@@ -180,6 +180,10 @@ const STD: &[(&str, &str)] = &[
     ("<std>/math.ls", include_str!("../../../std/math.ls")),
     ("<std>/io.ls", include_str!("../../../std/io.ls")),
     ("<std>/buffer.ls", include_str!("../../../std/buffer.ls")),
+    ("<std>/option.ls", include_str!("../../../std/option.ls")),
+    ("<std>/result.ls", include_str!("../../../std/result.ls")),
+    ("<std>/list.ls", include_str!("../../../std/list.ls")),
+    ("<std>/vec.ls", include_str!("../../../std/vec.ls")),
 ];
 
 fn parse_args(
