@@ -213,8 +213,14 @@ fn printing_preserves_every_identity_and_is_idempotent() {
     // filter on the `.ls` extension, which a directory does not have --
     // that is what keeps a multi-file example out of the single-file
     // harnesses, and it would keep it out of this one too.
-    for dir in ["tests/accept", "tests/reject", "examples", "examples/wordfreq", "examples/buffer"]
-    {
+    for dir in [
+        "tests/accept",
+        "tests/reject",
+        "examples",
+        "examples/wordfreq",
+        "examples/buffer",
+        "examples/slab",
+    ] {
         for entry in std::fs::read_dir(repo_root().join(dir)).expect("a readable directory") {
             let path = entry.expect("a readable entry").path();
             if path.extension().and_then(|e| e.to_str()) != Some("ls") {
@@ -945,6 +951,38 @@ fn the_growable_buffer_example_builds_and_runs() {
     let run = Command::new(&exe).output().expect("the compiled program runs");
     assert_eq!(String::from_utf8_lossy(&run.stdout), "counting: 1 4 9 16 25 36 49 64\n");
     assert_eq!(run.status.code(), Some(0), "thirty-one bytes built from a one-byte buffer");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_slab_example_builds_and_runs() {
+    // `examples/slab/` is §9's `Gen` hatch, built as `docs/sharing.md` §3
+    // describes it. The line that matters is the last one: a handle whose
+    // slot was removed comes back `Missing` -- a value, not a dangling
+    // pointer -- and the program decides what to do about it.
+    //
+    // The three `rc_*.ls` reject fixtures are the other half of the same
+    // claim: `Gen` is a library, and `Rc` is not one that can be written.
+    let root = repo_root().join("examples").join("slab");
+    let dir = scratch("slab-example");
+    let exe = dir.join("slab");
+    let build = Command::new(BIN)
+        .arg("build")
+        .arg(root.join("main.ls"))
+        .arg(root.join("slab.ls"))
+        .arg("-o")
+        .arg(&exe)
+        .output()
+        .expect("the compiler runs");
+    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+
+    let run = Command::new(&exe).output().expect("the compiled program runs");
+    assert_eq!(
+        String::from_utf8_lossy(&run.stdout),
+        "live handle:  7\nafter remove: missing\nnew handle:   9\nold handle:   missing\n"
+    );
+    assert_eq!(run.status.code(), Some(0), "one slot live at the end, so `drop_slab` said 1");
 
     let _ = std::fs::remove_dir_all(&dir);
 }
