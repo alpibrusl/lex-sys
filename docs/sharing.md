@@ -138,21 +138,23 @@ None is a soundness problem and all three are ergonomics:
 * **No renaming in a destructuring pattern.** *(Closed for tuples, by the
   same change.)* `let Slab { entries, live }` binds those names and no
   others, so two slabs cannot be taken apart in one scope.
-* **No shadowing within a block.** *(Still open.)* Threading a value
-  through several steps means `fresh`, `live`, `emptied`, `stale` — four
-  names for one slab — because `let slab = ...` twice in a block is
-  refused.
+* **No shadowing within a block.** *(Closed — `docs/shadowing.md`.)*
+  Threading a value through several steps means `fresh`, `live`,
+  `emptied`, `stale` — four names for one slab — because
+  `let slab = ...` twice in a block is refused.
 
 Together they make value-threading APIs wordy, which is the exact style a
 linear language pushes you toward. They were listed in §6 rather than
 fixed here, because each is a language change and this document is a
 library.
 
-Two of the three were fixed in the slice after this one, and that is the
-useful thing about having written them down: `docs/tuples.md` is the
-first feature here whose case was made entirely by a library rather than
-by a design. `examples/slab/` has since lost `Inserted`, `Looked` and one
-whole function — and its object file did not change.
+All three were fixed in the two slices after this one, and that is the
+useful thing about having written them down: `docs/tuples.md` and
+`docs/shadowing.md` are the first features here whose case was made
+entirely by a library rather than by a design. `examples/slab/` has
+since lost `Inserted`, `Looked`, one whole function and seven of the
+eight names it had for one slab — without weakening a rule, and without
+its object file changing.
 
 ---
 
@@ -175,7 +177,7 @@ whole function — and its object file did not change.
 | A safe copyable pointer, and a real `Rc` | §2.2. A language feature with its own document |
 | ~~Tuples, or multiple return values~~ | **Built** — `docs/tuples.md` |
 | ~~Renaming in patterns~~ | **Built**, for tuple patterns, by the same change |
-| Shadowing in a block | §4, and small |
+| ~~Shadowing in a block~~ | **Built** — `docs/shadowing.md`, and it was a real rule stated too bluntly rather than an omission |
 | A free list in the slab | Policy; the library can have one whenever it wants |
 
 ---

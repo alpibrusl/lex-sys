@@ -2442,6 +2442,13 @@ struct FnLowering<'a> {
 
 impl<'a> FnLowering<'a> {
     fn declare(&mut self, name: Symbol, ty: Type, mutable: bool, span: Span) -> Slot {
+        // `docs/shadowing.md` §3. A binding of the same name already in
+        // *this* block is shadowed rather than refused, and the link goes
+        // into the trace so the checker can insist it was dead. An outer
+        // block's binding is not shadowed in this sense: it is still
+        // reachable when its own block closes, so the block-close check
+        // already covers it (§2.1).
+        let shadows = self.shadowed_in_current_scope(name);
         let slot = self.temp(ty.clone());
         self.slot_origin[slot.0 as usize] = (Some(name), span);
         self.scopes.last_mut().expect("a scope is always open").push(Binding {
@@ -2450,7 +2457,12 @@ impl<'a> FnLowering<'a> {
             ty,
             mutable,
         });
-        self.trace.emit(Event::Declare { slot, name: self.ast.name_of(name).to_owned(), span });
+        self.trace.emit(Event::Declare {
+            slot,
+            name: self.ast.name_of(name).to_owned(),
+            span,
+            shadows,
+        });
         slot
     }
 
@@ -2471,6 +2483,37 @@ impl<'a> FnLowering<'a> {
 
     fn declared_in_current_scope(&self, name: Symbol) -> bool {
         self.scopes.last().is_some_and(|scope| scope.iter().any(|b| b.name == name))
+    }
+
+    /// The slot a new binding of this name would **strand**, if any
+    /// (`docs/shadowing.md` §3).
+    ///
+    /// A shadow strands the binding it covers when the shadow lasts as
+    /// long as that binding does — which means the innermost scope, and
+    /// nothing outside it. Shadowing from an *inner* block is different
+    /// and stays free: the inner block ends first, the outer binding is
+    /// reachable again afterwards, and its own block-close check already
+    /// covers it (§2.1).
+    ///
+    /// Parameters are the one place those two scopes are really one.
+    /// `scopes[0]` holds the parameters and `scopes[1]` the body's
+    /// top-level block; the first has no statements of its own and the two
+    /// close together, so a `let` at the top of a body covers a parameter
+    /// for the whole of that parameter's life. Without this, shadowing a
+    /// live `res` parameter is still caught — by the check at `return` —
+    /// but reported on a line where the name means something else (§4.1).
+    ///
+    /// The *last* matching binding, because shadowing chains: `let n`
+    /// three times in a block shadows the second, which shadowed the
+    /// first.
+    fn shadowed_in_current_scope(&self, name: Symbol) -> Option<Slot> {
+        let innermost = self.scopes.len().checked_sub(1)?;
+        let also_parameters = usize::from(self.scopes.len() == 2);
+        self.scopes[innermost - also_parameters..]
+            .iter()
+            .rev()
+            .find_map(|scope| scope.iter().rev().find(|b| b.name == name))
+            .map(|b| b.slot)
     }
 
     /// A type as written inside this body: resolved against the function's own
@@ -2884,15 +2927,11 @@ impl<'a> FnLowering<'a> {
                     }
                     None => found,
                 };
-                if self.declared_in_current_scope(*name) {
-                    return Err(Diagnostic::new(
-                        format!(
-                            "`{}` is already bound in this block (shadowing is only allowed in an inner block)",
-                            self.ast.name_of(*name)
-                        ),
-                        span,
-                    ));
-                }
+                // No check here: shadowing a binding of the same name in
+                // this block is allowed exactly when that binding is dead,
+                // and whether it is dead is a fact about the trace rather
+                // than about the source (`docs/shadowing.md` §4). `declare`
+                // records the link; the checker insists.
                 let slot = self.declare(*name, declared, *mutable, span);
                 Stmt::Store { place: Place::Slot(slot), value }
             }
@@ -3053,14 +3092,10 @@ impl<'a> FnLowering<'a> {
             if order.contains(&index) {
                 return Err(Diagnostic::new(format!("field `{field_text}` is named twice"), span));
             }
-            if self.declared_in_current_scope(*field) {
-                return Err(Diagnostic::new(
-                    format!(
-                        "`{field_text}` is already bound in this block (shadowing is only allowed in an inner block)"
-                    ),
-                    span,
-                ));
-            }
+            // Shadowing across statements is `docs/shadowing.md` §3 and is
+            // checked at replay. Binding a name twice *within one pattern*
+            // is a different thing and is still refused below: one pattern,
+            // one binding per name (§5).
             if fields[..position].contains(field) {
                 return Err(Diagnostic::new(
                     format!("`{field_text}` is bound twice in this pattern"),
@@ -3137,14 +3172,9 @@ impl<'a> FnLowering<'a> {
 
         for (position, name) in names.iter().enumerate() {
             let text = self.ast.name_of(*name);
-            if self.declared_in_current_scope(*name) {
-                return Err(Diagnostic::new(
-                    format!(
-                        "`{text}` is already bound in this block (shadowing is only allowed in an inner block)"
-                    ),
-                    span,
-                ));
-            }
+            // As for a struct pattern: shadowing is §3's rule and is
+            // checked at replay; two bindings of one name inside a single
+            // pattern is still refused here.
             if names[..position].contains(name) {
                 return Err(Diagnostic::new(
                     format!("`{text}` is bound twice in this pattern"),
@@ -4842,11 +4872,20 @@ mod tests {
         assert_eq!(f.n_slots(), 3);
     }
 
+    /// `docs/shadowing.md` §3, from the resolution side: a shadow is a
+    /// *second binding*, not a reassignment.
+    ///
+    /// Each `let` gets its own slot, and a name resolves to the most
+    /// recent one. That is what makes shadowing at a different type work,
+    /// and what makes the old binding something the checker can still
+    /// have an opinion about rather than something that has been
+    /// overwritten.
     #[test]
-    fn rebinding_in_the_same_block_is_refused() {
-        assert!(
-            error("fn f() -> [] int { let x = 1; let x = 2; return x; }").contains("already bound")
-        );
+    fn rebinding_in_the_same_block_declares_a_second_slot() {
+        let f = main_fn("fn f() -> [] int { let x = 1; let x = true; return 2; }");
+        assert_eq!(f.n_slots(), 2, "two bindings, two slots");
+        assert_eq!(f.slots[0], Type::Int);
+        assert_eq!(f.slots[1], Type::Bool);
     }
 
     #[test]
@@ -7408,6 +7447,117 @@ mod linearity_tests {
              let (a, b) = 1; return a; }",
         );
         assert!(message.contains("is not a tuple"), "{message}");
+    }
+
+    // ---- shadowing (`docs/shadowing.md`) -------------------------------
+
+    /// §3: shadowing is allowed exactly when the shadowed binding is dead.
+    ///
+    /// Both halves in one test, because the rule is one rule: a `val`
+    /// binding never owed anything so it shadows freely, and a `res` one
+    /// shadows only after something consumed it.
+    #[test]
+    fn a_binding_may_be_shadowed_exactly_when_it_is_dead() {
+        accepted(
+            "fn main(world: World) -> [] int { \
+             let Split { io, ffi, fs, heap, args } = split(world); \
+             release(args); release(ffi); release(fs); release(heap); release(io); \
+             let n = 4; let n = n * 10; let n = n + 2; return n; }",
+        );
+
+        // Consumed first -- `unbox` takes the old `held`, and a `let`'s
+        // initialiser is lowered before the binding exists, so the old one
+        // is dead by the time the new one is declared.
+        accepted(
+            "fn main(world: World) -> [] int { \
+             let Split { io, ffi, fs, heap, args } = split(world); \
+             release(args); release(ffi); release(fs); release(io); \
+             var n = 0; \
+             borrow mut heap as &!h in { let held = box(h, 1); let held = unbox(h, held); n = held; } \
+             release(heap); return n; }",
+        );
+
+        let leaked = refused(
+            "fn main(world: World) -> [] int { \
+             let Split { io, ffi, fs, heap, args } = split(world); \
+             release(args); release(ffi); release(fs); release(io); \
+             var n = 0; \
+             borrow mut heap as &!h in { let held = box(h, 1); let held = box(h, 2); n = unbox(h, held); } \
+             release(heap); return n; }",
+        );
+        assert!(leaked.contains("shadowing it here would put that value out of reach"), "{leaked}");
+    }
+
+    /// §2.1: an *inner* block shadows a live binding freely, and always
+    /// did.
+    ///
+    /// The inner block ends first, so the outer binding is reachable again
+    /// afterwards and its own block-close check still covers it. That is
+    /// the distinction the rule turns on -- not whether a name is reused,
+    /// but whether reusing it strands an obligation.
+    #[test]
+    fn an_inner_block_may_shadow_a_binding_that_is_still_live() {
+        accepted(
+            "fn main(world: World) -> [] int { \
+             let Split { io, ffi, fs, heap, args } = split(world); \
+             release(args); release(ffi); release(fs); release(io); \
+             var n = 0; \
+             borrow mut heap as &!h in { \
+               let held = box(h, 1); \
+               if n == 0 { let held = 7; n = held; } \
+               n = unbox(h, held); \
+             } \
+             release(heap); return n; }",
+        );
+    }
+
+    /// §4.1: a parameter is the one place two scopes are really one.
+    ///
+    /// The parameter list has no statements of its own and closes with the
+    /// body's top-level block, so a `let` at the top of a body covers a
+    /// parameter for the whole of that parameter's life. This program was
+    /// always refused -- the value stayed live to the `return` -- but the
+    /// message named a binding the reported line does not mention.
+    #[test]
+    fn shadowing_a_live_parameter_is_reported_at_the_let() {
+        let source = "res struct Ticket { serial: int } \
+             fn redeem(t: Ticket) -> [] int { let t = 1; return t; } \
+             fn main(world: World) -> [] int { \
+             let Split { io, ffi, fs, heap, args } = split(world); \
+             release(args); release(ffi); release(fs); release(heap); release(io); \
+             return redeem(Ticket { serial: 1 }); }";
+        let error = lower_src(source).expect_err("refused");
+        assert!(
+            error.message.contains("shadowing it here would put that value out of reach"),
+            "{}",
+            error.message
+        );
+        // And it points at the `let`, not at the `return` three tokens on.
+        assert!(
+            source[error.span.start as usize..error.span.end as usize].starts_with("let t"),
+            "reported at `{}`",
+            &source[error.span.start as usize..error.span.end as usize]
+        );
+
+        // A `val` parameter shadows freely, which it always did.
+        accepted("fn f(n: int) -> [] int { let n = n + 1; return n; }");
+    }
+
+    /// §5: shadowing is between statements, never within one pattern.
+    ///
+    /// The check that refuses a name bound twice in one pattern is a
+    /// different check from the one this slice relaxed, and it stays:
+    /// `let Pair { a, a }` names one field twice, which is not shadowing
+    /// but a pattern that does not take the whole value apart.
+    #[test]
+    fn a_pattern_still_binds_each_name_once() {
+        let message = refused(
+            "fn main(world: World) -> [] int { \
+             let Split { io, ffi, fs, heap, args } = split(world); \
+             release(args); release(ffi); release(fs); release(heap); release(io); \
+             let (a, a) = (1, 2); return a; }",
+        );
+        assert!(message.contains("bound twice in this pattern"), "{message}");
     }
 
     #[test]
