@@ -49,12 +49,13 @@ reasoning — this table is the index, not the argument.
 | [#38](https://github.com/alpibrusl/lex-sys/pull/38) | [`defer`](defer.md) | Sugar that **stays** sugar: expanded during lowering, so the checker replays the same events the hand-written version would, and there is one set of linearity rules rather than two. §12's question answered — "visible" here means *the type says what happened*, not "written on the line where it runs" |
 | [#39](https://github.com/alpibrusl/lex-sys/pull/39) | [The authority surface](authority.md) | §12's release question answered **no**: the four `release` calls are not ceremony around the authority declaration, they *are* it — `main` owns rather than borrows, so its row is `[]` and every entry point has the same signature. `lex-sys authority` reads them instead |
 | [#40](https://github.com/alpibrusl/lex-sys/pull/40) | [`[budget]`](budget.md) | Answered **no**, from the units: a budget is wall-clock seconds, commands and **cents**, none of which is a property of a program's text. `lex-os` already charges it, at the boundary that can stop you. What was wanted was legibility, so the authority report grew `--output json` |
+| [#41](https://github.com/alpibrusl/lex-sys/pull/41) | [What a program can reach](reach.md) | Answered by building it: a **REST endpoint over a real TCP socket**, with no socket type, no `Net` capability and no library — because sockets are libc and libc has a name. The no's are one sentence: a foreign *result* is a scalar, so every opaque handle (TLS, libpq, `FILE *`) is out. And the row cannot say `net`, because a library is not an authority domain |
 
 ### The pattern, if there is one
 
-Ten of these eighteen slices found a bug, falsified a claim the project
-had already written down, or both — and three of those were soundness
-bugs reachable from ordinary code. That is not an accident of luck: each
+Eleven of these nineteen slices found a bug, falsified a claim the
+project had already written down, or both — and three of those were
+soundness bugs reachable from ordinary code. That is not an accident of luck: each
 slice is built by writing the thing the previous document said was
 possible, and the documents keep being wrong in the same direction —
 optimistic about what generality the type system already had.
@@ -67,7 +68,9 @@ place, in the document that made it, rather than quietly edited.**
 `mode-polymorphism.md` §1, the second of which was itself a correction;
 and #36 corrects `reading-references.md` §2.0 and `sharing.md` §2.1,
 where a refusal turned out to be broader than the hazard it was written
-for.
+for; and #41 corrects a refusal that named `()` as a foreign result, in a
+language whose grammar refuses `()` on purpose — two correct rules with a
+loop between them, which only a program walking into it would find.
 
 ---
 
@@ -77,8 +80,13 @@ for.
 |---|---|
 | Effect polymorphism | A function generic over the *row* it performs. Named nowhere yet, and much larger than anything above |
 
-Ordinary work, blocked by nothing: flag parsing, environment variables,
-standard error.
+Ordinary work, blocked by nothing: flag parsing, standard error, and
+`float` — which `reach.md` §6 upgrades from an omission to a named gap,
+since `std.math` does not yet mean what its name suggests.
+
+Environment variables moved off that list and onto `reach.md`'s: `getenv`
+returns a `char *`, so they are not reachable through FFI at all and want
+a capability with builtins, the way `Args` has.
 
 ---
 

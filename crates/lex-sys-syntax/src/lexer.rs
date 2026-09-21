@@ -179,11 +179,16 @@ pub fn tokenize(text: &str) -> Result<Vec<Token>, Diagnostic> {
 
         let start = i;
 
-        // A string literal. Five escapes and no more (`docs/strings.md` §4):
+        // A string literal. Six escapes and no more (`docs/strings.md` §4):
         // `\u` would be an encoding claim, which §1 declines to make, and
         // `\x` is the bitwise escape hatch §2 is deferring. A backslash
         // before anything else is refused where it is written rather than
         // passed through as itself.
+        //
+        // `\r` is the sixth, and it was added because a program needed it:
+        // `examples/serve/` speaks HTTP, whose line ending is CRLF, and
+        // without it a protocol's own separator had to be written as
+        // `byte_of(13)` into a buffer (`docs/reach.md` §4).
         if b == b'"' {
             i += 1;
             while i < bytes.len() && bytes[i] != b'"' {
@@ -195,11 +200,11 @@ pub fn tokenize(text: &str) -> Result<Vec<Token>, Diagnostic> {
                 }
                 if bytes[i] == b'\\' {
                     let Some(escape) = bytes.get(i + 1) else { break };
-                    if !matches!(escape, b'n' | b't' | b'\\' | b'"' | b'0') {
+                    if !matches!(escape, b'n' | b'r' | b't' | b'\\' | b'"' | b'0') {
                         let end = next_char_boundary(text, i + 1);
                         return Err(Diagnostic::new(
                             format!(
-                                "`\\{}` is not an escape; a string literal takes `\\n`, `\\t`, `\\\\`, `\\\"` and `\\0`",
+                                "`\\{}` is not an escape; a string literal takes `\\n`, `\\r`, `\\t`, `\\\\`, `\\\"` and `\\0`",
                                 &text[i + 1..end]
                             ),
                             Span::new(i as u32, end as u32),

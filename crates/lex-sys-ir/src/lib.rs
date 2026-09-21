@@ -1896,10 +1896,17 @@ pub fn lower(ast: &Ast) -> Result<Program, Diagnostic> {
                 }
             }
         }
+        // `Type::Unit` is allowed here and cannot arrive here: `tuples.md`
+        // §4 keeps it out of the source grammar deliberately, so no
+        // declaration can name it. The arm stays because the *check* is
+        // about layout and unit has one; the message does not mention it,
+        // because a message that names a type the grammar refuses sends a
+        // programmer to write `()` and be told there is no `()`
+        // (`docs/reach.md` §4).
         if !matches!(ret, Type::Int | Type::Bool | Type::Unit) {
             return Err(Diagnostic::new(
                 format!(
-                    "`{name}` returns `{}`, which has no agreed layout across a foreign boundary; a foreign result is `int`, `bool`, or `()`",
+                    "`{name}` returns `{}`, which has no agreed layout across a foreign boundary; a foreign result is `int` or `bool`, and a C function that returns nothing is declared `int` and its result discarded",
                     unifier.display(&ret)
                 ),
                 span,

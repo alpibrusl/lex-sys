@@ -123,10 +123,19 @@ String literals are **shared**, never unique: two occurrences of `"ok"` may
 be the same bytes, and a program that could write through one would be
 writing through both. `&static [byte]` it is.
 
-**Escapes.** M3 takes `\n`, `\t`, `\\`, `\"` and `\0`, and nothing else. No
-`\u`, because that is an encoding claim (§1), and no `\x`, because that is
-the bitwise escape hatch §2 is deferring. A backslash before anything else
-is refused where it is written rather than passed through.
+**Escapes.** The set is `\n`, `\r`, `\t`, `\\`, `\"` and `\0`, and nothing
+else. No `\u`, because that is an encoding claim (§1), and no `\x`, because
+that is the bitwise escape hatch §2 is deferring. A backslash before
+anything else is refused where it is written rather than passed through.
+
+> **`\r` was added after M3, and by a program rather than by a list.** The
+> original five left it out because nothing had asked for it, which was true
+> right up until `examples/serve/` spoke HTTP. A protocol's line ending is
+> CRLF, so without `\r` the separator had to be assembled as `byte_of(13)`
+> into a buffer — the one piece of that program that was awkward for no
+> reason anybody could defend (`docs/reach.md` §4). It is a byte with a
+> spelling, not an encoding claim, so it belongs with `\t` rather than with
+> `\u`.
 
 ---
 

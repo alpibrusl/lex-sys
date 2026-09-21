@@ -455,6 +455,7 @@ impl<'a> Parser<'a> {
             // The lexer already refused anything else.
             match chars.next().expect("the lexer checked the escape") {
                 'n' => out.push('\n'),
+                'r' => out.push('\r'),
                 't' => out.push('\t'),
                 '0' => out.push('\0'),
                 other => out.push(other),

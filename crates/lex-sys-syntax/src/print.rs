@@ -609,13 +609,14 @@ fn parenthesise(text: String, context: u8, own: u8) -> String {
 /// The AST holds a literal's *bytes*, with escapes already resolved
 /// (`canonical-ast.md` §3 keeps values, not spellings), so printing the
 /// text raw would put a real newline inside quotes — which does not
-/// reparse, because a literal may not span lines. The five escapes §4 of
-/// `docs/strings.md` admits are exactly the five that have to come back.
+/// reparse, because a literal may not span lines. The six escapes §4 of
+/// `docs/strings.md` admits are exactly the six that have to come back.
 fn escape(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for c in text.chars() {
         match c {
             '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
             '\\' => out.push_str("\\\\"),
             '"' => out.push_str("\\\""),
@@ -716,6 +717,10 @@ mod tests {
         assert_eq!(printed_expr("\"C:\\\\path\""), "\"C:\\\\path\"");
         assert_eq!(printed_expr("\"say \\\"hi\\\"\""), "\"say \\\"hi\\\"\"");
         assert_eq!(printed_expr("\"nul\\0end\""), "\"nul\\0end\"");
+        // `\r` is the sixth, added by `examples/serve/` rather than by a
+        // list: a carriage return that printed as itself would reparse as a
+        // literal spanning a line, which is refused.
+        assert_eq!(printed_expr("\"line\\r\\n\""), "\"line\\r\\n\"");
     }
 
     #[test]
