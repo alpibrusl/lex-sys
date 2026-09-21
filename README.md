@@ -193,6 +193,35 @@ library of eight modules.
 
 What is **not** there yet, and why, is [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
+### What that adds up to
+
+A REST endpoint, for one — `examples/serve/` binds a TCP port, accepts a
+connection, routes the request and answers with JSON, and the test suite
+makes the request over a real socket:
+
+```sh
+$ ./serve 8080 &
+$ curl -s http://127.0.0.1:8080/health
+{"ok":true}
+```
+
+There is no socket type, no `Net` capability and no HTTP library. Sockets
+are libc, libc has a name, and the capability that names it has existed
+since M2 — **what decides whether a program is writable here is not a
+feature list, it is whether the authority it needs has a name.**
+
+The same rule says what is out of reach, and it is one sentence: a foreign
+*result* is a scalar, so anything that hands back an opaque pointer — TLS,
+libpq, `FILE *`, `dlopen` — is not reachable yet, because a pointer from C
+carries no region and this language has no reference that lacks one.
+Threads are out for a different reason: `pthread_create` wants a function
+pointer, and there are no function values; `fork` returns an `int`, so
+several processes are fine.
+
+[`docs/reach.md`](docs/reach.md) is the measured version, including the
+place where narrowing runs out: the row says `ffi("libc")` and cannot say
+`net`, because a library is not an authority domain.
+
 ---
 
 ## Design commitments
@@ -337,7 +366,7 @@ fixture.
 
 Design lands in `docs/` **before** the code that implements it, which is the
 cheap place for it to be wrong. When it turns out wrong anyway, the document
-that made the claim is corrected in place rather than quietly edited — three
+that made the claim is corrected in place rather than quietly edited — four
 of them carry a correction now, and the roadmap says which.
 
 ## Licence

@@ -197,6 +197,29 @@ way on purpose.
 
 ## Libraries
 
+### `serve/` — a REST endpoint over a real socket
+
+The answer to *can this language do X?*, where X is the one everybody
+asks. It binds a TCP port named on the command line, accepts one
+connection, routes the request line and answers with JSON — `GET /health`
+gets a 200, anything else gets a 404.
+
+Eight `extern fn` declarations against libc and nothing else. No socket
+type, no `Net` capability, no HTTP module. The test suite makes the
+request from Rust over loopback, both routes, and checks that the
+`Content-Length` it declares is the body it sends — which it is by
+construction, because the header and the body are assembled into the same
+slice.
+
+Read `main` first: three capabilities destroyed on three lines, so a
+server that cannot touch a file, allocate on the heap or print to the
+console. Then read `serve`, which is the whole socket lifecycle with the
+capability *lent* in — it can call libc and it can do nothing else, and
+its row says so.
+
+`docs/reach.md` is the argument the program is evidence for, including
+what this **cannot** reach and why it is one sentence rather than a list.
+
 ### `buffer/` — growing, written out
 
 ```sh

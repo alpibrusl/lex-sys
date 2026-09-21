@@ -274,6 +274,7 @@ fn printing_preserves_every_identity_and_is_idempotent() {
         "examples/buffer",
         "examples/slab",
         "examples/modular",
+        "examples/serve",
         // The standard library is code, and gets the same contract every
         // other file here gets: printed, reparsed, identical hashes, and
         // a fixed point.
@@ -1999,4 +2000,144 @@ fn a_wrong_command_line_is_a_usage_error_not_a_refusal() {
     let output = Command::new(BIN).arg("frobnicate").output().expect("the compiler runs");
     assert_eq!(output.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&output.stderr).contains("usage:"));
+}
+
+/// `examples/serve/` — a REST endpoint, answered over a real TCP socket.
+///
+/// This is the test `docs/reach.md` rests on. The document's claim is that
+/// a lex-sys program can serve HTTP **today**, with no socket type, no
+/// `Net` capability and no library, and a claim like that is worth exactly
+/// what it is tested with. So the test is not "it compiles": it builds the
+/// program, runs it, connects to it from this process over loopback, and
+/// reads what comes back.
+///
+/// It runs twice because the server answers one request and exits, which
+/// is what makes it testable without a shutdown protocol — the second run
+/// is the 404, and the two together are the router.
+///
+/// The program takes its port from `argv`, so this picks one the operating
+/// system says is free rather than hard-coding a number that CI might
+/// already be using.
+#[test]
+fn an_http_server_written_in_lex_sys_answers_a_real_request() {
+    use std::io::{Read, Write as _};
+    use std::net::{TcpListener, TcpStream};
+    use std::time::{Duration, Instant};
+
+    let scratch = scratch("example-serve");
+    let exe = scratch.join("serve");
+    let build = Command::new(BIN)
+        .args([
+            "build".as_ref(),
+            repo_root().join("examples/serve/serve.ls").as_os_str(),
+            "--std".as_ref(),
+            "-o".as_ref(),
+            exe.as_os_str(),
+        ])
+        .output()
+        .expect("the compiler runs");
+    assert!(
+        build.status.success(),
+        "`serve` should compile, but the compiler said:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+
+    // `[(request target, status line, body)]` — one exchange per run.
+    let exchanges = [
+        ("/health", "HTTP/1.1 200 OK", "{\"ok\":true}"),
+        ("/nothing-here", "HTTP/1.1 404 Not Found", "{\"error\":\"not found\"}"),
+    ];
+
+    for (target, status_line, body) in exchanges {
+        // Bind and drop: the port is free at this instant, which is the
+        // best any test can say about a port it did not get from the
+        // program itself.
+        let port = TcpListener::bind("127.0.0.1:0")
+            .expect("a free loopback port")
+            .local_addr()
+            .expect("a bound address")
+            .port();
+
+        let mut child = Command::new(&exe)
+            .arg(port.to_string())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("the compiled server runs");
+
+        // The server is a process, so "listening" is not an event this
+        // test can observe — it retries the connection until the listen
+        // backlog exists or the deadline passes.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut stream = loop {
+            match TcpStream::connect(("127.0.0.1", port)) {
+                Ok(s) => break s,
+                Err(e) if Instant::now() < deadline => {
+                    let _ = e;
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(e) => {
+                    let _ = child.kill();
+                    panic!("the server never accepted a connection on {port}: {e}");
+                }
+            }
+        };
+
+        stream.set_read_timeout(Some(Duration::from_secs(10))).expect("a readable socket");
+        write!(stream, "GET {target} HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .expect("the server accepts a request");
+        let mut response = String::new();
+        stream.read_to_string(&mut response).expect("the server answers");
+
+        assert!(
+            response.starts_with(status_line),
+            "`serve` answered `{target}` with the wrong status:\n{response}"
+        );
+        assert!(
+            response.ends_with(&format!("\r\n\r\n{body}")),
+            "`serve` answered `{target}` with the wrong body:\n{response}"
+        );
+        // The length it declares and the bytes it sends come from the same
+        // slice, and this is that being true rather than assumed.
+        assert!(
+            response.contains(&format!("Content-Length: {}\r\n", body.len())),
+            "`serve` declared a length that is not the body's:\n{response}"
+        );
+
+        let run = child.wait_with_output().expect("the server exits");
+        assert_eq!(run.status.code(), Some(0), "`serve` exited wrongly after one request");
+    }
+
+    let _ = std::fs::remove_dir_all(&scratch);
+}
+
+/// And what the authority report says about it, which is §5's whole point.
+///
+/// The row is `ffi("libc")` and nothing else: exact, and silent about the
+/// network, because a library is not an authority domain. What covers the
+/// difference is the foreign symbol list — `socket`, `bind`, `listen`,
+/// `accept` are in the binary because `main` reaches them, and a
+/// supervisor reading that list knows what it is being asked to run.
+#[test]
+fn the_authority_report_names_the_syscalls_the_row_cannot() {
+    let output = Command::new(BIN)
+        .args(["authority".as_ref(), repo_root().join("examples/serve/serve.ls").as_os_str()])
+        .args(["--std", "--output", "json"])
+        .output()
+        .expect("the compiler runs");
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let report = String::from_utf8(output.stdout).expect("the report is utf-8");
+
+    // Two capabilities, and it proves the absence of the other three.
+    assert!(report.contains("\"effects\": [\"args\", \"ffi\"]"), "{report}");
+    assert!(report.contains("{ \"name\": \"ffi\", \"argument\": \"libc\" }"), "{report}");
+
+    // The row says "calls a C library". The symbols say which library
+    // calls, and those are the ones that name a socket.
+    for symbol in ["socket", "bind", "listen", "accept"] {
+        assert!(
+            report.contains(&format!("\"{symbol}\"")),
+            "the report should name `{symbol}`:\n{report}"
+        );
+    }
 }
