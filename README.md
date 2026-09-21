@@ -389,7 +389,10 @@ a conformance test pins the authority report byte-identical before and
 after, because a faster program must not be a more powerful one. Output
 is now within **1.1×** of C's `fwrite`. §4 declines the headline: the
 `base64` example gains 1.6× of that 12.8×, and names where the rest
-went.
+went — and §4.1 then corrects §4, because `examples/sort/` writes 9 MB
+and gains **1.22×**. **Volume written is not time spent writing**, and
+the gain is only ever the share of the runtime that was libc call
+overhead.
 
 **And one place it might have been ahead turned out not to be.**
 [`layout.md`](docs/layout.md) went looking for a win in the fact that
