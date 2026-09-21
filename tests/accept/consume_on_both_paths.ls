@@ -57,7 +57,7 @@ fn drain(s: Slot) -> [] int {
     }
 }
 
-fn run[&i](io: &!i Io) -> [io] int {
+fn run[&i](io: &!i Io) -> [io_write] int {
     putchar(io, 48 + either(open(5), true));
     putchar(io, 48 + either(open(2), false));
     putchar(io, 48 + take(open(5), true));

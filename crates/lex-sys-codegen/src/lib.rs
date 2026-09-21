@@ -139,6 +139,20 @@ fn leaf_count(ty: &Type, program: &Program, pointer: types::Type) -> u32 {
     leaves(ty, program, pointer).len() as u32
 }
 
+/// The two libc functions the backend imports directly rather than through
+/// an `extern fn` declaration.
+///
+/// They are the console, in both directions (`docs/standard-input.md`).
+/// Everything else a program reaches in libc goes through §8.4's `extern`
+/// machinery and arrives in `Program::externs`; these two are builtins,
+/// so the backend names them itself -- and having two rather than one is
+/// what made them worth a name.
+#[derive(Clone, Copy)]
+struct Console {
+    putchar: FuncId,
+    getchar: FuncId,
+}
+
 /// How many leaves a return value may have before it travels through memory.
 ///
 /// Two is what x86-64's SystemV ABI gives back in registers, and Cranelift
@@ -314,6 +328,24 @@ impl<'a> Emitter<'a> {
             )
             .map_err(|e| CodegenError(e.to_string()))?;
 
+        // `docs/standard-input.md` §3: the mirror. `int getchar(void)` --
+        // no parameter, and the same `i32` result that widens at the edge,
+        // which is what carries the `-1` back as a `-1` rather than as a
+        // very large unsigned number.
+        let mut getchar_sig = self.module.make_signature();
+        getchar_sig.call_conv = call_conv;
+        getchar_sig.returns.push(AbiParam::new(types::I32));
+        let getchar = self
+            .module
+            .declare_function(
+                Builtin::GetChar.symbol().expect("getchar reaches libc"),
+                Linkage::Import,
+                &getchar_sig,
+            )
+            .map_err(|e| CodegenError(e.to_string()))?;
+
+        let console = Console { putchar, getchar };
+
         // §8.4: a foreign function is an import under the symbol its
         // declaration named. Its capability parameters carry no data and so
         // never reach C; everything else crosses at lex-sys's own widths,
@@ -353,7 +385,7 @@ impl<'a> Emitter<'a> {
                     &mut self.module,
                     &declared,
                     &foreign,
-                    putchar,
+                    console,
                     func,
                     program,
                 );
@@ -452,7 +484,7 @@ struct BodyEmitter<'a, 'f> {
     declared: &'a [FuncId],
     /// The foreign imports, in `Program::externs` order.
     foreign: &'a [FuncId],
-    putchar: FuncId,
+    console: Console,
     func: &'a Func,
     program: &'a Program,
     /// The buffer this function writes its result into, when its return type
@@ -482,7 +514,7 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
         module: &'a mut ObjectModule,
         declared: &'a [FuncId],
         foreign: &'a [FuncId],
-        putchar: FuncId,
+        console: Console,
         func: &'a Func,
         program: &'a Program,
     ) -> Self {
@@ -498,7 +530,7 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
             module,
             declared,
             foreign,
-            putchar,
+            console,
             func,
             program,
             return_pointer: None,
@@ -1853,9 +1885,23 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
                         vec![text, length]
                     }
                     Callee::Builtin(Builtin::PutChar) => {
-                        let f = self.module.declare_func_in_func(self.putchar, self.builder.func);
+                        let f = self
+                            .module
+                            .declare_func_in_func(self.console.putchar, self.builder.func);
                         let arg = self.builder.ins().ireduce(types::I32, args[0]);
                         let call = self.builder.ins().call(f, &[arg]);
+                        let result = self.builder.inst_results(call)[0];
+                        vec![self.builder.ins().sextend(types::I64, result)]
+                    }
+                    // Sign-extended, not zero-extended: `EOF` is `-1` and
+                    // zero-extending would hand the program 4294967295,
+                    // which is a byte-range check that silently never
+                    // fires.
+                    Callee::Builtin(Builtin::GetChar) => {
+                        let f = self
+                            .module
+                            .declare_func_in_func(self.console.getchar, self.builder.func);
+                        let call = self.builder.ins().call(f, &[]);
                         let result = self.builder.inst_results(call)[0];
                         vec![self.builder.ins().sextend(types::I64, result)]
                     }
@@ -1946,7 +1992,7 @@ mod tests {
     use lex_sys_syntax::parse;
     use object::{Object, ObjectSymbol, SymbolKind};
 
-    const SOURCE: &str = "fn shout[&i](io: &!i Io) -> [io] int { return putchar(io, 33); } \
+    const SOURCE: &str = "fn shout[&i](io: &!i Io) -> [io_write] int { return putchar(io, 33); } \
                           fn main(world: World) -> [] int { \
                               let Split { io, ffi, fs, heap, args } = split(world); release(args); release(heap); release(fs); release(ffi); \
                               var status = 0; \

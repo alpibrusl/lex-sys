@@ -23,15 +23,15 @@
 
 // ------------------------------------------------------------- output ----
 
-fn space[&i](io: &!i Io) -> [io] int {
+fn space[&i](io: &!i Io) -> [io_write] int {
     return putchar(io, 32);
 }
 
-fn newline[&i](io: &!i Io) -> [io] int {
+fn newline[&i](io: &!i Io) -> [io_write] int {
     return putchar(io, 10);
 }
 
-fn write_all[&r, &i](io: &!i Io, s: &r [byte]) -> [io] int {
+fn write_all[&r, &i](io: &!i Io, s: &r [byte]) -> [io_write] int {
     var n = 0;
     while n < len(s) {
         putchar(io, int_of(s[n]));
@@ -40,7 +40,7 @@ fn write_all[&r, &i](io: &!i Io, s: &r [byte]) -> [io] int {
     return len(s);
 }
 
-fn print_nat[&i](io: &!i Io, n: int) -> [io] int {
+fn print_nat[&i](io: &!i Io, n: int) -> [io_write] int {
     if n >= 10 {
         print_nat(io, n / 10);
     }
@@ -49,7 +49,7 @@ fn print_nat[&i](io: &!i Io, n: int) -> [io] int {
 
 // A label, then the number right-aligned in a small field. Three calls to
 // this is the whole report.
-fn row[&r, &i](io: &!i Io, label: &r [byte], value: int, width: int) -> [io] int {
+fn row[&r, &i](io: &!i Io, label: &r [byte], value: int, width: int) -> [io_write] int {
     write_all(io, label);
     var pad = width - len(label);
     while pad > 0 {
@@ -185,7 +185,7 @@ fn count_word[&r, &n](text: &r [byte], needle: &n [byte]) -> [] int {
 
 // ------------------------------------------------------------- report ----
 
-fn report[&i](io: &!i Io) -> [io] int {
+fn report[&i](io: &!i Io) -> [io_write] int {
     let text = document();
     write_all(io, text);
     write_all(io, "--\n");

@@ -16,7 +16,7 @@
 // A string is `&r [byte]`: an ordinary slice, so an ordinary reference.
 // `len` reads the length that travels beside the pointer, and every index
 // is bounds-checked.
-fn write_all[&r, &i](io: &!i Io, s: &r [byte]) -> [io] int {
+fn write_all[&r, &i](io: &!i Io, s: &r [byte]) -> [io_write] int {
     var n = 0;
     while n < len(s) {
         putchar(io, int_of(s[n]));

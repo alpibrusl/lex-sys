@@ -13,11 +13,11 @@
 //~ STDOUT evens: 2 4 6
 //~ EXIT 0
 
-fn space[&i](io: &!i Io) -> [io] int {
+fn space[&i](io: &!i Io) -> [io_write] int {
     return putchar(io, 32);
 }
 
-fn print_nat[&i](io: &!i Io, n: int) -> [io] int {
+fn print_nat[&i](io: &!i Io, n: int) -> [io_write] int {
     if n >= 10 {
         print_nat(io, n / 10);
     }
@@ -36,7 +36,7 @@ fn total[&r](xs: &r [int]) -> [] int {
     return sum;
 }
 
-fn show[&r, &i](io: &!i Io, xs: &r [int]) -> [io] int {
+fn show[&r, &i](io: &!i Io, xs: &r [int]) -> [io_write] int {
     var i = 0;
     while i < len(xs) {
         if i > 0 {
@@ -61,7 +61,7 @@ fn squares[&r](xs: &!r [int]) -> [] int {
     return len(xs);
 }
 
-fn run[&i](io: &!i Io) -> [io] int {
+fn run[&i](io: &!i Io) -> [io_write] int {
     var answer = 0;
     region a {
         // Five elements, all zero to begin with. The length is a runtime

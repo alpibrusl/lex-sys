@@ -2,7 +2,7 @@
 //~ STDOUT 7531
 //~ EXIT 0
 
-fn run[&i](io: &!i Io) -> [io] int {
+fn run[&i](io: &!i Io) -> [io_write] int {
     putchar(io, 48 + 1 + 2 * 3);         // precedence: 7
     putchar(io, 48 + (10 - 3 - 2));      // left-associative: 5
     putchar(io, 48 + (-6 / 2 + 6));      // truncating division: 3

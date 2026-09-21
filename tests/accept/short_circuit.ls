@@ -5,12 +5,12 @@
 //~ STDOUT ab
 //~ EXIT 0
 
-fn noisy[&i](io: &!i Io) -> [io] bool {
+fn noisy[&i](io: &!i Io) -> [io_write] bool {
     putchar(io, 88);                     // 'X'
     return true;
 }
 
-fn run[&i](io: &!i Io) -> [io] int {
+fn run[&i](io: &!i Io) -> [io_write] int {
     if false && noisy(io) {
         putchar(io, 63);                 // '?'
     }

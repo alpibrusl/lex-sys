@@ -26,7 +26,7 @@ fn close(f: File) -> [] int {
     return fd;
 }
 
-fn run[&i](io: &!i Io) -> [io] int {
+fn run[&i](io: &!i Io) -> [io_write] int {
     let straight = open(7);
     putchar(io, 48 + close(straight));
 

@@ -14,7 +14,7 @@
 //~ STDOUT named: 1
 //~ EXIT 0
 
-fn write_all[&r, &i](io: &!i Io, s: &r [byte]) -> [io] int {
+fn write_all[&r, &i](io: &!i Io, s: &r [byte]) -> [io_write] int {
     var n = 0;
     while n < len(s) {
         putchar(io, int_of(s[n]));
@@ -23,19 +23,19 @@ fn write_all[&r, &i](io: &!i Io, s: &r [byte]) -> [io] int {
     return len(s);
 }
 
-fn print_nat[&i](io: &!i Io, n: int) -> [io] int {
+fn print_nat[&i](io: &!i Io, n: int) -> [io_write] int {
     if n >= 10 {
         print_nat(io, n / 10);
     }
     return putchar(io, 48 + n % 10);
 }
 
-// The row is the documentation: `[args, io]` says this function reads the
+// The row is the documentation: `[args, io_write]` says this function reads the
 // command line *and* writes to the console, and a caller holding neither
 // capability cannot reach it. That visibility is the whole reason reading
 // argv is an effect (§2) -- not that it is dangerous, but that a function
 // whose behaviour depends on the command line should say so.
-fn report[&a, &i](args: &a Args, io: &!i Io) -> [args, io] int {
+fn report[&a, &i](args: &a Args, io: &!i Io) -> [args, io_write] int {
     let count = arg_count(args);
     print_nat(io, count);
     putchar(io, 10);

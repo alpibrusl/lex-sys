@@ -2,7 +2,7 @@
 //~ STDOUT ba
 //~ EXIT 0
 
-fn run[&i](io: &!i Io) -> [io] int {
+fn run[&i](io: &!i Io) -> [io_write] int {
     let x = 97;
     if true {
         let x = 98;

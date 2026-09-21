@@ -21,7 +21,7 @@ fn bump[&r](c: &!r Counter) -> [] int {
     return c.n;
 }
 
-fn run[&i](io: &!i Io) -> [io] int {
+fn run[&i](io: &!i Io) -> [io_write] int {
     var c = Counter { n: 1, step: 2 };
 
     borrow mut c as &!r in {

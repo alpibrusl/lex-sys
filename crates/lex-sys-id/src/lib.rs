@@ -437,7 +437,7 @@ fn hash_signature(ast: &Ast, decl: &FnDecl, type_ids: &HashMap<Symbol, Hash>) ->
         encoder.u32(position(outer));
     }
     // The row is what a caller depends on as much as the types are: `[]`
-    // means the call is pure and `[io]` means it is not, and a caller's own
+    // means the call is pure and `[io_write]` means it is not, and a caller's own
     // row has to contain it. Sorted here rather than trusted, so two
     // spellings of one set are one signature.
     encoder.tag(tag::EFFECTS);
@@ -1273,10 +1273,10 @@ mod tests {
     #[test]
     fn a_row_is_part_of_a_signature() {
         // A caller depends on it as much as on the types: `[]` means the call
-        // is pure and `[io]` means the caller's own row has to contain it.
+        // is pure and `[io_write]` means the caller's own row has to contain it.
         assert_ne!(
             sig("fn f() -> [] int { return 0; }", "f"),
-            sig("fn f() -> [io] int { return putchar(0); }", "f")
+            sig("fn f() -> [io_write] int { return putchar(0); }", "f")
         );
     }
 
@@ -1285,24 +1285,24 @@ mod tests {
         // §7.1: a *set*, canonically ordered. Two spellings of one set are
         // one signature, which is what makes the row hashable at all.
         assert_eq!(
-            sig("fn f() -> [fs, io] int { return 0; }", "f"),
-            sig("fn f() -> [io, fs] int { return 0; }", "f")
+            sig("fn f() -> [fs, io_write] int { return 0; }", "f"),
+            sig("fn f() -> [io_write, fs] int { return 0; }", "f")
         );
     }
 
     #[test]
     fn a_duplicate_label_does_not_reach_the_hash() {
         assert_eq!(
-            sig("fn f() -> [io] int { return 0; }", "f"),
-            sig("fn f() -> [io, io] int { return 0; }", "f")
+            sig("fn f() -> [io_write] int { return 0; }", "f"),
+            sig("fn f() -> [io_write, io_write] int { return 0; }", "f")
         );
     }
 
     #[test]
     fn a_wider_row_is_a_different_signature() {
         assert_ne!(
-            sig("fn f() -> [io] int { return 0; }", "f"),
-            sig("fn f() -> [fs, io] int { return 0; }", "f")
+            sig("fn f() -> [io_write] int { return 0; }", "f"),
+            sig("fn f() -> [fs, io_write] int { return 0; }", "f")
         );
     }
 
@@ -1312,7 +1312,7 @@ mod tests {
         // change has not changed.
         assert_eq!(
             body("fn f() -> [] int { return 1 + 1; }", "f"),
-            body("fn f() -> [io] int { return 1 + 1; }", "f")
+            body("fn f() -> [io_write] int { return 1 + 1; }", "f")
         );
     }
 

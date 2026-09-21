@@ -11,7 +11,7 @@ fn digit(b: bool) -> [] int {
     }
 }
 
-fn run[&i](io: &!i Io) -> [io] int {
+fn run[&i](io: &!i Io) -> [io_write] int {
     putchar(io, digit(2 < 3));
     putchar(io, digit(3 <= 2));
     putchar(io, digit(4 == 4));

@@ -185,13 +185,26 @@ impl fmt::Display for Effects {
 /// an effect, and an effect must be granted.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Builtin {
-    /// `putchar[&i](io: &!i Io, c: int) -> [io] int` — libc's `putchar`,
+    /// `putchar[&i](io: &!i Io, c: int) -> [io_write] int` — libc's `putchar`,
     /// byte for byte, behind the capability that authorises it.
     ///
     /// The `Io` is not passed to libc and has no runtime representation. It
     /// is there so that a function which does not hold one cannot call this,
     /// which is the whole safety story stated as a type (§8.2).
     PutChar,
+    /// `getchar[&i](io: &!i Io) -> [io_read] int` — libc's `getchar`, one
+    /// byte in, behind the capability that authorises it.
+    ///
+    /// `docs/standard-input.md`. The mirror of [`Builtin::PutChar`] in
+    /// every respect: the same capability, the other direction, its own
+    /// effect label, and the `Io` erased on the way to libc because it
+    /// carries no data.
+    ///
+    /// `-1` at end of input. A byte is 0..255, so the sentinel cannot be
+    /// one — which is why C's `getchar` returns `int` too — and it matches
+    /// `fs_read`'s `-1` for a file that could not be read. §3.1 says why
+    /// an enum would be better and §6 keeps it open.
+    GetChar,
     /// `split(w: World) -> [] Split` — consumes the root of all authority
     /// and hands back its parts (§8.2).
     ///
@@ -317,6 +330,7 @@ pub enum Builtin {
 impl Builtin {
     pub const ALL: &'static [Builtin] = &[
         Builtin::PutChar,
+        Builtin::GetChar,
         Builtin::Split,
         Builtin::Release,
         Builtin::Narrow,
@@ -340,6 +354,7 @@ impl Builtin {
     pub fn name(self) -> &'static str {
         match self {
             Builtin::PutChar => "putchar",
+            Builtin::GetChar => "getchar",
             Builtin::Split => "split",
             Builtin::Release => "release",
             Builtin::Narrow => "narrow",
@@ -369,6 +384,7 @@ impl Builtin {
     pub fn symbol(self) -> Option<&'static str> {
         match self {
             Builtin::PutChar => Some("putchar"),
+            Builtin::GetChar => Some("getchar"),
             _ => None,
         }
     }
@@ -385,7 +401,7 @@ impl Builtin {
             // Each of these takes a borrowed capability first. It is
             // leaf-free, so it contributes no values either way, and
             // skipping it keeps the argument positions honest.
-            Builtin::PutChar | Builtin::ArgCount | Builtin::Arg => 1,
+            Builtin::PutChar | Builtin::GetChar | Builtin::ArgCount | Builtin::Arg => 1,
             _ => 0,
         }
     }
@@ -399,7 +415,7 @@ impl Builtin {
     /// from inside a `borrow` block, which is a confusing way to find out.
     pub fn regions(self) -> usize {
         match self {
-            Builtin::PutChar | Builtin::ArgCount | Builtin::Arg => 1,
+            Builtin::PutChar | Builtin::GetChar | Builtin::ArgCount | Builtin::Arg => 1,
             _ => 0,
         }
     }
@@ -420,6 +436,15 @@ impl Builtin {
                     },
                     Type::Int,
                 ],
+                Type::Int,
+            ),
+            // The mirror: the same borrowed `Io`, no character to take.
+            Builtin::GetChar => (
+                vec![Type::Ref {
+                    unique: true,
+                    region: Region::Param(0),
+                    inner: Box::new(named(PRELUDE_IO)),
+                }],
                 Type::Int,
             ),
             Builtin::Split => (vec![named(PRELUDE_WORLD)], named(PRELUDE_SPLIT)),
@@ -477,13 +502,18 @@ impl Builtin {
 
     /// What performing this builtin costs a caller's row.
     ///
-    /// `putchar` writes to the console, so it performs `io`. This is the
-    /// *grounding* of the whole system: every `io` in every row above it
+    /// `putchar` writes to the console, so it performs `io_write`. This is the
+    /// *grounding* of the whole system: every `io_write` in every row above it
     /// traces back here, because a label nothing performs can never appear
     /// in an exact row (§7.3).
     pub fn effects(self) -> Effects {
         match self {
-            Builtin::PutChar => Effects::plain(["io"]),
+            Builtin::PutChar => Effects::plain(["io_write"]),
+            // `docs/standard-input.md` §2: the same capability, the other
+            // direction, its own label. A row saying `[io_write]` does not
+            // permit a read, which is what makes the two labels a
+            // distinction rather than a spelling.
+            Builtin::GetChar => Effects::plain(["io_read"]),
             // `docs/heap.md` §2. Both reach the allocator, so both perform
             // `heap`; `contents` is a load and performs nothing.
             Builtin::Box | Builtin::Unbox | Builtin::BoxSlice | Builtin::UnboxSlice => {
@@ -1158,12 +1188,12 @@ pub fn extends_path(prefix: &str, target: &str) -> bool {
 
 /// What owning a value of this type authorises outright (§8.2).
 ///
-/// Owning `Io` discharges `io`. Owning `World` discharges everything a
+/// Owning `Io` discharges `io_read` and `io_write`. Owning `World` discharges everything a
 /// `World` can be split into, because `split` is a function anyone holding
 /// one may call — authority you can reach is authority you have.
 ///
 /// A *borrowed* capability discharges nothing: `&!i Io` is precisely what
-/// `[io]` on a signature means, so counting it here would make every row
+/// `[io_write]` on a signature means, so counting it here would make every row
 /// empty and the whole section decoration.
 fn discharged_by(defs: &[TypeDef], ty: &Type) -> Effects {
     let Type::Named(def, args) = ty else {
@@ -1174,7 +1204,9 @@ fn discharged_by(defs: &[TypeDef], ty: &Type) -> Effects {
         return Effects::pure();
     }
     match index {
-        PRELUDE_IO => Effects::plain(["io"]),
+        // `docs/standard-input.md` §2.2: owning an `Io` outright discharges
+        // both directions, the way owning an `Fs` discharges both of its.
+        PRELUDE_IO => Effects::plain(["io_read", "io_write"]),
         // `docs/heap.md` §2: one plain label, because a heap has no parts to
         // name and so nothing to narrow.
         PRELUDE_HEAP => Effects::plain(["heap"]),
@@ -1187,7 +1219,7 @@ fn discharged_by(defs: &[TypeDef], ty: &Type) -> Effects {
         // declaring `[]` is not a gap in the row — it is the parameter list
         // saying something stronger.
         PRELUDE_WORLD => {
-            let mut all = Effects::plain(["io", "heap", "args"]);
+            let mut all = Effects::plain(["io_read", "io_write", "heap", "args"]);
             for name in ["ffi", "fs_read", "fs_write"] {
                 all.union(&Effects::new([Label {
                     name: name.to_owned(),
@@ -4865,7 +4897,7 @@ mod tests {
     #[test]
     fn an_inner_block_may_shadow() {
         let f = main_fn(
-            "fn main[&i](io: &!i Io) -> [io] int { \
+            "fn main[&i](io: &!i Io) -> [io_write] int { \
              let x = 1; if true { let x = 2; putchar(io, x); } return x; }",
         );
         // The capability, `x`, and the shadowing `x`.
@@ -5016,7 +5048,7 @@ mod tests {
     #[test]
     fn an_argument_must_match_the_parameter() {
         assert!(
-            error("fn f[&i](io: &!i Io) -> [io] int { return putchar(io, true); }")
+            error("fn f[&i](io: &!i Io) -> [io_write] int { return putchar(io, true); }")
                 .contains("expected `int`, found `bool`")
         );
     }
@@ -5545,25 +5577,26 @@ mod effect_tests {
             "fn quiet[&i](io: &!i Io) -> [] int { putchar(io, 65); return 0; } \
              fn main() -> [] int { return 0; }",
         );
-        assert!(message.contains("performs `io`"), "{message}");
+        assert!(message.contains("performs `io_write`"), "{message}");
     }
 
     #[test]
     fn an_over_wide_row_is_an_error_not_a_warning() {
-        let message = refused("fn f() -> [io] int { return 1; } fn main() -> [] int { return 0; }");
+        let message =
+            refused("fn f() -> [io_write] int { return 1; } fn main() -> [] int { return 0; }");
         assert!(message.contains("never performs it"), "{message}");
     }
 
     #[test]
     fn a_row_is_transitive() {
         let message = refused(
-            "fn shout[&i](io: &!i Io) -> [io] int { return putchar(io, 33); } \
+            "fn shout[&i](io: &!i Io) -> [io_write] int { return putchar(io, 33); } \
              fn caller[&i](io: &!i Io) -> [] int { return shout(io); }",
         );
-        assert!(message.contains("`caller` performs `io`"), "{message}");
+        assert!(message.contains("`caller` performs `io_write`"), "{message}");
         accepted(
-            "fn shout[&i](io: &!i Io) -> [io] int { return putchar(io, 33); } \
-             fn caller[&i](io: &!i Io) -> [io] int { return shout(io); }",
+            "fn shout[&i](io: &!i Io) -> [io_write] int { return putchar(io, 33); } \
+             fn caller[&i](io: &!i Io) -> [io_write] int { return shout(io); }",
         );
     }
 
@@ -5579,8 +5612,8 @@ mod effect_tests {
     #[test]
     fn a_duplicate_label_is_the_same_row() {
         accepted(
-            "fn f[&i](io: &!i Io) -> [io, io] int { return putchar(io, 33); } \
-             fn caller[&i](io: &!i Io) -> [io] int { return f(io); }",
+            "fn f[&i](io: &!i Io) -> [io_write, io_write] int { return putchar(io, 33); } \
+             fn caller[&i](io: &!i Io) -> [io_write] int { return f(io); }",
         );
     }
 
@@ -5588,7 +5621,7 @@ mod effect_tests {
     fn a_pure_helper_inside_an_effectful_body_adds_nothing() {
         accepted(
             "fn double(n: int) -> [] int { return n * 2; } \
-             fn main[&i](io: &!i Io) -> [io] int { return putchar(io, double(20)); }",
+             fn main[&i](io: &!i Io) -> [io_write] int { return putchar(io, double(20)); }",
         );
     }
 
@@ -5601,7 +5634,7 @@ mod effect_tests {
             "fn f[&i](io: &!i Io, c: bool) -> [] int { if c { putchar(io, 65); } return 0; } \
              fn main() -> [] int { return 0; }",
         );
-        assert!(message.contains("performs `io`"), "{message}");
+        assert!(message.contains("performs `io_write`"), "{message}");
     }
 
     #[test]
@@ -5610,7 +5643,7 @@ mod effect_tests {
         // one row however many copies the backend emits.
         let program = accepted(
             "fn id[T](x: T) -> [] T { return x; } \
-             fn main[&i](io: &!i Io) -> [io] int { return putchar(io, id(65)) - 65; }",
+             fn main[&i](io: &!i Io) -> [io_write] int { return putchar(io, id(65)) - 65; }",
         );
         let copies: Vec<&str> =
             program.funcs.iter().map(|f| f.name.as_str()).filter(|n| n.starts_with("id")).collect();
@@ -5622,9 +5655,9 @@ mod effect_tests {
     #[test]
     fn the_row_reaches_the_lowered_function() {
         let program =
-            accepted("fn main[&i](io: &!i Io) -> [io] int { return putchar(io, 65) - 65; }");
+            accepted("fn main[&i](io: &!i Io) -> [io_write] int { return putchar(io, 65) - 65; }");
         let main = program.func(program.find("main").expect("main"));
-        assert_eq!(main.effects.to_string(), "[io]");
+        assert_eq!(main.effects.to_string(), "[io_write]");
     }
 }
 
@@ -5679,7 +5712,7 @@ mod capability_tests {
     #[test]
     fn a_released_capability_cannot_be_used_again() {
         let message = refused(
-            "fn greet[&i](io: &!i Io) -> [io] int { return putchar(io, 65); } \
+            "fn greet[&i](io: &!i Io) -> [io_write] int { return putchar(io, 65); } \
              fn main(world: World) -> [] int { let Split { io, ffi, fs, heap, args } = split(world); release(args); release(heap); release(fs); release(ffi); \
              release(io); borrow mut io as &!i in { greet(i); } return 0; }",
         );
@@ -5701,7 +5734,7 @@ mod capability_tests {
         // row is still `[]`, because it owns the authority outright -- and
         // that is visible in the parameter list rather than in the row.
         let program = accepted(
-            "fn greet[&i](io: &!i Io) -> [io] int { return putchar(io, 65); } \
+            "fn greet[&i](io: &!i Io) -> [io_write] int { return putchar(io, 65); } \
              fn main(world: World) -> [] int { let Split { io, ffi, fs, heap, args } = split(world); release(args); release(heap); release(fs); release(ffi); \
              borrow mut io as &!i in { greet(i); } release(io); return 0; }",
         );
@@ -5714,7 +5747,7 @@ mod capability_tests {
         // The other half of the same rule, and the one that keeps every row
         // in the program from being empty.
         let message = refused("fn quiet[&i](io: &!i Io) -> [] int { putchar(io, 65); return 0; }");
-        assert!(message.contains("performs `io`"), "{message}");
+        assert!(message.contains("performs `io_write`"), "{message}");
     }
 
     #[test]
@@ -7558,6 +7591,85 @@ mod linearity_tests {
              let (a, a) = (1, 2); return a; }",
         );
         assert!(message.contains("bound twice in this pattern"), "{message}");
+    }
+
+    // ---- standard input (`docs/standard-input.md`) ---------------------
+
+    /// §2.1: the two labels are a distinction, not a spelling.
+    ///
+    /// This is the test the whole rename exists for. If a row saying
+    /// `[io_write]` let a function read, a caller reading that row would
+    /// learn nothing about whether its input is being consumed -- and the
+    /// row would be decoration, which §7.3 says it must never be.
+    #[test]
+    fn a_write_row_does_not_permit_a_read_or_the_other_way() {
+        let reading = refused(
+            "fn sink[&i](io: &!i Io) -> [io_write] int { return getchar(io); } \
+             fn main(world: World) -> [] int { \
+             let Split { io, ffi, fs, heap, args } = split(world); \
+             release(args); release(ffi); release(fs); release(heap); release(io); return 0; }",
+        );
+        assert!(reading.contains("performs `io_read`"), "{reading}");
+        assert!(reading.contains("[io_write]"), "the row it had is named: {reading}");
+
+        let writing = refused(
+            "fn source[&i](io: &!i Io) -> [io_read] int { return putchar(io, 65); } \
+             fn main(world: World) -> [] int { \
+             let Split { io, ffi, fs, heap, args } = split(world); \
+             release(args); release(ffi); release(fs); release(heap); release(io); return 0; }",
+        );
+        assert!(writing.contains("performs `io_write`"), "{writing}");
+
+        // Both declared, both performed: exact, which is what §7.3 wants.
+        accepted(
+            "fn both[&i](io: &!i Io) -> [io_read, io_write] int { \
+             let c = getchar(io); return putchar(io, c); } \
+             fn main(world: World) -> [] int { \
+             let Split { io, ffi, fs, heap, args } = split(world); \
+             release(args); release(ffi); release(fs); release(heap); \
+             var n = 0; borrow mut io as &!i in { n = both(i); } release(io); return 0; }",
+        );
+    }
+
+    /// §2.2: owning an `Io` outright discharges *both* labels.
+    ///
+    /// "Owning discharges, borrowing declares" did not change, and adding
+    /// a second label to a capability is the first time that rule had more
+    /// than one label to discharge for anything but `Fs`. `main` owns the
+    /// `Io`, reads and writes through it, and its row is still `[]`.
+    #[test]
+    fn owning_the_console_discharges_both_directions() {
+        let program = lower_src(
+            "fn main(world: World) -> [] int { \
+             let Split { io, ffi, fs, heap, args } = split(world); \
+             release(args); release(ffi); release(fs); release(heap); \
+             var c = 0; \
+             borrow mut io as &!i in { c = getchar(i); putchar(i, c); } \
+             release(io); return 0; }",
+        )
+        .expect("this should be accepted");
+        let main = program.func(program.find("main").expect("main"));
+        assert!(main.effects.is_pure(), "owning discharges: {}", main.effects);
+    }
+
+    /// §3: `getchar` counts its region parameter.
+    ///
+    /// A builtin that forgets to keeps `Region::Param(0)` rigid, and then
+    /// the call works from a region-polymorphic function and fails inside
+    /// a `borrow` block -- which is how it was found the last time, and is
+    /// why `every_capability_taking_builtin_counts_its_region` exists.
+    /// This is the same claim for the newest one, exercised both ways.
+    #[test]
+    fn getchar_works_from_a_borrow_block_and_from_a_polymorphic_function() {
+        accepted(
+            "fn peek[&i](io: &!i Io) -> [io_read] int { return getchar(io); } \
+             fn main(world: World) -> [] int { \
+             let Split { io, ffi, fs, heap, args } = split(world); \
+             release(args); release(ffi); release(fs); release(heap); \
+             var c = 0; \
+             borrow mut io as &!i in { c = getchar(i) + peek(i); } \
+             release(io); return 0; }",
+        );
     }
 
     #[test]

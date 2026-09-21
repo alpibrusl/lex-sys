@@ -63,7 +63,7 @@ fn run[&h, &f, &g, &i](
     fs: &f Fs(""),
     args: &g Args,
     io: &!i Io,
-) -> [args, fs_read(""), fs_write(""), heap, io] int {
+) -> [args, fs_read(""), fs_write(""), heap, io_write] int {
     var distinct = 0;
     region a {
         let text = alloc_slice[a](4096, byte_of(0));

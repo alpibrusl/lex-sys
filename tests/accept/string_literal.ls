@@ -10,7 +10,7 @@
 //~ STDOUT 13 5
 //~ EXIT 0
 
-fn print_nat[&i](io: &!i Io, n: int) -> [io] int {
+fn print_nat[&i](io: &!i Io, n: int) -> [io_write] int {
     if n >= 10 {
         print_nat(io, n / 10);
     }
@@ -19,7 +19,7 @@ fn print_nat[&i](io: &!i Io, n: int) -> [io] int {
 
 // A byte at a time, which is all `putchar` can take. §6's `write` takes the
 // whole slice at once; this shows the slice itself.
-fn write_all[&r, &i](io: &!i Io, s: &r [byte]) -> [io] int {
+fn write_all[&r, &i](io: &!i Io, s: &r [byte]) -> [io_write] int {
     var n = 0;
     while n < len(s) {
         putchar(io, int_of(s[n]));

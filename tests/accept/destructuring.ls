@@ -49,7 +49,7 @@ fn unwrap[T](h: Held[T]) -> [] T {
     return value;
 }
 
-fn run[&i](io: &!i Io) -> [io] int {
+fn run[&i](io: &!i Io) -> [io_write] int {
     putchar(io, 48 + sum(Point { x: 1, y: 2 }) - 0);
     putchar(io, 48 + unwrap(Held { value: 4 }));
     putchar(io, 48 + close_both(Pair { left: File { fd: 1 }, right: File { fd: 2 } }) / 10);

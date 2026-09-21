@@ -11,7 +11,7 @@
 //~ STDOUT same
 //~ EXIT 0
 
-fn write_all[&r, &i](io: &!i Io, s: &r [byte]) -> [io] int {
+fn write_all[&r, &i](io: &!i Io, s: &r [byte]) -> [io_write] int {
     var n = 0;
     while n < len(s) {
         putchar(io, int_of(s[n]));
@@ -20,7 +20,7 @@ fn write_all[&r, &i](io: &!i Io, s: &r [byte]) -> [io] int {
     return len(s);
 }
 
-fn print_nat[&i](io: &!i Io, n: int) -> [io] int {
+fn print_nat[&i](io: &!i Io, n: int) -> [io_write] int {
     if n >= 10 {
         print_nat(io, n / 10);
     }
@@ -50,7 +50,7 @@ fn same[&a, &b](left: &a [byte], right: &b [byte], count: int) -> [] bool {
 fn roundtrip[&f, &i](
     fs: &f Fs("/tmp"),
     io: &!i Io,
-) -> [fs_read("/tmp"), fs_write("/tmp"), io] int {
+) -> [fs_read("/tmp"), fs_write("/tmp"), io_write] int {
     let contents = "round trip\n";
     let wrote = fs_write(fs, "/tmp/lex-sys-roundtrip.txt", contents);
     write_all(io, "wrote ");

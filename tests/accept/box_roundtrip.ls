@@ -11,7 +11,7 @@
 //~ STDOUT 10 4
 //~ EXIT 0
 
-fn print_nat[&i](io: &!i Io, n: int) -> [io] int {
+fn print_nat[&i](io: &!i Io, n: int) -> [io_write] int {
     if n >= 10 {
         print_nat(io, n / 10);
     }
@@ -20,7 +20,7 @@ fn print_nat[&i](io: &!i Io, n: int) -> [io] int {
 
 struct Point { x: int, y: int }
 
-fn run[&h, &i](heap: &!h Heap, io: &!i Io) -> [heap, io] int {
+fn run[&h, &i](heap: &!h Heap, io: &!i Io) -> [heap, io_write] int {
     // One `malloc`. The box is a `res` value from here on, so the program
     // owes exactly one `unbox` on every path out of this function.
     let b = box(heap, Point { x: 3, y: 4 });

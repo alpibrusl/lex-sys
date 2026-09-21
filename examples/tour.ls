@@ -30,7 +30,7 @@
 // slices are what change this.
 //
 // Every signature below declares an effect row between `->` and the return
-// type. `[]` is how a function says it is pure; `[io]` says it reaches the
+// type. `[]` is how a function says it is pure; `[io_write]` says it reaches the
 // console. The row is *exact* -- declaring an effect you do not perform is
 // as much an error as performing one you did not declare -- and it is
 // transitive.
@@ -40,15 +40,15 @@
 // to print or it cannot print, and `main` at the bottom of this file is the
 // only place any of it comes from.
 
-fn newline[&i](io: &!i Io) -> [io] int {
+fn newline[&i](io: &!i Io) -> [io_write] int {
     return putchar(io, 10);
 }
 
-fn space[&i](io: &!i Io) -> [io] int {
+fn space[&i](io: &!i Io) -> [io_write] int {
     return putchar(io, 32);
 }
 
-fn print_nat[&i](io: &!i Io, n: int) -> [io] int {
+fn print_nat[&i](io: &!i Io, n: int) -> [io_write] int {
     if n >= 10 {
         print_nat(io, n / 10);
     }
@@ -59,12 +59,12 @@ fn print_nat[&i](io: &!i Io, n: int) -> [io] int {
 // Functions, arithmetic, `if`/`else`, `while`, and `let`/`var` bindings.
 // `let` is immutable; parameters are too.
 
-fn label_m0[&i](io: &!i Io) -> [io] int {
+fn label_m0[&i](io: &!i Io) -> [io_write] int {
     putchar(io, 77); putchar(io, 48); putchar(io, 58);      // "M0:"
     return 0;
 }
 
-fn m0[&i](io: &!i Io) -> [io] int {
+fn m0[&i](io: &!i Io) -> [io_write] int {
     label_m0(io);
     space(io); print_nat(io, 1 + 2 * 3);              // precedence: 7
     space(io); print_nat(io, 10 - 3 - 2);             // left-associative: 5
@@ -77,14 +77,14 @@ fn m0[&i](io: &!i Io) -> [io] int {
 // A comparison has a type. `if` and `while` require it, and there is no
 // conversion in either direction. `&&` and `||` short-circuit.
 
-fn digit[&i](io: &!i Io, b: bool) -> [io] int {
+fn digit[&i](io: &!i Io, b: bool) -> [io_write] int {
     if b {
         return putchar(io, 49);
     }
     return putchar(io, 48);
 }
 
-fn m1_bool[&i](io: &!i Io) -> [io] int {
+fn m1_bool[&i](io: &!i Io) -> [io_write] int {
     putchar(io, 77); putchar(io, 49); space(io);            // "M1 "   // "M1:"
     putchar(io, 98); putchar(io, 111); putchar(io, 111); putchar(io, 108); putchar(io, 58); space(io);
     digit(io, 2 < 3);
@@ -109,7 +109,7 @@ fn length_squared(v: Vec2) -> [] int {
     return v.x * v.x + v.y * v.y;
 }
 
-fn m1_struct[&i](io: &!i Io) -> [io] int {
+fn m1_struct[&i](io: &!i Io) -> [io_write] int {
     let v = Vec2 { x: 3, y: 4 };
     putchar(io, 77); putchar(io, 49); space(io);            // "M1 "
     putchar(io, 115); putchar(io, 116); putchar(io, 114); putchar(io, 117); putchar(io, 99);
@@ -138,7 +138,7 @@ fn area(s: Shape) -> [] int {
     }
 }
 
-fn m1_enum[&i](io: &!i Io) -> [io] int {
+fn m1_enum[&i](io: &!i Io) -> [io_write] int {
     putchar(io, 77); putchar(io, 49); space(io);            // "M1 "
     putchar(io, 101); putchar(io, 110); putchar(io, 117); putchar(io, 109); putchar(io, 58); space(io);
     print_nat(io, area(Shape::Empty));              // 0
@@ -163,7 +163,7 @@ fn unwrap_or[T](o: Opt[T], fallback: T) -> [] T {
     }
 }
 
-fn m1_generic[&i](io: &!i Io) -> [io] int {
+fn m1_generic[&i](io: &!i Io) -> [io_write] int {
     putchar(io, 77); putchar(io, 49); space(io);            // "M1 "
     putchar(io, 103); putchar(io, 101); putchar(io, 110); putchar(io, 101); putchar(io, 114);
     putchar(io, 105); putchar(io, 99); putchar(io, 58); space(io);
@@ -241,7 +241,7 @@ fn redeem_either(t: Ticket, as_is: bool) -> [] int {
     return redeem(stamp(t));
 }
 
-fn m2_linear[&i](io: &!i Io) -> [io] int {
+fn m2_linear[&i](io: &!i Io) -> [io_write] int {
     putchar(io, 77); putchar(io, 50); space(io);          // "M2 "
     putchar(io, 108); putchar(io, 105); putchar(io, 110); putchar(io, 101); putchar(io, 97);
     putchar(io, 114); putchar(io, 58); space(io);         // "linear: "
@@ -285,7 +285,7 @@ fn later_of[&dst, &src where src <= dst](a: &dst Ticket, b: &src Ticket) -> [] i
     return serial_of(a) + serial_of(b);
 }
 
-fn m2_borrow[&i](io: &!i Io) -> [io] int {
+fn m2_borrow[&i](io: &!i Io) -> [io_write] int {
     putchar(io, 77); putchar(io, 50); space(io);          // "M2 "
     putchar(io, 98); putchar(io, 111); putchar(io, 114); putchar(io, 114); putchar(io, 111);
     putchar(io, 119); putchar(io, 58); space(io);         // "borrow: "
@@ -343,7 +343,7 @@ fn advance[&r](m: &!r Meter) -> [] int {
     return m.reading;
 }
 
-fn m2_unique[&i](io: &!i Io) -> [io] int {
+fn m2_unique[&i](io: &!i Io) -> [io_write] int {
     putchar(io, 77); putchar(io, 50); space(io);          // "M2 "
     putchar(io, 117); putchar(io, 110); putchar(io, 105); putchar(io, 113); putchar(io, 117);
     putchar(io, 101); putchar(io, 58); space(io);         // "unique: "
@@ -385,13 +385,13 @@ fn triple(n: int) -> [] int {
     return n * 3;
 }
 
-// Performs `io`, because `print_nat` does. Nothing else about the body
+// Performs `io_write`, because `print_nat` does. Nothing else about the body
 // matters to the row.
-fn show[&i](io: &!i Io, n: int) -> [io] int {
+fn show[&i](io: &!i Io, n: int) -> [io_write] int {
     return print_nat(io, n);
 }
 
-fn m2_effects[&i](io: &!i Io) -> [io] int {
+fn m2_effects[&i](io: &!i Io) -> [io_write] int {
     putchar(io, 77); putchar(io, 50); space(io);          // "M2 "
     putchar(io, 101); putchar(io, 102); putchar(io, 102); putchar(io, 101); putchar(io, 99);
     putchar(io, 116); putchar(io, 115); putchar(io, 58); space(io);   // "effects: "
@@ -434,7 +434,7 @@ fn cell_value[&r](c: &r Cell) -> [] int {
     return c.value;
 }
 
-fn m2_arena[&i](io: &!i Io) -> [io] int {
+fn m2_arena[&i](io: &!i Io) -> [io_write] int {
     putchar(io, 77); putchar(io, 50); space(io);          // "M2 "
     putchar(io, 97); putchar(io, 114); putchar(io, 101); putchar(io, 110);
     putchar(io, 97); putchar(io, 58); space(io);          // "arena: "
@@ -462,7 +462,7 @@ fn m2_arena[&i](io: &!i Io) -> [io] int {
     return newline(io);
 }
 
-fn run[&i](io: &!i Io) -> [io] int {
+fn run[&i](io: &!i Io) -> [io_write] int {
     m0(io);
     m1_bool(io);
     m1_struct(io);
@@ -477,7 +477,7 @@ fn run[&i](io: &!i Io) -> [io] int {
 
 // --------------------------------------------------- M2: capabilities ----
 // The thesis, and the last piece of it. An effect row says what a function
-// does; a capability is what lets it. `[io]` on a signature means the
+// does; a capability is what lets it. `[io_write]` on a signature means the
 // function was handed an `&!i Io` it did not create, and after that reading
 // the row and reading the parameter list are the same act.
 //
@@ -491,12 +491,12 @@ fn run[&i](io: &!i Io) -> [io] int {
 // That is the whole safety story, and it is stated as a type: a function
 // that is not given a capability cannot perform its effect.
 
-fn twice[&i](io: &!i Io, n: int) -> [io] int {
+fn twice[&i](io: &!i Io, n: int) -> [io_write] int {
     print_nat(io, n);
     return print_nat(io, n);
 }
 
-fn m2_capability[&i](io: &!i Io) -> [io] int {
+fn m2_capability[&i](io: &!i Io) -> [io_write] int {
     putchar(io, 77); putchar(io, 50); space(io);          // "M2 "
     putchar(io, 99); putchar(io, 97); putchar(io, 112); putchar(io, 97);
     putchar(io, 98); putchar(io, 105); putchar(io, 108); putchar(io, 105);
@@ -536,7 +536,7 @@ extern fn labs[&f](ffi: &f Ffi("libc"), n: int) -> [ffi("libc")] int;
 // this signature knows this function reaches one named library and the
 // console, and that it can do nothing else -- there is nothing else it was
 // handed.
-fn m2_foreign[&f, &i](libc: &f Ffi("libc"), io: &!i Io) -> [ffi("libc"), io] int {
+fn m2_foreign[&f, &i](libc: &f Ffi("libc"), io: &!i Io) -> [ffi("libc"), io_write] int {
     putchar(io, 77); putchar(io, 50); space(io);          // "M2 "
     putchar(io, 102); putchar(io, 111); putchar(io, 114); putchar(io, 101);
     putchar(io, 105); putchar(io, 103); putchar(io, 110); putchar(io, 58); space(io);
@@ -569,7 +569,7 @@ fn highest() -> [] int {
     return 9223372036854775807;
 }
 
-fn m3_arithmetic[&i](io: &!i Io) -> [io] int {
+fn m3_arithmetic[&i](io: &!i Io) -> [io_write] int {
     putchar(io, 77); putchar(io, 51); space(io);          // "M3 "
     putchar(io, 97); putchar(io, 114); putchar(io, 105); putchar(io, 116);
     putchar(io, 104); putchar(io, 109); putchar(io, 101); putchar(io, 116);
@@ -613,7 +613,7 @@ fn sum_of[&r](xs: &r [int]) -> [] int {
     return total;
 }
 
-fn m3_slice[&i](io: &!i Io) -> [io] int {
+fn m3_slice[&i](io: &!i Io) -> [io_write] int {
     putchar(io, 77); putchar(io, 51); space(io);          // "M3 "
     putchar(io, 115); putchar(io, 108); putchar(io, 105); putchar(io, 99);
     putchar(io, 101); putchar(io, 58); space(io);         // "slice: "
@@ -668,7 +668,7 @@ fn m3_slice[&i](io: &!i Io) -> [io] int {
 // because truncation is the silently wrong answer §2.1 already refused.
 // `==` is allowed, because comparing storage is not arithmetic.
 
-fn write_all[&r, &i](io: &!i Io, s: &r [byte]) -> [io] int {
+fn write_all[&r, &i](io: &!i Io, s: &r [byte]) -> [io_write] int {
     var n = 0;
     while n < len(s) {
         putchar(io, int_of(s[n]));
@@ -677,7 +677,7 @@ fn write_all[&r, &i](io: &!i Io, s: &r [byte]) -> [io] int {
     return len(s);
 }
 
-fn m3_string[&i](io: &!i Io) -> [io] int {
+fn m3_string[&i](io: &!i Io) -> [io_write] int {
     putchar(io, 77); putchar(io, 51); space(io);          // "M3 "
     putchar(io, 115); putchar(io, 116); putchar(io, 114); putchar(io, 105);
     putchar(io, 110); putchar(io, 103); putchar(io, 58); space(io);
@@ -727,7 +727,7 @@ fn m3_string[&i](io: &!i Io) -> [io] int {
 fn m3_file[&f, &i](
     fs: &f Fs("/tmp"),
     io: &!i Io,
-) -> [fs_read("/tmp"), fs_write("/tmp"), io] int {
+) -> [fs_read("/tmp"), fs_write("/tmp"), io_write] int {
     write_all(io, "M3 file:"); space(io);
 
     let wrote = fs_write(fs, "/tmp/lex-sys-tour.txt", "on disk");
@@ -786,7 +786,7 @@ enum List {
     Cons(int, Box[List]),
 }
 
-fn m3_heap[&h, &i](heap: &!h Heap, io: &!i Io) -> [heap, io] int {
+fn m3_heap[&h, &i](heap: &!h Heap, io: &!i Io) -> [heap, io_write] int {
     write_all(io, "M3 heap:"); space(io);
 
     // Built backwards, so this reads 3 1 4.
@@ -810,7 +810,7 @@ fn push[&h](heap: &!h Heap, rest: List, value: int) -> [heap] List {
 
 // One pass that prints and frees. `rest` is the box the match handed over;
 // `unbox` ends that node and yields the tail.
-fn drain[&h, &i](heap: &!h Heap, io: &!i Io, list: List) -> [heap, io] int {
+fn drain[&h, &i](heap: &!h Heap, io: &!i Io, list: List) -> [heap, io_write] int {
     match list {
         List::Empty => { return 0; }
         List::Cons(value, rest) => {
@@ -866,7 +866,7 @@ fn count_kept[&l](list: &l List) -> [] int {
     }
 }
 
-fn m3_reading[&h, &i](heap: &!h Heap, io: &!i Io) -> [heap, io] int {
+fn m3_reading[&h, &i](heap: &!h Heap, io: &!i Io) -> [heap, io_write] int {
     write_all(io, "M3 reading:"); space(io);
 
     var list = List::Empty;
@@ -928,7 +928,7 @@ fn drain_quiet[&h](heap: &!h Heap, list: List) -> [heap] int {
 // because a program does not own its own command line, and `static`
 // because argv outlives every region there is.
 
-fn m3_args[&g, &i](args: &g Args, io: &!i Io) -> [args, io] int {
+fn m3_args[&g, &i](args: &g Args, io: &!i Io) -> [args, io_write] int {
     write_all(io, "M3 args:"); space(io);
 
     // Run with no arguments by the example harness, so this is 1: a

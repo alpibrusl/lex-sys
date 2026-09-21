@@ -24,11 +24,11 @@ fn value_of[&r](n: &r Node) -> [] int {
     return n.value;
 }
 
-fn space[&i](io: &!i Io) -> [io] int {
+fn space[&i](io: &!i Io) -> [io_write] int {
     return putchar(io, 32);
 }
 
-fn print_nat[&i](io: &!i Io, n: int) -> [io] int {
+fn print_nat[&i](io: &!i Io, n: int) -> [io_write] int {
     if n >= 10 {
         print_nat(io, n / 10);
     }
@@ -37,7 +37,7 @@ fn print_nat[&i](io: &!i Io, n: int) -> [io] int {
 
 // Allocate eight squares, reading each one back through a reference as it is
 // made. The arena grows by a bump per node and is released once at the end.
-fn squares[&i](io: &!i Io) -> [io] int {
+fn squares[&i](io: &!i Io) -> [io_write] int {
     var total = 0;
     region a {
         var i = 0;
@@ -63,7 +63,7 @@ fn squares[&i](io: &!i Io) -> [io] int {
 // Nesting is §5.2's stack again: the inner arena may hold what the outer one
 // allocated, because the outer outlives it. The reverse is
 // `tests/reject/inner_region_stored_in_outer.ls`.
-fn nested[&i](io: &!i Io) -> [io] int {
+fn nested[&i](io: &!i Io) -> [io_write] int {
     var answer = 0;
     region outer {
         let base = alloc[outer](Node { value: 3 });

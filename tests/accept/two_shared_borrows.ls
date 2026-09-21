@@ -15,7 +15,7 @@ fn len_of[&r](b: &r Bytes) -> [] int {
     return b.len;
 }
 
-fn run[&i](io: &!i Io) -> [io] int {
+fn run[&i](io: &!i Io) -> [io_write] int {
     let buf = Bytes { len: 3 };
 
     borrow buf as &a in {

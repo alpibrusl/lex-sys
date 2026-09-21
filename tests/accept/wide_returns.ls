@@ -34,7 +34,7 @@ fn total(w: Wide) -> [] int {
     }
 }
 
-fn run[&i](io: &!i Io) -> [io] int {
+fn run[&i](io: &!i Io) -> [io_write] int {
     let t = three(1, 2, 3);
     putchar(io, 48 + t.a);                       // 1
 

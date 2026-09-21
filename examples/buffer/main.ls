@@ -26,7 +26,7 @@
 // `reserve`, in this repository. A `realloc` builtin would have hidden
 // which of two very different things happened.
 
-fn write_all[&r, &i](io: &!i Io, s: &r [byte]) -> [io] int {
+fn write_all[&r, &i](io: &!i Io, s: &r [byte]) -> [io_write] int {
     var n = 0;
     while n < len(s) {
         putchar(io, int_of(s[n]));
@@ -35,7 +35,7 @@ fn write_all[&r, &i](io: &!i Io, s: &r [byte]) -> [io] int {
     return len(s);
 }
 
-fn run[&h, &i](heap: &!h Heap, io: &!i Io) -> [heap, io] int {
+fn run[&h, &i](heap: &!h Heap, io: &!i Io) -> [heap, io_write] int {
     // One byte of capacity, on purpose: everything after this is growth.
     var text = new_buffer(heap, 1);
 

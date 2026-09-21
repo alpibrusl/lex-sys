@@ -25,7 +25,7 @@
 // Console
 // ---------------------------------------------------------------------
 
-fn write_all[&r, &i](io: &!i Io, s: &r [byte]) -> [io] int {
+fn write_all[&r, &i](io: &!i Io, s: &r [byte]) -> [io_write] int {
     var n = 0;
     while n < len(s) {
         putchar(io, int_of(s[n]));
@@ -127,7 +127,7 @@ fn report[&f, &p, &i](
     fs: &f Fs(""),
     path: &p [byte],
     io: &!i Io,
-) -> [fs_read(""), fs_write(""), io] int {
+) -> [fs_read(""), fs_write(""), io_write] int {
     var status = 1;
     region a {
         let text = alloc_slice[a](512, byte_of(0));
