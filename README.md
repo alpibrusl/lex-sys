@@ -357,6 +357,25 @@ recursion, so `fib(23)` is a runtime call at `-O2` and a constant here.
 the answer is parity and the one where the estimate that motivated the
 work turned out to be four times too optimistic.
 
+**And one place it might have been ahead turned out not to be.**
+[`layout.md`](docs/layout.md) went looking for a win in the fact that
+lex-sys promises no struct layout where C's is part of its ABI, so a
+compiler here could transpose array-of-structs to struct-of-arrays and
+C's cannot. Measured, the transform is worth **1.43×** in lex-sys and
+**1.31×** in C — the same size in both, so it moves the two along
+together rather than closing the gap, and a C programmer can write it by
+hand in an afternoon. The half that *would* have been a real win needs a
+vectoriser, which `overflow-cost.md` §3.2 already established a trapping
+add does not get. The roadmap entry claiming otherwise is corrected
+rather than deferred.
+
+Packing narrow fields is the half that survives — up to 2.6× on a struct
+that is mostly `byte` or `bool` — and **3 of the 83 struct fields in this
+repository are**, so it is filed with a falsifier rather than built:
+`lex-sys layout` prints what each type costs and what it would cost
+packed, and the day those columns differ on a program someone cares
+about is the day the deferral stops being right.
+
 There is one thing this language can do that neither of the other two
 can, and it is not tuning. **An effect row of `[]` is a purity proof the
 type checker produced** — C can only *promise* the same fact with

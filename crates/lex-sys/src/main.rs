@@ -20,7 +20,9 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
+use lex_sys_ir::TypeInfo;
 use lex_sys_syntax::{Ast, SourceFile, SourceMap};
+use lex_sys_types::{DefId, Type};
 
 const USAGE: &str = "\
 lex-sys — the bootstrap compiler for the lex-sys systems dialect
@@ -31,6 +33,7 @@ usage:
     lex-sys run   <file.ls>... [--std]
     lex-sys ids   <file.ls>... [--std]
     lex-sys authority <file.ls>... [--std] [--output json]
+    lex-sys layout    <file.ls>... [--std]
     lex-sys print <file.ls>
     lex-sys --version
 
@@ -143,6 +146,11 @@ fn run(args: &[String]) -> Result<ExitCode, Failure> {
         "authority" => {
             let Invocation { inputs, with_std, json, .. } = parse_args(&args[1..], false)?;
             print_authority(&inputs, with_std, json)?;
+            Ok(ExitCode::SUCCESS)
+        }
+        "layout" => {
+            let Invocation { inputs, with_std, .. } = parse_args(&args[1..], false)?;
+            print_layout(&inputs, with_std)?;
             Ok(ExitCode::SUCCESS)
         }
         "build" => {
@@ -363,6 +371,89 @@ fn escaped(value: &str) -> String {
 /// Rows are exact in both directions (§7.3), so this is precise rather
 /// than conservative: a label here is an effect the program performs on
 /// some path, not one it might.
+/// `lex-sys layout` — what each declared type costs in memory
+/// (`docs/layout.md` §4).
+///
+/// A report rather than a flag, because there is nothing to turn on: §2
+/// of that document measured the layout and deliberately did not change
+/// it. What the report is *for* is the trigger — when `size` and
+/// `packed` differ on a program someone cares about, the deferral stops
+/// being right, and this is how that gets noticed rather than
+/// remembered.
+fn print_layout(inputs: &[PathBuf], with_std: bool) -> Result<(), Failure> {
+    let program = compile_to_ir(inputs, with_std)?;
+    let triple = lex_sys_codegen::host_triple();
+
+    // The prelude's eight -- `World`, the five capabilities, `Box` and
+    // `Split` -- are not types the program declared, and a report about
+    // a program's memory should not open with eight rows of zero.
+    const PRELUDE: usize = lex_sys_ir::PRELUDE_SPLIT + 1;
+
+    let mut rows: Vec<(String, lex_sys_codegen::Layout)> = Vec::new();
+    for (index, info) in program.types.iter().enumerate().skip(PRELUDE) {
+        let (name, members): (&String, Vec<&Type>) = match info {
+            TypeInfo::Struct { name, fields } => (name, fields.iter().map(|(_, t)| t).collect()),
+            TypeInfo::Enum { name, variants } => {
+                (name, variants.iter().flat_map(|(_, p)| p.iter()).collect())
+            }
+        };
+        // A generic declaration has no one layout -- `Pair[int, bool]`
+        // and `Pair[bool, int]` are two -- so it is skipped rather than
+        // measured at a substitution nobody wrote. Reporting each
+        // instantiation instead would mean reporting names the source
+        // does not contain, which is a worse answer than saying nothing.
+        if members.iter().any(|t| mentions_parameter(t)) {
+            continue;
+        }
+        let ty = Type::Named(DefId(index as u32), Vec::new());
+        rows.push((name.clone(), lex_sys_codegen::layout_of(&ty, &program, &triple)));
+    }
+
+    let stdout = io::stdout();
+    let mut out = stdout.lock();
+    let written = (|| -> io::Result<()> {
+        writeln!(
+            out,
+            "{:<24} {:>6} {:>7} {:>8} {:>8}",
+            "type", "leaves", "size", "packed", "stride"
+        )?;
+        for (name, layout) in &rows {
+            writeln!(
+                out,
+                "{:<24} {:>6} {:>7} {:>8} {:>8}",
+                name, layout.leaves, layout.size, layout.packed, layout.stride
+            )?;
+        }
+        // The one line that is the point of the report.
+        let savings: u32 = rows.iter().map(|(_, l)| l.size.saturating_sub(l.packed)).sum();
+        if savings > 0 {
+            writeln!(
+                out,
+                "\npacking would save {savings} bytes per copy across these types (`docs/layout.md` §2)"
+            )?;
+        }
+        out.flush()
+    })();
+
+    match written {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::BrokenPipe => Ok(()),
+        Err(e) => Err(environment(format!("cannot write to stdout: {e}"))),
+    }
+}
+
+/// Does this type mention a generic parameter, at any depth?
+fn mentions_parameter(ty: &Type) -> bool {
+    match ty {
+        Type::Param(_) => true,
+        Type::Named(_, args) => args.iter().any(mentions_parameter),
+        Type::Slice(inner) => mentions_parameter(inner),
+        Type::Ref { inner, .. } => mentions_parameter(inner),
+        Type::Tuple(parts) => parts.iter().any(mentions_parameter),
+        _ => false,
+    }
+}
+
 fn print_authority(inputs: &[PathBuf], with_std: bool, json: bool) -> Result<(), Failure> {
     let program = compile_to_ir(inputs, with_std)?;
 
