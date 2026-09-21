@@ -131,19 +131,28 @@ A library is a better test of a language than a test suite is, and this
 one surfaced three things that made it more verbose than it should be.
 None is a soundness problem and all three are ergonomics:
 
-* **No tuples.** `insert` must answer with both a slab and a handle, so it
-  returns a `res struct Inserted { slab, handle }` declared for the
-  purpose. Every operation that threads the slab needs one.
-* **No renaming in a destructuring pattern.** `let Slab { entries, live }`
-  binds those names and no others, so two slabs cannot be taken apart in
-  one scope.
-* **No shadowing within a block.** Threading a value through several steps
-  means `fresh`, `live`, `emptied`, `stale` — four names for one slab —
-  because `let slab = ...` twice in a block is refused.
+* **No tuples.** *(Closed — `docs/tuples.md`.)* `insert` must answer with
+  both a slab and a handle, so it returns a
+  `res struct Inserted { slab, handle }` declared for the purpose. Every
+  operation that threads the slab needs one.
+* **No renaming in a destructuring pattern.** *(Closed for tuples, by the
+  same change.)* `let Slab { entries, live }` binds those names and no
+  others, so two slabs cannot be taken apart in one scope.
+* **No shadowing within a block.** *(Still open.)* Threading a value
+  through several steps means `fresh`, `live`, `emptied`, `stale` — four
+  names for one slab — because `let slab = ...` twice in a block is
+  refused.
 
 Together they make value-threading APIs wordy, which is the exact style a
-linear language pushes you toward. They are listed in §6 rather than fixed
-here, because each is a language change and this document is a library.
+linear language pushes you toward. They were listed in §6 rather than
+fixed here, because each is a language change and this document is a
+library.
+
+Two of the three were fixed in the slice after this one, and that is the
+useful thing about having written them down: `docs/tuples.md` is the
+first feature here whose case was made entirely by a library rather than
+by a design. `examples/slab/` has since lost `Inserted`, `Looked` and one
+whole function — and its object file did not change.
 
 ---
 
@@ -164,8 +173,9 @@ here, because each is a language change and this document is a library.
 | Question | Why it waits |
 |---|---|
 | A safe copyable pointer, and a real `Rc` | §2.2. A language feature with its own document |
-| Tuples, or multiple return values | §4. The single biggest ergonomic gap a linear language has |
-| Renaming in patterns, shadowing in a block | §4, and both are small |
+| ~~Tuples, or multiple return values~~ | **Built** — `docs/tuples.md` |
+| ~~Renaming in patterns~~ | **Built**, for tuple patterns, by the same change |
+| Shadowing in a block | §4, and small |
 | A free list in the slab | Policy; the library can have one whenever it wants |
 
 ---

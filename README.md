@@ -132,9 +132,22 @@ and requires every hash to survive.
 > [`docs/sharing.md`](docs/sharing.md), which corrects the document it
 > implements.
 >
-> **Still missing:** a standard library, and the ergonomics a linear
-> language most wants — tuples, renaming in patterns. Do not mistake this
-> for a usable language yet.
+> **And a function can answer with two things.** `(A, B)` is an anonymous
+> struct with positional components, and the first **structural** type
+> here: `(int, Gen)` is the same type wherever it is written, so two
+> files agree on one with neither declaring it. Its mode is *computed* —
+> `res` if any component is — because there is no declaration site to
+> write one at, and every obligation that follows from `res` follows
+> anyway. It is measurably nothing but ergonomics: a tuple and the struct
+> it replaces emit **byte-identical object files**, which is a test
+> rather than a claim. That is [`docs/tuples.md`](docs/tuples.md), and it
+> is the first feature here whose case was made by a library rather than
+> by a design — `examples/slab/` asked for it, and has since lost two
+> types and a whole function.
+>
+> **Still missing:** a standard library, and one ergonomic gap that
+> survived — no shadowing within a block. Do not mistake this for a
+> usable language yet.
 
 ## What this is
 
@@ -306,6 +319,13 @@ line worth watching is the last one — a handle whose slot was removed
 comes back `Missing`, which is a **value the program decides what to do
 about** rather than a dangling pointer it gets no say in.
 
+It is also the before-and-after for tuples. Writing it is what found the
+gap: `insert` and `look` each had to answer with a slab *and* something
+else, so each declared a `res struct` that was not a concept in the
+library, and one function had to be split in two because a struct
+pattern cannot rename what it binds. Both are gone, and the object file
+did not change.
+
 ```sh
 cargo run -p lex-sys -- run examples/slab/main.ls examples/slab/slab.ls
 # live handle:  7
@@ -354,7 +374,7 @@ capabilities, narrowing, capability-gated foreign calls, arenas, checked
 arithmetic, slices, strings, file IO through a path-carrying capability, a
 general heap with recursive types, boxed slices and the growable buffers
 they allow, reading through references — `*r` and `match` on a reference —
-the command line, and programs spread over several files.
+tuples, the command line, and programs spread over several files.
 
 ```
 res struct Ticket { serial: int }
@@ -569,12 +589,21 @@ fixtures in `tests/reject/`, refused by three unrelated rules. A copyable
 pointer is not a feature this language is missing; it is one the language
 is made of not having.
 
+Tuples came last, and they are the only feature here that a *library*
+asked for rather than a design. `sharing.md` §4 listed three things that
+made `examples/slab/` more verbose than it should have been; `(A, B)`
+closed two of them, and the slab lost two declared types and one whole
+function. The interesting part is what it cost, which is nothing: a
+tuple and the struct it replaces compile to byte-identical object files,
+and there is a test that says so. A tuple is also the first structural
+type here — no declaration, so its identity is its components and two
+files can agree on one with neither declaring anything.
+
 **What does not, yet:** a standard library, `import`, namespaces and
-visibility, flag parsing, environment variables, standard input — and the
-ergonomics a linear language most wants, which writing `examples/slab/`
-made concrete: no tuples, no renaming in a destructuring pattern, no
-shadowing within a block. All of them are now ordinary work rather than
-blocked work, which is the difference these changes made.
+visibility, flag parsing, environment variables, standard input — and
+one ergonomic gap that survived the tuple slice: no shadowing within a
+block. All of them are now ordinary work rather than blocked work, which
+is the difference these changes made.
 
 Every example declares what it prints in its own header, and a test walks
 `examples/` and checks them, so an example that stops matching the language
@@ -636,6 +665,7 @@ carry them exists now, while it is cheap.
 | [`docs/heap.md`](docs/heap.md) | The `Heap` capability and `Box[T]`: why the heap cannot leak, recursive types, heap versus arena | **settled and built** — closes M2's last unchecked item; §8's must-reject suite is enforced |
 | [`docs/filesystem.md`](docs/filesystem.md) | The `Fs(prefix)` capability, why the operations are builtins rather than `extern fn`, the runtime path check and why `..` is refused | **settled and built** — the last mile to M3's acceptance criterion; §7's must-reject suite is enforced |
 | [`docs/sharing.md`](docs/sharing.md) | §9's escape hatches as built: why `Rc` needs a copyable pointer this language does not have, why `Gen` does not, and what a linear library costs to write | **settled and built, and it corrects `linearity-and-effects.md` §9** — three reject fixtures for the three ways `Rc` fails; `examples/slab/` is the one that works |
+| [`docs/tuples.md`](docs/tuples.md) | `(A, B)`: an anonymous struct with positional components, the first structural type here, and a computed rather than declared mode | **settled and built** — the first feature whose case was made by a library; a tuple and the struct it replaces emit byte-identical objects |
 | `docs/memory-model.md` | Regions, escape, the escape hatches and their cost | not written — §5 and §6 settled and built regions and escape, and `sharing.md` has now settled §9's hatches. Nothing is left that a document of its own would say |
 | [`docs/defined-behaviour.md`](docs/defined-behaviour.md) | Every place C and Rust leave behaviour open, and what we define it to | **written and enforced** — overflow traps, evaluation order is left to right, and §9 names the fixture behind each rule |
 | [`docs/strings.md`](docs/strings.md) | What a string is: bytes rather than an encoding, `byte` as storage rather than arithmetic, packed layout, literals and the static region | **settled and built** — gated M3's last item; §9's must-reject suite is enforced |

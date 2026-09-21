@@ -12,6 +12,12 @@
 // are three fixtures in `tests/reject/`, each refused by a different rule
 // that was not written with `Rc` in mind.
 //
+// This file is also the before-and-after for `docs/tuples.md`. Two of the
+// three ergonomic gaps `sharing.md` §4 found while writing it are closed:
+// `insert` and `look` hand back tuples rather than structs declared for
+// the purpose, and `run` is one function again rather than two. The third
+// — no shadowing within a block — is still here, and still visible.
+//
 // `Gen` works precisely because a handle **points at nothing**: two plain
 // `int`s, `val`, copied like any other. The slab owns every value.
 //
@@ -56,13 +62,15 @@ fn show[&i](io: &!i Io, f: Found) -> [io] int {
 
 // Look one handle up, say what came back, and hand the slab on.
 //
-// Four names for one slab below (`fresh`, `filled`, `emptied`, `reused`)
-// rather than reassigning one: this language has no shadowing within a
-// block, which is one of the three ergonomic gaps §4 of `sharing.md`
-// records. A library is a better test of a language than a test suite is.
+// Several names for one slab below (`fresh`, `filled`, `emptied`,
+// `checked`, ...) rather than reassigning one: this language has no
+// shadowing within a block. That is the one ergonomic gap `sharing.md`
+// §4 recorded that tuples did **not** close, and it is left visible here
+// rather than worked around, because a library is a better test of a
+// language than a test suite is.
 fn probe[&i](io: &!i Io, s: Slab, g: Gen, label: &static [byte]) -> [io] Slab {
     write_all(io, label);
-    let Looked { slab, found } = look(s, g);
+    let (slab, found) = look(s, g);
     show(io, found);
     putchar(io, 10);
     return slab;
@@ -71,31 +79,28 @@ fn probe[&i](io: &!i Io, s: Slab, g: Gen, label: &static [byte]) -> [io] Slab {
 fn run[&h, &i](heap: &!h Heap, io: &!i Io) -> [heap, io] int {
     let fresh = new_slab(heap, 4);
 
-    let Inserted { slab, handle } = insert(fresh, 7);
-    let filled = probe(io, slab, handle, "live handle:  ");
+    let (filled, first) = insert(fresh, 7);
+    let live = probe(io, filled, first, "live handle:  ");
 
     // Free the slot. One increment of its generation makes every
     // outstanding handle to it stale at once — including this one, which
     // `remove` never saw.
-    let emptied = remove(filled, handle);
-    let checked = probe(io, emptied, handle, "after remove: ");
+    let emptied = remove(live, first);
+    let checked = probe(io, emptied, first, "after remove: ");
 
-    // Reusing the slot needs a second function, not a second block.
-    // `Inserted` binds `slab` and `handle` by field name and this language
-    // has no renaming in a pattern, so one scope cannot take two of them
-    // apart (`docs/sharing.md` §4). Splitting the function is the honest
-    // way round it, and is what a library written in this language ends up
-    // doing.
-    return reuse(heap, io, checked);
-}
-
-// A *new* handle to the same index, with the next generation — so the old
-// handle stays `Missing` while the new one works. That is the whole point
-// of a generation, and the reason a stale handle is safe rather than
-// merely unlikely to be reused.
-fn reuse[&h, &i](heap: &!h Heap, io: &!i Io, s: Slab) -> [heap, io] int {
-    let Inserted { slab, handle } = insert(s, 9);
-    let reused = probe(io, slab, handle, "new handle:   ");
+    // A *new* handle to the same index, with the next generation — so the
+    // old handle stays `Missing` while the new one works. That is the
+    // whole point of a generation, and the reason a stale handle is safe
+    // rather than merely unlikely to be reused.
+    //
+    // This used to be a second function. `insert` returned a struct that
+    // bound `slab` and `handle` by *field name*, and a struct pattern
+    // cannot rename, so one scope could not take two of them apart — the
+    // gap `sharing.md` §4 recorded second. A tuple pattern names its own
+    // bindings (`docs/tuples.md` §1), so `first` and `second` are two
+    // handles in one scope and the split is gone.
+    let (refilled, second) = insert(checked, 9);
+    let reused = probe(io, refilled, second, "new handle:   ");
     let stale = probe(io, reused, Gen { index: 0, generation: 0 }, "old handle:   ");
     return drop_slab(heap, stale);
 }

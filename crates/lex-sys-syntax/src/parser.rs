@@ -409,6 +409,20 @@ impl<'a> Parser<'a> {
                 .ast
                 .push_type(TypeExpr::Ref { unique, region, inner }, tok.span.to(end)));
         }
+        // `(A, B)` — a tuple (`docs/tuples.md`). Unambiguous at the *start*
+        // of a type: the only other parenthesis in type position is the one
+        // in `Ffi("libc")`, and that follows a name.
+        if self.eat(TokenKind::LParen) {
+            let mut parts = Vec::new();
+            while self.peek().kind != TokenKind::RParen {
+                parts.push(self.type_expr()?);
+                if !self.eat(TokenKind::Comma) {
+                    break;
+                }
+            }
+            let end = self.expect(TokenKind::RParen)?.span;
+            return Ok(self.ast.push_type(TypeExpr::Tuple(parts), tok.span.to(end)));
+        }
         // `[T]` — a slice's referent. Unambiguous here: a bracket at the
         // *start* of a type can only open one, since a type-argument list
         // follows a name and an effect row follows `->`.
@@ -490,6 +504,45 @@ impl<'a> Parser<'a> {
     fn let_stmt(&mut self) -> Result<StmtId, Diagnostic> {
         let kw = self.bump();
         let mutable = kw.kind == TokenKind::Var;
+
+        // `let (a, b) = t;` — taking a tuple apart (`docs/tuples.md` §3.2).
+        // Decided by the parenthesis, which cannot otherwise follow `let`.
+        // The names are the pattern's own, not a type's: a tuple has no
+        // field names to inherit, which is the whole reason this pattern
+        // may rename anything.
+        if self.peek().kind == TokenKind::LParen {
+            if mutable {
+                return Err(self.err(
+                    "a destructuring binding takes a value apart once; write `let`, not `var`",
+                ));
+            }
+            self.bump();
+            let mut names = Vec::new();
+            while self.peek().kind != TokenKind::RParen {
+                // `let ((a, b), c) = t;`. This language has no nested
+                // patterns anywhere (`docs/tuples.md` §4), and saying so is
+                // worth more than "expected an identifier": the answer is
+                // two statements, and the message should be the one that
+                // says which two.
+                if self.peek().kind == TokenKind::LParen {
+                    return Err(self.err(
+                        "a pattern does not nest; bind the inner tuple to a name here and take it apart in the next statement",
+                    ));
+                }
+                names.push(self.ident()?);
+                if !self.eat(TokenKind::Comma) {
+                    break;
+                }
+            }
+            self.expect(TokenKind::RParen)?;
+            self.expect(TokenKind::Eq)?;
+            let value = self.expr()?;
+            let end = self.expect(TokenKind::Semi)?.span;
+            return Ok(self
+                .ast
+                .push_stmt(Stmt::DestructureTuple { names, value }, kw.span.to(end)));
+        }
+
         let name = self.ident()?;
 
         // `let Point { x, y } = p;` — taking a value apart rather than naming
@@ -740,6 +793,24 @@ impl<'a> Parser<'a> {
                 TokenKind::Dot => {
                     self.bump();
                     let tok = self.peek();
+                    // `t.0` — a component by position (`docs/tuples.md`
+                    // §3.1). There are no float literals in this language,
+                    // so `0` after a dot is an integer token and nothing
+                    // else, and `t.0.1` lexes as three dots' worth of
+                    // postfix with no help from the lexer.
+                    if tok.kind == TokenKind::Int {
+                        self.bump();
+                        let value = self.int_value(tok, false)?;
+                        let Ok(index) = u32::try_from(value) else {
+                            return Err(Diagnostic::new(
+                                "a tuple component is named by its position, counting from 0",
+                                tok.span,
+                            ));
+                        };
+                        let span = self.ast.expr_span(base).to(tok.span);
+                        base = self.ast.push_expr(Expr::TupleField { base, index }, span);
+                        continue;
+                    }
                     let name = self.ident()?;
                     let span = self.ast.expr_span(base).to(tok.span);
                     base = self.ast.push_expr(Expr::Field { base, name }, span);
@@ -883,10 +954,25 @@ impl<'a> Parser<'a> {
             }
             TokenKind::LParen => {
                 // Grouping leaves no node behind: parentheses are formatting.
+                // A comma after the first expression makes it a tuple
+                // instead (`docs/tuples.md` §2.1) -- one token of lookahead,
+                // and the reason there is no one-tuple: `(e)` is already
+                // spoken for.
                 self.bump();
-                let inner = self.bracketed(|p| p.expr())?;
-                self.expect(TokenKind::RParen)?;
-                Ok(inner)
+                let first = self.bracketed(|p| p.expr())?;
+                if !self.eat(TokenKind::Comma) {
+                    self.expect(TokenKind::RParen)?;
+                    return Ok(first);
+                }
+                let mut parts = vec![first];
+                while self.peek().kind != TokenKind::RParen {
+                    parts.push(self.bracketed(|p| p.expr())?);
+                    if !self.eat(TokenKind::Comma) {
+                        break;
+                    }
+                }
+                let end = self.expect(TokenKind::RParen)?.span;
+                Ok(self.ast.push_expr(Expr::Tuple(parts), tok.span.to(end)))
             }
             other => Err(self.err(format!("expected an expression, found {}", other.describe()))),
         }
@@ -1109,6 +1195,44 @@ mod tests {
         let Expr::Binary { lhs, .. } = ast.expr(*e) else { panic!() };
         let Expr::Field { name, .. } = ast.expr(*lhs) else { panic!() };
         assert_eq!(ast.name_of(*name), "x");
+    }
+
+    /// `docs/tuples.md` §2.1: the comma is what decides, and grouping keeps
+    /// the meaning it had before tuples existed.
+    ///
+    /// This is the whole argument for "two components or more" in one
+    /// test: `(e)` cannot become a one-tuple without breaking every
+    /// parenthesis already written, so the rule is chosen to leave it
+    /// alone.
+    #[test]
+    fn a_parenthesis_is_grouping_until_a_comma_makes_it_a_tuple() {
+        let (ast, decl) = one_fn("fn f() -> [] int { return (1 + 2) * 3; }");
+        let Stmt::Return(e) = ast.stmt(decl.body.stmts[0]) else { panic!() };
+        // Grouping leaves no node behind, so this is a product whose left
+        // operand is a sum -- there is no one-tuple anywhere in it.
+        let Expr::Binary { op: BinOp::Mul, lhs, .. } = ast.expr(*e) else { panic!() };
+        assert!(matches!(ast.expr(*lhs), Expr::Binary { op: BinOp::Add, .. }));
+
+        let (ast, decl) = one_fn("fn f() -> [] int { return (1, 2); }");
+        let Stmt::Return(e) = ast.stmt(decl.body.stmts[0]) else { panic!() };
+        let Expr::Tuple(parts) = ast.expr(*e) else { panic!("a comma makes a tuple") };
+        assert_eq!(parts.len(), 2);
+    }
+
+    /// §3.1: `t.0` needs nothing from the lexer.
+    ///
+    /// There are no float literals in this language, so `0` after a dot is
+    /// an integer token and nothing else -- which is why `t.0.1` parses as
+    /// two postfix accesses rather than as a number that has to be taken
+    /// apart again.
+    #[test]
+    fn a_positional_field_chains_without_a_lexer_hack() {
+        let (ast, decl) = one_fn("fn f() -> [] int { return t.0.1; }");
+        let Stmt::Return(e) = ast.stmt(decl.body.stmts[0]) else { panic!() };
+        let Expr::TupleField { base, index } = ast.expr(*e) else { panic!() };
+        assert_eq!(*index, 1);
+        let Expr::TupleField { index, .. } = ast.expr(*base) else { panic!() };
+        assert_eq!(*index, 0);
     }
 
     #[test]

@@ -97,6 +97,13 @@ pub enum TypeExpr {
     /// Unsized: it is what a reference points *at*, never a value on its
     /// own, so it appears as `&r [T]` or `&!r [T]` and nowhere else.
     Slice(TypeId),
+    /// `(A, B)` — an anonymous aggregate with positional components
+    /// (`docs/tuples.md`).
+    ///
+    /// Two or more, always: `(T)` is grouping and there is no `()`. A
+    /// parenthesis at the *start* of a type can only open one of these,
+    /// since `Ffi("libc")`'s parenthesis follows a name.
+    Tuple(Vec<TypeId>),
     /// The `"libc"` in `Ffi("libc")` — a type indexed by a literal (§7.4).
     ///
     /// It is a *type*, not a value: `Ffi("libc")` and `Ffi("libm")` are two
@@ -111,13 +118,18 @@ impl TypeExpr {
     pub fn head(&self) -> Option<Symbol> {
         match self {
             TypeExpr::Name { name, .. } => Some(*name),
-            TypeExpr::Ref { .. } | TypeExpr::Lit(_) | TypeExpr::Slice(_) => None,
+            TypeExpr::Ref { .. } | TypeExpr::Lit(_) | TypeExpr::Slice(_) | TypeExpr::Tuple(_) => {
+                None
+            }
         }
     }
 
     pub fn args(&self) -> &[TypeId] {
         match self {
-            TypeExpr::Name { args, .. } => args,
+            // A tuple's components are its arguments for the purpose of a
+            // traversal: they are the types written inside it, which is
+            // what every caller of this wants.
+            TypeExpr::Name { args, .. } | TypeExpr::Tuple(args) => args,
             TypeExpr::Ref { .. } | TypeExpr::Lit(_) | TypeExpr::Slice(_) => &[],
         }
     }
@@ -179,6 +191,21 @@ pub enum Expr {
     Field {
         base: ExprId,
         name: Symbol,
+    },
+    /// `(a, b)` — an anonymous aggregate (`docs/tuples.md`).
+    ///
+    /// Two components or more. One would be grouping, which leaves no node
+    /// behind, so the parser knows which it has by whether a comma follows
+    /// the first expression.
+    Tuple(Vec<ExprId>),
+    /// `t.0` — a component by position (§3.1).
+    ///
+    /// Its own node rather than a `Field` with a numeric name, because a
+    /// position is not a name: nothing interns it, and the checker reaches
+    /// for it by index without a lookup.
+    TupleField {
+        base: ExprId,
+        index: u32,
     },
     /// `Shape::Circle(3)`, or `Shape::Empty` with no arguments.
     ///
@@ -270,6 +297,17 @@ pub enum Stmt {
     Destructure {
         struct_name: Symbol,
         fields: Vec<Symbol>,
+        value: ExprId,
+    },
+    /// `let (a, b) = t;` (`docs/tuples.md` §3.2).
+    ///
+    /// The same statement as [`Stmt::Destructure`] against a type that has
+    /// no declaration, and the one pattern here that **names its own
+    /// bindings**: a struct pattern inherits the field names, a tuple has
+    /// none to inherit. That is why tuples close `sharing.md` §4's second
+    /// gap as well as its first.
+    DestructureTuple {
+        names: Vec<Symbol>,
         value: ExprId,
     },
     /// `borrow x as &r in { .. }` / `borrow mut x as &!r in { .. }`.

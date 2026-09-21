@@ -9,6 +9,15 @@
 // `Missing`, which is a **value the program decides what to do about**. A
 // dangling pointer is undefined behaviour and the program gets no say.
 // §9 calls that asymmetry "most of why this language exists".
+//
+// Two types are missing from this file since it was first written.
+// `insert` and `look` each have to answer with a slab *and* something
+// else, and each used to declare a `res struct` to carry the pair back --
+// `Inserted { slab, handle }` and `Looked { slab, found }`, neither of
+// which was a concept in this library. `sharing.md` §4 recorded that as
+// the cost of having no tuples, `docs/tuples.md` is the feature, and
+// these two signatures are what it bought. The generated code is
+// identical (`tuples.md` §5).
 
 val struct Gen {
     index: int,
@@ -33,19 +42,6 @@ enum Found {
     Value(int),
 }
 
-// `insert` has to answer with both a slab and a handle, and this language
-// has no tuples (`docs/sharing.md` §4), so every operation that threads
-// the slab declares a struct to carry it back.
-res struct Inserted {
-    slab: Slab,
-    handle: Gen,
-}
-
-res struct Looked {
-    slab: Slab,
-    found: Found,
-}
-
 fn new_slab[&h](heap: &!h Heap, capacity: int) -> [heap] Slab {
     let empty = Entry { generation: 0, live: false, value: 0 };
     return Slab { entries: box_slice(heap, capacity, empty), live: 0 };
@@ -60,7 +56,7 @@ fn drop_slab[&h](heap: &!h Heap, s: Slab) -> [heap] int {
 // Fill the first free slot. A scan, not a free list: making it O(1) is a
 // policy this library could choose, the way `buffer.ls` chose doubling
 // (§3.1). An index of -1 means the slab was full.
-fn insert(s: Slab, value: int) -> [] Inserted {
+fn insert(s: Slab, value: int) -> [] (Slab, Gen) {
     let Slab { entries, live } = s;
     var at = 0 - 1;
     var generation = 0;
@@ -78,10 +74,10 @@ fn insert(s: Slab, value: int) -> [] Inserted {
             i = i + 1;
         }
     }
-    return Inserted {
-        slab: Slab { entries: entries, live: live + added },
-        handle: Gen { index: at, generation: generation },
-    };
+    return (
+        Slab { entries: entries, live: live + added },
+        Gen { index: at, generation: generation },
+    );
 }
 
 // The three checks a handle is worth: in range, live, and the right
@@ -98,13 +94,13 @@ fn get[&e](entries: &e Box[[Entry]], g: Gen) -> [] Found {
     return Found::Value(slot.value);
 }
 
-fn look(s: Slab, g: Gen) -> [] Looked {
+fn look(s: Slab, g: Gen) -> [] (Slab, Found) {
     let Slab { entries, live } = s;
     var found = Found::Missing;
     borrow entries as &e in {
         found = get(e, g);
     }
-    return Looked { slab: Slab { entries: entries, live: live }, found: found };
+    return (Slab { entries: entries, live: live }, found);
 }
 
 // Free a slot and **bump its generation**, which is the whole mechanism:

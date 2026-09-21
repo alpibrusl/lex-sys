@@ -116,6 +116,16 @@ mod tag {
     pub const ALLOC_SLICE: u8 = 0x69;
     pub const INDEX: u8 = 0x6a;
     pub const TYPE_SLICE: u8 = 0x6b;
+    /// `(A, B)` — a tuple type (`docs/tuples.md` §6).
+    ///
+    /// The one type here whose identity has no name in it at all: not a
+    /// `DefId`, not a hash of a declaration, just this tag and the
+    /// components. That is what lets two files agree on `(int, Gen)` with
+    /// neither declaring anything.
+    pub const TYPE_TUPLE: u8 = 0x6c;
+    pub const TUPLE: u8 = 0x6d;
+    pub const TUPLE_FIELD: u8 = 0x6e;
+    pub const DESTRUCTURE_TUPLE: u8 = 0x6f;
 
     /// The tag for a declared mode. Written out rather than cast from the
     /// enum, so adding a mode cannot silently renumber the others.
@@ -358,6 +368,20 @@ fn encode_type(
         let inner = *inner;
         encoder.tag(tag::TYPE_SLICE);
         encode_type(ast, encoder, inner, type_ids, generics, regions);
+        return;
+    }
+
+    // `(A, B)`: structural, so there is nothing to look up and nothing a
+    // declaration could match (`docs/tuples.md` §6). Arity rides in the
+    // length prefix, which is what makes `(int, bool)` and
+    // `(int, bool, int)` different hashes rather than one a prefix of the
+    // other.
+    if let TypeExpr::Tuple(parts) = written {
+        let parts = parts.clone();
+        encoder.tag(tag::TYPE_TUPLE).len(parts.len());
+        for part in parts {
+            encode_type(ast, encoder, part, type_ids, generics, regions);
+        }
         return;
     }
 
@@ -690,6 +714,22 @@ impl BodyHasher<'_> {
                     self.scope.binders.push(*field);
                 }
             }
+            Stmt::DestructureTuple { names, value } => {
+                // Only the *count* of bindings, never their names: a tuple
+                // pattern's names are the pattern's own invention
+                // (`docs/tuples.md` §1), so renaming them changes nothing a
+                // caller or a later reader of the value can observe. That is
+                // the same reason a generic parameter is positional, and it
+                // is exactly where this differs from the struct pattern
+                // above, whose field names say which field each binder
+                // takes.
+                self.encoder.tag(tag::DESTRUCTURE_TUPLE).len(names.len());
+                // The value is encoded before the binders exist, as for `let`.
+                self.expr(*value);
+                for name in names {
+                    self.scope.binders.push(*name);
+                }
+            }
             Stmt::Return(value) => {
                 self.encoder.tag(tag::RETURN);
                 self.expr(*value);
@@ -761,6 +801,20 @@ impl BodyHasher<'_> {
                 self.encoder.tag(tag::INDEX);
                 self.expr(*base);
                 self.expr(*index);
+            }
+            Expr::Tuple(parts) => {
+                let parts = parts.clone();
+                self.encoder.tag(tag::TUPLE).len(parts.len());
+                for part in parts {
+                    self.expr(part);
+                }
+            }
+            // A position *is* the name, so unlike `Expr::Field` there is
+            // nothing to intern and nothing that could be renamed without
+            // changing the meaning.
+            Expr::TupleField { base, index } => {
+                self.encoder.tag(tag::TUPLE_FIELD).u32(*index);
+                self.expr(*base);
             }
             Expr::AllocSlice { region, count, fill } => {
                 self.encoder.tag(tag::ALLOC_SLICE);
@@ -849,6 +903,47 @@ mod tests {
     }
 
     // ---- what must not change a hash -----------------------------------
+
+    /// `docs/tuples.md` §6: a tuple pattern encodes its **arity**, not its
+    /// names.
+    ///
+    /// The names are the pattern's own invention -- a tuple has no field
+    /// names to inherit -- so renaming them changes nothing any caller or
+    /// any later reader can observe, exactly as renaming a generic
+    /// parameter does not. This is the mirror of the test below it, which
+    /// checks that a *struct* pattern's field names do reach the hash,
+    /// because there they say which field each binder takes.
+    #[test]
+    fn renaming_a_tuple_patterns_bindings_does_not_reach_the_hash() {
+        let a = "fn f(t: (int, int)) -> [] int { let (a, b) = t; return a + b; }";
+        let b = "fn f(t: (int, int)) -> [] int { let (first, second) = t; return first + second; }";
+        assert_eq!(body(a, "f"), body(b, "f"));
+
+        // Arity does reach it: a two-tuple pattern and a three-tuple
+        // pattern are different programs whatever the bindings are called.
+        let c = "fn f(t: (int, int, int)) -> [] int { let (a, b, c) = t; return a + b + c; }";
+        assert_ne!(body(a, "f"), body(c, "f"));
+    }
+
+    /// §2.2 as a hash: a tuple's identity is its components and nothing
+    /// else -- no `DefId`, no declaration, nothing that depends on what
+    /// else the program declared.
+    ///
+    /// So two files agree on `(int, bool)` with neither declaring
+    /// anything, which is what no other type here can do.
+    #[test]
+    fn a_tuple_type_is_identified_by_its_components_alone() {
+        // The same signature written beside different declarations. A
+        // `Named` type's hash runs through its declaration; a tuple's does
+        // not, and this is the difference.
+        let alone = "fn f(t: (int, bool)) -> [] int { return 0; }";
+        let crowded = "struct Other { a: int } fn f(t: (int, bool)) -> [] int { return 0; }";
+        assert_eq!(sig(alone, "f"), sig(crowded, "f"));
+
+        // And order is part of it, as §2.2 says.
+        let flipped = "fn f(t: (bool, int)) -> [] int { return 0; }";
+        assert_ne!(sig(alone, "f"), sig(flipped, "f"));
+    }
 
     #[test]
     fn formatting_and_comments_do_not_reach_the_hash() {

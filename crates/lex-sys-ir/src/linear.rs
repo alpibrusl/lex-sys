@@ -55,6 +55,22 @@ pub(crate) fn mode_of(defs: &[TypeDef], unifier: &Unifier, ty: &Type) -> Mode {
             }
             Mode::Val
         }
+        // `docs/tuples.md` §2.3: a tuple is `res` if any component is.
+        //
+        // The same structural rule as a struct's, arrived at differently: a
+        // struct *declares* a mode and the declaration is checked against
+        // the members, while a tuple has no declaration site, so there is
+        // nothing to write and nothing to check. The mode is read off the
+        // components instead, which is also how the mode of `Pair[File]`
+        // has always been decided.
+        Type::Tuple(parts) => {
+            for part in &parts {
+                if mode_of(defs, unifier, part) == Mode::Res {
+                    return Mode::Res;
+                }
+            }
+            Mode::Val
+        }
         // §5 rule 3: `&r T` and `&!r T` are `val` whatever `T` is. Copyable
         // and discardable, which is sound precisely because the referent is
         // frozen or locked for the whole region and the region is a block.
@@ -341,10 +357,19 @@ impl Check<'_> {
                 }
                 Event::Read { ty, span } => {
                     if mode_of(self.defs, self.unifier, ty) == Mode::Res {
+                        let resolved = self.unifier.resolve(ty);
+                        // A tuple has components, not fields
+                        // (`docs/tuples.md` §3.1). One rule, and it should
+                        // say so in the vocabulary of whatever it is
+                        // refusing.
+                        let part = match resolved {
+                            Type::Tuple(_) => "component",
+                            _ => "field",
+                        };
                         return Err(Diagnostic::new(
                             format!(
-                                "`{}` is `res`, so a field cannot be read out of it; take the whole value apart with a destructuring `let` (a non-owning read is a borrow, which is §5)",
-                                self.unifier.display(&self.unifier.resolve(ty))
+                                "`{}` is `res`, so a {part} cannot be read out of it; take the whole value apart with a destructuring `let` (a non-owning read is a borrow, which is §5)",
+                                self.unifier.display(&resolved)
                             ),
                             *span,
                         ));
