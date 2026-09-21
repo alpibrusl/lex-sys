@@ -2302,9 +2302,16 @@ fn ids_are_stable_across_the_operator_set() {
 /// including the ones around the 76-column wrap, both directions, plus the
 /// three malformed inputs where the exit status is the whole behaviour.
 ///
-/// Skipped, not failed, where `base64` is not on the path — the port is
-/// still checked by the round trip below, and a missing coreutils is a
-/// fact about the runner rather than about this program.
+/// The comparison runs against **GNU** coreutils specifically, because
+/// that is what `docs/porting.md` claims this is a port of, and the other
+/// implementations disagree: macOS ships BSD `base64`, which prints a
+/// newline for empty input where GNU prints nothing. Neither is wrong —
+/// the port targets one of them, so the test compares against that one.
+///
+/// Where GNU `base64` is not on the path the comparison is skipped rather
+/// than failed. Everything that needs no reference — the round trip, the
+/// exit statuses, the megabyte — still runs on every platform, which is
+/// why the darwin job is not simply doing less work.
 #[test]
 fn base64_agrees_with_coreutils() {
     let scratch = scratch("example-base64");
@@ -2363,8 +2370,20 @@ fn base64_agrees_with_coreutils() {
     let corpus: Vec<Vec<u8>> =
         sizes.iter().map(|n| (0..*n).map(|i| (i * 37 + i / 5) as u8).collect()).collect();
 
+    // `base64 --version` prints "base64 (GNU coreutils) 9.4" on GNU. BSD's
+    // has no `--version` at all and exits non-zero, which is the same
+    // answer for this purpose: not the program that was ported.
     let reference = Path::new("/usr/bin/base64");
-    let have_reference = reference.exists();
+    let have_reference = reference.exists()
+        && Command::new(reference)
+            .arg("--version")
+            // Null stdin, so a version probe can never end up waiting on
+            // input it would otherwise inherit from the test runner.
+            .stdin(Stdio::null())
+            .output()
+            .is_ok_and(|v| {
+                v.status.success() && String::from_utf8_lossy(&v.stdout).contains("GNU coreutils")
+            });
 
     for (size, input) in sizes.iter().zip(&corpus) {
         let (ours, status) = pipe(&exe, &[], input);
@@ -2375,7 +2394,7 @@ fn base64_agrees_with_coreutils() {
             assert_eq!(
                 String::from_utf8_lossy(&ours),
                 String::from_utf8_lossy(&theirs),
-                "encoding {size} bytes differs from coreutils"
+                "encoding {size} bytes differs from GNU coreutils"
             );
         }
 
@@ -2394,7 +2413,7 @@ fn base64_agrees_with_coreutils() {
             assert_eq!(
                 status,
                 theirs,
-                "coreutils disagrees about `{}`",
+                "GNU coreutils disagrees about `{}`",
                 String::from_utf8_lossy(bad)
             );
         }

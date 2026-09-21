@@ -25,6 +25,16 @@ three malformed inputs, and a megabyte.
 131 lines of code. It needed **two things that did not exist** and
 **nothing else**.
 
+> **"The program" turned out to be two programs.** The suite passed on
+> linux and failed on macOS at the first case: empty input, where GNU
+> prints nothing and the BSD `base64` macOS ships prints a newline.
+> Neither is wrong. A port targets *an* implementation, and this one
+> targets GNU 9.4 — so the comparison now checks `--version` for "GNU
+> coreutils" and skips the comparison otherwise, while the round trip,
+> the exit statuses and the megabyte still run everywhere. Worth one
+> paragraph because "port it and compare against the original" quietly
+> assumes there is one original.
+
 ---
 
 ## 2. What it needed: bits
