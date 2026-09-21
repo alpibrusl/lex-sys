@@ -4272,7 +4272,7 @@ impl<'a> FnLowering<'a> {
                     let index = self.signatures.iter().position(|s| s.name == *callee).ok_or_else(
                         || {
                             Diagnostic::new(
-                                format!("`{text}` is not a function in this unit"),
+                                format!("`{text}` is not a function in this program"),
                                 span,
                             )
                         },

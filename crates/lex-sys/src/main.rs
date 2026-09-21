@@ -20,27 +20,32 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
-use lex_sys_syntax::{SourceFile, parse};
+use lex_sys_syntax::{Ast, SourceFile, SourceMap};
 
 const USAGE: &str = "\
 lex-sys — the bootstrap compiler for the lex-sys systems dialect
 
 usage:
-    lex-sys build <file.ls> [-o <output>] [--emit exe|obj]
-    lex-sys check <file.ls>
-    lex-sys run   <file.ls>
-    lex-sys ids   <file.ls>
+    lex-sys build <file.ls>... [-o <output>] [--emit exe|obj]
+    lex-sys check <file.ls>...
+    lex-sys run   <file.ls>...
+    lex-sys ids   <file.ls>...
     lex-sys print <file.ls>
     lex-sys --version
 
 options:
-    -o <output>     where to write the result (default: the input's stem)
+    -o <output>     where to write the result (default: the first input's stem)
     --emit exe|obj  emit a linked executable (default) or a bare object file
 
-`ids` prints each declaration's content hash: a signature and a body for
-every function, one identity for every type. See docs/canonical-ast.md.
+A program is the set of files named on the command line, in any order:
+they share one flat namespace, so a function in the first may call one in
+the last. See docs/many-files.md.
 
-`print` renders the parsed unit in canonical form. It is the AST-to-text
+`ids` prints each declaration's content hash: a signature and a body for
+every function, one identity for every type. A unit hashes its content,
+not the file it sits in. See docs/canonical-ast.md.
+
+`print` renders one parsed file in canonical form. It is the AST-to-text
 direction of that same pipeline, not a formatter: comments never reach the
 AST, so they are not in the output.
 ";
@@ -102,37 +107,43 @@ fn run(args: &[String]) -> Result<ExitCode, Failure> {
             Ok(ExitCode::SUCCESS)
         }
         "check" => {
-            let (input, _, _) = parse_args(&args[1..], false)?;
-            compile_to_ir(&input)?;
+            let (inputs, _, _) = parse_args(&args[1..], false)?;
+            compile_to_ir(&inputs)?;
             Ok(ExitCode::SUCCESS)
         }
+        // `docs/many-files.md` §5: printing is about text, and text is
+        // what a file is -- so this renders exactly one.
         "print" => {
-            let (input, _, _) = parse_args(&args[1..], false)?;
-            let text = std::fs::read_to_string(&input)
+            let (inputs, _, _) = parse_args(&args[1..], false)?;
+            let [input] = &inputs[..] else {
+                return Err(usage("`print` renders one file at a time"));
+            };
+            let text = std::fs::read_to_string(input)
                 .map_err(|e| environment(format!("cannot read `{}`: {e}", input.display())))?;
             let file = SourceFile::new(input.display().to_string(), text);
-            let ast = parse(&file.text).map_err(|d| refused(d.render(&file)))?;
+            let ast = lex_sys_syntax::parse(&file.text).map_err(|d| refused(d.render(&file)))?;
             print!("{}", lex_sys_syntax::print(&ast));
             Ok(ExitCode::SUCCESS)
         }
         "ids" => {
-            let (input, _, _) = parse_args(&args[1..], false)?;
-            print_ids(&input)?;
+            let (inputs, _, _) = parse_args(&args[1..], false)?;
+            print_ids(&inputs)?;
             Ok(ExitCode::SUCCESS)
         }
         "build" => {
-            let (input, output, emit) = parse_args(&args[1..], true)?;
-            let output = output.unwrap_or_else(|| default_output(&input, emit));
-            build(&input, &output, emit)?;
+            let (inputs, output, emit) = parse_args(&args[1..], true)?;
+            let output = output.unwrap_or_else(|| default_output(&inputs[0], emit));
+            build(&inputs, &output, emit)?;
             Ok(ExitCode::SUCCESS)
         }
         "run" => {
-            let (input, _, _) = parse_args(&args[1..], false)?;
+            let (inputs, _, _) = parse_args(&args[1..], false)?;
             let dir = std::env::temp_dir().join(format!("lex-sys-run-{}", std::process::id()));
             std::fs::create_dir_all(&dir)
                 .map_err(|e| environment(format!("cannot create `{}`: {e}", dir.display())))?;
-            let exe = dir.join(default_output(&input, Emit::Exe).file_name().unwrap_or_default());
-            let result = build(&input, &exe, Emit::Exe).and_then(|()| {
+            let exe =
+                dir.join(default_output(&inputs[0], Emit::Exe).file_name().unwrap_or_default());
+            let result = build(&inputs, &exe, Emit::Exe).and_then(|()| {
                 Command::new(&exe)
                     .status()
                     .map_err(|e| environment(format!("cannot run `{}`: {e}", exe.display())))
@@ -148,8 +159,8 @@ fn run(args: &[String]) -> Result<ExitCode, Failure> {
 fn parse_args(
     args: &[String],
     allow_output: bool,
-) -> Result<(PathBuf, Option<PathBuf>, Emit), Failure> {
-    let mut input = None;
+) -> Result<(Vec<PathBuf>, Option<PathBuf>, Emit), Failure> {
+    let mut inputs: Vec<PathBuf> = Vec::new();
     let mut output = None;
     let mut emit = Emit::Exe;
     let mut it = args.iter();
@@ -171,13 +182,16 @@ fn parse_args(
             other if other.starts_with('-') => {
                 return Err(usage(format!("unknown option `{other}`")));
             }
-            other if input.is_none() => input = Some(PathBuf::from(other)),
-            other => return Err(usage(format!("unexpected argument `{other}`"))),
+            // `docs/many-files.md` §2: a program is a set of files, named
+            // on the command line in any order.
+            other => inputs.push(PathBuf::from(other)),
         }
     }
 
-    let input = input.ok_or_else(|| usage("no input file given"))?;
-    Ok((input, output, emit))
+    if inputs.is_empty() {
+        return Err(usage("no input file given"));
+    }
+    Ok((inputs, output, emit))
 }
 
 fn default_output(input: &Path, emit: Emit) -> PathBuf {
@@ -188,14 +202,34 @@ fn default_output(input: &Path, emit: Emit) -> PathBuf {
     }
 }
 
-/// Read, parse and lower a file, reporting any refusal with its source line.
-fn compile_to_ir(input: &Path) -> Result<lex_sys_ir::Program, Failure> {
-    let text = std::fs::read_to_string(input)
-        .map_err(|e| environment(format!("cannot read `{}`: {e}", input.display())))?;
-    let file = SourceFile::new(input.display().to_string(), text);
+/// Read and parse every file of a program into one AST
+/// (`docs/many-files.md` §2).
+///
+/// The `SourceMap` hands out a base offset per file and resolves any
+/// diagnostic's span back to the file it came from, so nothing downstream
+/// of here learns that a program can have more than one (§4).
+fn parse_program(inputs: &[PathBuf]) -> Result<(Ast, SourceMap), Failure> {
+    let mut map = SourceMap::new();
+    let mut ast = Ast::new();
+    let mut sources = Vec::new();
+    for input in inputs {
+        let text = std::fs::read_to_string(input)
+            .map_err(|e| environment(format!("cannot read `{}`: {e}", input.display())))?;
+        let base = map.add(input.display().to_string(), text.clone());
+        sources.push((text, base));
+    }
+    for (text, base) in &sources {
+        lex_sys_syntax::parse_into(&mut ast, text, *base)
+            .map_err(|d| refused(d.render_in(&map)))?;
+    }
+    Ok((ast, map))
+}
 
-    let ast = parse(&file.text).map_err(|d| refused(d.render(&file)))?;
-    let program = lex_sys_ir::lower(&ast).map_err(|d| refused(d.render(&file)))?;
+/// Read, parse and lower a program, reporting any refusal with its source line.
+fn compile_to_ir(inputs: &[PathBuf]) -> Result<lex_sys_ir::Program, Failure> {
+    let (ast, map) = parse_program(inputs)?;
+    let program = lex_sys_ir::lower(&ast).map_err(|d| refused(d.render_in(&map)))?;
+    let where_ = inputs[0].display().to_string();
 
     // `main` becomes the process entry point, so its shape is part of the
     // contract with the C runtime rather than a matter of taste.
@@ -208,18 +242,16 @@ fn compile_to_ir(input: &Path) -> Result<lex_sys_ir::Program, Failure> {
         let world = program.world();
         if entry.n_params != 1 || entry.slots.first() != Some(&world) {
             return Err(refused(format!(
-                "{}: error: `main` takes one argument, the `World` the runtime hands it",
-                file.path
+                "{where_}: error: `main` takes one argument, the `World` the runtime hands it"
             )));
         }
         if entry.ret != lex_sys_types::Type::Int {
             return Err(refused(format!(
-                "{}: error: `main` returns `int`, the process exit status",
-                file.path
+                "{where_}: error: `main` returns `int`, the process exit status"
             )));
         }
     } else {
-        return Err(refused(format!("{}: error: no `main` function", file.path)));
+        return Err(refused(format!("{where_}: error: no `main` function")));
     }
 
     Ok(program)
@@ -229,13 +261,9 @@ fn compile_to_ir(input: &Path) -> Result<lex_sys_ir::Program, Failure> {
 ///
 /// The program is checked first: hashing something that does not compile would
 /// hand out an identity for a thing that is not a program.
-fn print_ids(input: &Path) -> Result<(), Failure> {
-    let text = std::fs::read_to_string(input)
-        .map_err(|e| environment(format!("cannot read `{}`: {e}", input.display())))?;
-    let file = SourceFile::new(input.display().to_string(), text);
-
-    let ast = parse(&file.text).map_err(|d| refused(d.render(&file)))?;
-    lex_sys_ir::lower(&ast).map_err(|d| refused(d.render(&file)))?;
+fn print_ids(inputs: &[PathBuf]) -> Result<(), Failure> {
+    let (ast, map) = parse_program(inputs)?;
+    lex_sys_ir::lower(&ast).map_err(|d| refused(d.render_in(&map)))?;
 
     let identities = lex_sys_id::identify(&ast);
 
@@ -263,8 +291,8 @@ fn print_ids(input: &Path) -> Result<(), Failure> {
     }
 }
 
-fn build(input: &Path, output: &Path, emit: Emit) -> Result<(), Failure> {
-    let program = compile_to_ir(input)?;
+fn build(inputs: &[PathBuf], output: &Path, emit: Emit) -> Result<(), Failure> {
+    let program = compile_to_ir(inputs)?;
     let object = lex_sys_codegen::compile_object(&program, "main")
         .map_err(|e| environment(format!("code generation failed: {e}")))?;
 

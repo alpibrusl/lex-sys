@@ -12,6 +12,6 @@ pub mod print;
 pub mod span;
 
 pub use ast::Ast;
-pub use parser::parse;
+pub use parser::{parse, parse_into};
 pub use print::print;
-pub use span::{Diagnostic, SourceFile, Span};
+pub use span::{Diagnostic, SourceFile, SourceMap, Span};
