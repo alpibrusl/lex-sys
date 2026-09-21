@@ -170,8 +170,22 @@ and requires every hash to survive.
 > which is the program that could not be written before. That is
 > [`docs/standard-input.md`](docs/standard-input.md).
 >
-> **Still missing:** a standard library. Do not mistake this for a usable
-> language yet.
+> **And a name can live in a namespace.** `module a.b;`, `import a.b;`
+> (or `as`), `pub`, and qualified names — the precondition for a
+> *standard* library, which one flat namespace could not have. The claim
+> worth reading is that **a module reaches no hash**: `canonical-ast.md`
+> §1 has said since M0 that moving a function between files changes
+> nothing about it, and a module could have broken that. It does not,
+> because a call already encodes the callee's *hash* rather than its
+> spelling — so moving a function into a module changes neither its own
+> hashes nor any caller's, and there is a test that says so. A module is
+> also **not a trust boundary**: `pub` means reachable, never safe, and
+> a public function still needs a caller holding the capability and
+> still declares what it did. That is
+> [`docs/modules.md`](docs/modules.md).
+>
+> **Still missing:** the standard library itself — now genuinely
+> unblocked. Do not mistake this for a usable language yet.
 
 ## What this is
 
@@ -359,6 +373,20 @@ cargo run -p lex-sys -- run examples/slab/main.ls examples/slab/slab.ls
 # old handle:   missing
 ```
 
+`examples/modular/` is two modules and a root. `fmt.text` holds the
+console helpers, `fmt.counts` holds a tally and imports `fmt.text`, and
+`main` imports both — one under its own name and one renamed with `as`,
+because a qualifier is a name the importing file chose rather than a
+path. It is also where `pub` earns its place: `counts.step` is private,
+so it is an implementation detail rather than a promise.
+
+```sh
+cargo run -p lex-sys -- run examples/modular/main.ls \
+    examples/modular/counts.ls examples/modular/text.ls
+# seen 3, total 60
+# 60
+```
+
 `examples/wordfreq/` is the capstone, and the only example that is three
 files: `text.ls` holds byte helpers, `counts.ls` holds the tally, and
 `main.ls` is the program. Every capability is in it doing real work —
@@ -411,8 +439,8 @@ capabilities, narrowing, capability-gated foreign calls, arenas, checked
 arithmetic, slices, strings, file IO through a path-carrying capability, a
 general heap with recursive types, boxed slices and the growable buffers
 they allow, reading through references — `*r` and `match` on a reference —
-tuples, the command line, standard input, and programs spread over several
-files.
+tuples, the command line, standard input, programs spread over several
+files, and modules with visibility.
 
 ```
 res struct Ticket { serial: int }
@@ -654,10 +682,24 @@ row says which. So `putchar`'s effect is `io_write` now and reading is
 `io_read`, a rename across 53 files that had to happen with the feature
 rather than after it. `examples/tally.ls` is `wc` over a pipe.
 
-**What does not, yet:** a standard library, `import`, namespaces and
-visibility, flag parsing, environment variables, and standard error. All
-of them are now ordinary work rather than blocked work, which is the
-difference these changes made.
+Modules came last, and they are the precondition for a *standard*
+library rather than merely a library. The evidence for needing them is
+countable: across this repository's examples and fixtures, `print_nat`
+was defined 25 times byte for byte and `write_all` 19 times, and putting
+them in one flat namespace would have meant a standard library owning
+names programs here already use.
+
+The claim worth checking is that **a module reaches no hash**. A call
+has encoded the callee's *hash* rather than its spelling since M0, for
+an unrelated reason, so moving a function into a module changes neither
+its own identity nor any caller's — `canonical-ast.md` §1 survives
+namespaces, and there is a test that compiles the same two functions
+flat and modular and asserts all four hashes are identical.
+
+**What does not, yet:** the standard library itself, flag parsing,
+environment variables, and standard error. All of them are now ordinary
+work rather than blocked work, which is the difference these changes
+made.
 
 Every example declares what it prints in its own header, and a test walks
 `examples/` and checks them, so an example that stops matching the language
@@ -722,6 +764,7 @@ carry them exists now, while it is cheap.
 | [`docs/tuples.md`](docs/tuples.md) | `(A, B)`: an anonymous struct with positional components, the first structural type here, and a computed rather than declared mode | **settled and built** — the first feature whose case was made by a library; a tuple and the struct it replaces emit byte-identical objects |
 | [`docs/shadowing.md`](docs/shadowing.md) | Rebinding a name in one block: why it was refused, and the liveness rule that replaces the refusal | **settled and built** — the last of `sharing.md` §4's three gaps, and one rule where there were two |
 | [`docs/standard-input.md`](docs/standard-input.md) | `getchar`, and why reading the console is a second label on `Io` rather than a seventh capability | **settled and built** — `examples/tally.ls` is `wc` over a pipe; the `io` effect label became `io_write` |
+| [`docs/modules.md`](docs/modules.md) | `module`, `import`, `pub` and qualified names — a namespace, not an identity, and not a trust boundary | **settled and built** — the precondition for a standard library; a module reaches no hash, and a test says so |
 | `docs/memory-model.md` | Regions, escape, the escape hatches and their cost | not written — §5 and §6 settled and built regions and escape, and `sharing.md` has now settled §9's hatches. Nothing is left that a document of its own would say |
 | [`docs/defined-behaviour.md`](docs/defined-behaviour.md) | Every place C and Rust leave behaviour open, and what we define it to | **written and enforced** — overflow traps, evaluation order is left to right, and §9 names the fixture behind each rule |
 | [`docs/strings.md`](docs/strings.md) | What a string is: bytes rather than an encoding, `byte` as storage rather than arithmetic, packed layout, literals and the static region | **settled and built** — gated M3's last item; §9's must-reject suite is enforced |

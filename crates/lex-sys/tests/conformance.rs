@@ -252,6 +252,7 @@ fn printing_preserves_every_identity_and_is_idempotent() {
         "examples/wordfreq",
         "examples/buffer",
         "examples/slab",
+        "examples/modular",
     ] {
         for entry in std::fs::read_dir(repo_root().join(dir)).expect("a readable directory") {
             let path = entry.expect("a readable entry").path();
@@ -767,6 +768,199 @@ fn the_multi_file_example_builds_and_runs() {
     std::fs::write(&doc, "alpha beta alpha\ngamma beta alpha\n").expect("a writable fixture");
     let counted = Command::new(&exe).arg(&doc).output().expect("the compiled program runs");
     assert_eq!(String::from_utf8_lossy(&counted.stdout), "gamma 1\nbeta 2\nalpha 3\n");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A module's whole cost to the identity system, which is nothing
+/// (`docs/modules.md` §2).
+///
+/// `canonical-ast.md` §1 has said since M0 that "moving a function
+/// between files changes nothing about it". A module could have broken
+/// that, and did not -- because a call already encodes the callee's
+/// **hash** rather than its spelling, for an unrelated reason.
+///
+/// So this compiles the same two functions twice: once flat, once with
+/// the callee in a module and the caller reaching it through an import.
+/// All four hashes must be identical. Not similar -- the same.
+#[test]
+fn moving_a_function_into_a_module_changes_no_hash() {
+    let ids = |tag: &str, files: &[(&str, &str)]| -> String {
+        let dir = scratch(tag);
+        let mut command = Command::new(BIN);
+        command.arg("ids");
+        for (name, source) in files {
+            let path = dir.join(name);
+            std::fs::write(&path, source).expect("a writable fixture");
+            command.arg(path);
+        }
+        let out = command.output().expect("the compiler runs");
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        // Sorted, because the two programs list their declarations in
+        // different orders and this is a claim about hashes, not order.
+        let mut lines: Vec<String> =
+            String::from_utf8_lossy(&out.stdout).lines().map(str::to_owned).collect();
+        lines.sort();
+        let _ = std::fs::remove_dir_all(&dir);
+        lines.join("\n")
+    };
+
+    let flat = ids(
+        "modules-identity-flat",
+        &[(
+            "flat.ls",
+            "fn twice(n: int) -> [] int { return n + n; }\n\
+             fn caller() -> [] int { return twice(21); }\n",
+        )],
+    );
+    let modular = ids(
+        "modules-identity-modular",
+        &[
+            ("user.ls", "import m;\nfn caller() -> [] int { return m.twice(21); }\n"),
+            ("lib.ls", "module m;\npub fn twice(n: int) -> [] int { return n + n; }\n"),
+        ],
+    );
+
+    assert_eq!(flat, modular, "a module reached the hash, and it must not");
+}
+
+/// The multi-file half of `docs/modules.md` §8's suite.
+///
+/// These need two files each, so they cannot be `tests/reject/` fixtures
+/// -- that walker compiles one file at a time. Same discipline all the
+/// same: every rule in the document has a program that breaks it, and the
+/// message it is refused with is written down.
+#[test]
+fn the_module_rules_are_enforced_across_files() {
+    const LIB: &str = "module lib;\n\
+                       pub fn shown() -> [] int { return 1; }\n\
+                       fn hidden() -> [] int { return 2; }\n\
+                       struct Secret { n: int }\n\
+                       pub struct Open { n: int }\n";
+
+    let refused = |tag: &str, main: &str| -> String {
+        let (_, build) = build_many(tag, &[("main.ls", main), ("lib.ls", LIB)]);
+        assert!(!build.status.success(), "`{tag}` should have been refused");
+        String::from_utf8_lossy(&build.stderr).into_owned()
+    };
+
+    // §5: private is private.
+    let private = refused(
+        "modules-private",
+        "import lib;\n\
+         fn main(world: World) -> [] int {\n\
+             let Split { io, ffi, fs, heap, args } = split(world);\n\
+             release(args); release(ffi); release(fs); release(heap); release(io);\n\
+             return lib.hidden();\n\
+         }\n",
+    );
+    assert!(private.contains("`hidden` is not `pub`"), "{private}");
+
+    // §5, for a type rather than a function.
+    let private_type = refused(
+        "modules-private-type",
+        "import lib;\n\
+         fn main(world: World) -> [] int {\n\
+             let Split { io, ffi, fs, heap, args } = split(world);\n\
+             release(args); release(ffi); release(fs); release(heap); release(io);\n\
+             let s: lib.Secret = lib.Secret { n: 1 };\n\
+             return s.n;\n\
+         }\n",
+    );
+    assert!(private_type.contains("`Secret` is not `pub`"), "{private_type}");
+
+    // §4.1: an import binds a qualifier, not a set of names. `shown` is
+    // `pub` and imported, and still not in scope unqualified.
+    let unqualified = refused(
+        "modules-unqualified",
+        "import lib;\n\
+         fn main(world: World) -> [] int {\n\
+             let Split { io, ffi, fs, heap, args } = split(world);\n\
+             release(args); release(ffi); release(fs); release(heap); release(io);\n\
+             return shown();\n\
+         }\n",
+    );
+    assert!(unqualified.contains("`shown` is not a function"), "{unqualified}");
+
+    // §4: a qualified name that is not there is an error, never a
+    // fall back to the local module. `elsewhere` is defined right here.
+    let missing = refused(
+        "modules-missing",
+        "import lib;\n\
+         fn elsewhere() -> [] int { return 3; }\n\
+         fn main(world: World) -> [] int {\n\
+             let Split { io, ffi, fs, heap, args } = split(world);\n\
+             release(args); release(ffi); release(fs); release(heap); release(io);\n\
+             return lib.elsewhere();\n\
+         }\n",
+    );
+    assert!(missing.contains("`elsewhere` is not a function"), "{missing}");
+
+    // §4: two imports may not bind one qualifier.
+    let (_, collision) = build_many(
+        "modules-collision",
+        &[
+            (
+                "main.ls",
+                "import lib;\n\
+                 import other.lib;\n\
+                 fn main(world: World) -> [] int {\n\
+                     let Split { io, ffi, fs, heap, args } = split(world);\n\
+                     release(args); release(ffi); release(fs); release(heap); release(io);\n\
+                     return 0;\n\
+                 }\n",
+            ),
+            ("lib.ls", LIB),
+            ("other.ls", "module other.lib;\npub fn nothing() -> [] int { return 0; }\n"),
+        ],
+    );
+    assert!(!collision.status.success(), "two imports bound `lib`");
+    let text = String::from_utf8_lossy(&collision.stderr);
+    assert!(text.contains("is already bound to another import"), "{text}");
+
+    // And the same program with an `as` is accepted, which is what makes
+    // the refusal above a rule rather than a limit.
+    let (_, renamed) = build_many(
+        "modules-renamed",
+        &[
+            (
+                "main.ls",
+                "import lib;\n\
+                 import other.lib as other;\n\
+                 fn main(world: World) -> [] int {\n\
+                     let Split { io, ffi, fs, heap, args } = split(world);\n\
+                     release(args); release(ffi); release(fs); release(heap); release(io);\n\
+                     return lib.shown() + other.nothing() - 1;\n\
+                 }\n",
+            ),
+            ("lib.ls", LIB),
+            ("other.ls", "module other.lib;\npub fn nothing() -> [] int { return 0; }\n"),
+        ],
+    );
+    assert!(renamed.status.success(), "{}", String::from_utf8_lossy(&renamed.stderr));
+}
+
+/// `examples/modular/` — two modules and a root, with a qualifier, an
+/// `as`, a private helper and a module importing another.
+#[test]
+fn the_modular_example_builds_and_runs() {
+    let root = repo_root().join("examples").join("modular");
+    let dir = scratch("modular-example");
+    let exe = dir.join("modular");
+    let build = Command::new(BIN)
+        .arg("build")
+        .arg(root.join("main.ls"))
+        .arg(root.join("counts.ls"))
+        .arg(root.join("text.ls"))
+        .arg("-o")
+        .arg(&exe)
+        .output()
+        .expect("the compiler runs");
+    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+
+    let run = Command::new(&exe).output().expect("the compiled program runs");
+    assert_eq!(String::from_utf8_lossy(&run.stdout), "seen 3, total 60\n60\n");
+    assert_eq!(run.status.code(), Some(0));
 
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -1,5 +1,15 @@
 # A program in more than one file
 
+> **Followed by `docs/modules.md`.** This document chose *one flat
+> namespace* — "no `import`, no namespaces, no visibility, because each
+> of those is a design and the minimum that unblocks a library is none of
+> them". That was right for a library and not enough for a *standard*
+> one, so all three now exist. Everything below still holds: a program is
+> still the set of files named on the command line, a file that declares
+> no module is still in the root, and identity is still by content rather
+> than by location — a module reaches no hash.
+
+
 > **Status: settled, and built in the same change.** The gate for the
 > sentence three design docs have now had to write: *"there is nowhere to
 > put a library."* `heap.md` §5 says it of `Rc` and `Gen`,

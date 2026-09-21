@@ -19,8 +19,8 @@
 use std::collections::HashMap;
 
 use lex_sys_syntax::ast::{
-    Ast, BinOp, Block, EffectLabel, EnumDecl, Expr, ExprId, ExternDecl, FnDecl, Item, Stmt, StmtId,
-    StructDecl, Symbol, TypeExpr, TypeId, UnOp,
+    Ast, BinOp, Block, EffectLabel, EnumDecl, Expr, ExprId, ExternDecl, FnDecl, Item, ItemId, Stmt,
+    StmtId, StructDecl, Symbol, TypeExpr, TypeId, UnOp,
 };
 
 /// A 32-byte content hash.
@@ -271,63 +271,98 @@ impl Identities {
 /// its callees by `SigId` and to types by `TypeId`. That ordering is what
 /// keeps the graph acyclic even when the source is not.
 pub fn identify(ast: &Ast) -> Identities {
-    let mut type_ids: HashMap<Symbol, Hash> = HashMap::new();
-    for item in &ast.items {
+    let each = |kind: fn(&Item) -> bool| {
+        (0..ast.items.len() as u32)
+            .map(ItemId)
+            .filter(move |id| kind(&ast.items[id.index()]))
+            .map(move |id| (ast.module_of(id), &ast.items[id.index()]))
+    };
+
+    let mut type_ids: Names = Names::new();
+    for (module, item) in each(|i| matches!(i, Item::Struct(_) | Item::Enum(_))) {
         match item {
             Item::Struct(decl) => {
-                type_ids.insert(decl.name, hash_struct(ast, decl));
+                type_ids.insert((module, decl.name), hash_struct(ast, decl, module, &Names::new()));
             }
             Item::Enum(decl) => {
-                type_ids.insert(decl.name, hash_enum(ast, decl));
+                type_ids.insert((module, decl.name), hash_enum(ast, decl, module, &Names::new()));
             }
-            Item::Fn(_) | Item::Extern(_) => {}
+            _ => {}
+        }
+    }
+    // A second pass, now that every declared name is known: a type's own
+    // hash may mention another declared type, and in one flat namespace
+    // the first pass could not have resolved it. Modules did not add this
+    // -- `docs/canonical-ast.md` has always hashed a member's type through
+    // the declaration it names.
+    let known = type_ids.clone();
+    let mut type_ids: Names = Names::new();
+    for (module, item) in each(|i| matches!(i, Item::Struct(_) | Item::Enum(_))) {
+        match item {
+            Item::Struct(decl) => {
+                type_ids.insert((module, decl.name), hash_struct(ast, decl, module, &known));
+            }
+            Item::Enum(decl) => {
+                type_ids.insert((module, decl.name), hash_enum(ast, decl, module, &known));
+            }
+            _ => {}
         }
     }
 
-    let mut sig_ids: HashMap<Symbol, Hash> = HashMap::new();
-    for item in &ast.items {
+    let mut sig_ids: Names = Names::new();
+    for (module, item) in each(|i| matches!(i, Item::Fn(_) | Item::Extern(_))) {
         match item {
             Item::Fn(decl) => {
-                sig_ids.insert(decl.name, hash_signature(ast, decl, &type_ids));
+                sig_ids.insert((module, decl.name), hash_signature(ast, decl, module, &type_ids));
             }
             // A foreign declaration is a signature and nothing else, so it
             // has one identity rather than two. A caller depends on it the
             // same way it depends on any other signature.
             Item::Extern(decl) => {
-                sig_ids.insert(decl.name, hash_extern(ast, decl, &type_ids));
+                sig_ids.insert((module, decl.name), hash_extern(ast, decl, module, &type_ids));
             }
             _ => {}
         }
     }
 
     let mut identities = Identities::default();
-    for item in &ast.items {
-        match item {
+    for id in (0..ast.items.len() as u32).map(ItemId) {
+        let module = ast.module_of(id);
+        match &ast.items[id.index()] {
             Item::Fn(decl) => identities.functions.push(FunctionId {
                 name: ast.name_of(decl.name).to_owned(),
-                sig: sig_ids[&decl.name],
-                body: hash_body(ast, decl, &sig_ids, &type_ids),
+                sig: sig_ids[&(module, decl.name)],
+                body: hash_body(ast, decl, module, &sig_ids, &type_ids),
             }),
             // A foreign function has no body, so its two identities are the
             // same hash: there is nothing to rewrite that a caller could
             // fail to notice.
             Item::Extern(decl) => identities.functions.push(FunctionId {
                 name: ast.name_of(decl.name).to_owned(),
-                sig: sig_ids[&decl.name],
-                body: sig_ids[&decl.name],
+                sig: sig_ids[&(module, decl.name)],
+                body: sig_ids[&(module, decl.name)],
             }),
             Item::Struct(decl) => identities.types.push(TypeDeclId {
                 name: ast.name_of(decl.name).to_owned(),
-                id: type_ids[&decl.name],
+                id: type_ids[&(module, decl.name)],
             }),
             Item::Enum(decl) => identities.types.push(TypeDeclId {
                 name: ast.name_of(decl.name).to_owned(),
-                id: type_ids[&decl.name],
+                id: type_ids[&(module, decl.name)],
             }),
         }
     }
     identities
 }
+
+/// Declared names, keyed by the module that declares them
+/// (`docs/modules.md` §2).
+///
+/// The *key* carries the module; the hash does not. That is the whole of
+/// §2 in one type: two modules may declare `print_nat` and the map tells
+/// them apart, while neither hash mentions a module and moving a
+/// declaration between them changes nothing.
+type Names = HashMap<(u32, Symbol), Hash>;
 
 /// A written type, encoded structurally.
 ///
@@ -338,7 +373,8 @@ fn encode_type(
     ast: &Ast,
     encoder: &mut Encoder,
     id: TypeId,
-    type_ids: &HashMap<Symbol, Hash>,
+    module: u32,
+    type_ids: &Names,
     generics: &[Symbol],
     regions: &[Symbol],
 ) {
@@ -358,7 +394,7 @@ fn encode_type(
                 encoder.tag(tag::NONE).str(ast.name_of(region));
             }
         }
-        encode_type(ast, encoder, inner, type_ids, generics, regions);
+        encode_type(ast, encoder, inner, module, type_ids, generics, regions);
         return;
     }
 
@@ -367,7 +403,7 @@ fn encode_type(
     if let TypeExpr::Slice(inner) = written {
         let inner = *inner;
         encoder.tag(tag::TYPE_SLICE);
-        encode_type(ast, encoder, inner, type_ids, generics, regions);
+        encode_type(ast, encoder, inner, module, type_ids, generics, regions);
         return;
     }
 
@@ -380,7 +416,7 @@ fn encode_type(
         let parts = parts.clone();
         encoder.tag(tag::TYPE_TUPLE).len(parts.len());
         for part in parts {
-            encode_type(ast, encoder, part, type_ids, generics, regions);
+            encode_type(ast, encoder, part, module, type_ids, generics, regions);
         }
         return;
     }
@@ -393,29 +429,37 @@ fn encode_type(
         return;
     }
 
-    let (name, args) = (
-        written.head().expect("a reference and a literal were handled above"),
-        written.args().to_vec(),
-    );
+    let (name, qualifier, args) = match written {
+        TypeExpr::Name { name, qualifier, args } => (*name, *qualifier, args.clone()),
+        other => {
+            unreachable!("a reference, a literal, a slice and a tuple were handled: {other:?}")
+        }
+    };
     encoder.tag(tag::TYPE_NAME);
 
     // A generic parameter is positional: `f[T](x: T)` and `f[U](x: U)` differ
     // in no way a caller can see.
+    // `docs/modules.md` §2: the *qualifier* decides which declaration this
+    // names, and then the declaration's **hash** is what gets encoded. The
+    // qualifier itself never reaches the encoder, which is why moving a
+    // type into a module changes no hash that mentions it.
+    let declared =
+        ast.resolve_module(module, qualifier).and_then(|m| type_ids.get(&(m, name)).copied());
     if let Some(index) = generics.iter().position(|g| *g == name) {
         encoder.tag(tag::LOCAL).u32(index as u32);
-    } else if let Some(hash) = type_ids.get(&name) {
-        encoder.tag(tag::FREE).hash(*hash);
+    } else if let Some(hash) = declared {
+        encoder.tag(tag::FREE).hash(hash);
     } else {
         encoder.tag(tag::NONE).str(ast.name_of(name));
     }
 
     encoder.len(args.len());
     for arg in &args {
-        encode_type(ast, encoder, *arg, type_ids, generics, regions);
+        encode_type(ast, encoder, *arg, module, type_ids, generics, regions);
     }
 }
 
-fn hash_signature(ast: &Ast, decl: &FnDecl, type_ids: &HashMap<Symbol, Hash>) -> Hash {
+fn hash_signature(ast: &Ast, decl: &FnDecl, module: u32, type_ids: &Names) -> Hash {
     let mut encoder = Encoder::default();
     encoder.str(ast.name_of(decl.name));
     // The *count* of generics, not their names.
@@ -446,9 +490,9 @@ fn hash_signature(ast: &Ast, decl: &FnDecl, type_ids: &HashMap<Symbol, Hash>) ->
     for param in &decl.params {
         // Parameter names are excluded: lex-sys has no named arguments, so a
         // caller cannot observe them.
-        encode_type(ast, &mut encoder, param.ty, type_ids, &decl.generics, &decl.regions);
+        encode_type(ast, &mut encoder, param.ty, module, type_ids, &decl.generics, &decl.regions);
     }
-    encode_type(ast, &mut encoder, decl.ret, type_ids, &decl.generics, &decl.regions);
+    encode_type(ast, &mut encoder, decl.ret, module, type_ids, &decl.generics, &decl.regions);
     encoder.finish(DOMAIN_SIG)
 }
 
@@ -478,7 +522,7 @@ fn encode_effects(ast: &Ast, encoder: &mut Encoder, effects: &[EffectLabel]) {
 ///
 /// The linker symbol is part of it: two declarations that agree on
 /// everything but which C function they bind are not the same declaration.
-fn hash_extern(ast: &Ast, decl: &ExternDecl, type_ids: &HashMap<Symbol, Hash>) -> Hash {
+fn hash_extern(ast: &Ast, decl: &ExternDecl, module: u32, type_ids: &Names) -> Hash {
     let mut encoder = Encoder::default();
     encoder.tag(tag::EXTERN_DECL);
     encoder.str(ast.name_of(decl.name));
@@ -487,13 +531,13 @@ fn hash_extern(ast: &Ast, decl: &ExternDecl, type_ids: &HashMap<Symbol, Hash>) -
     encode_effects(ast, &mut encoder, &decl.effects);
     encoder.len(decl.params.len());
     for param in &decl.params {
-        encode_type(ast, &mut encoder, param.ty, type_ids, &[], &decl.regions);
+        encode_type(ast, &mut encoder, param.ty, module, type_ids, &[], &decl.regions);
     }
-    encode_type(ast, &mut encoder, decl.ret, type_ids, &[], &decl.regions);
+    encode_type(ast, &mut encoder, decl.ret, module, type_ids, &[], &decl.regions);
     encoder.finish(DOMAIN_SIG)
 }
 
-fn hash_struct(ast: &Ast, decl: &StructDecl) -> Hash {
+fn hash_struct(ast: &Ast, decl: &StructDecl, module: u32, type_ids: &Names) -> Hash {
     let mut encoder = Encoder::default();
     encoder.tag(tag::STRUCT_DECL);
     encoder.tag(tag::mode_tag(decl.mode));
@@ -504,12 +548,12 @@ fn hash_struct(ast: &Ast, decl: &StructDecl) -> Hash {
         // Field names *are* observable: a literal names them, and field order
         // is positional to the backend.
         encoder.str(ast.name_of(field.name));
-        encode_type(ast, &mut encoder, field.ty, &HashMap::new(), &decl.generics, &[]);
+        encode_type(ast, &mut encoder, field.ty, module, type_ids, &decl.generics, &[]);
     }
     encoder.finish(DOMAIN_TYPE)
 }
 
-fn hash_enum(ast: &Ast, decl: &EnumDecl) -> Hash {
+fn hash_enum(ast: &Ast, decl: &EnumDecl, module: u32, type_ids: &Names) -> Hash {
     let mut encoder = Encoder::default();
     encoder.tag(tag::ENUM_DECL);
     encoder.tag(tag::mode_tag(decl.mode));
@@ -520,7 +564,7 @@ fn hash_enum(ast: &Ast, decl: &EnumDecl) -> Hash {
         encoder.str(ast.name_of(variant.name));
         encoder.len(variant.payload.len());
         for ty in &variant.payload {
-            encode_type(ast, &mut encoder, *ty, &HashMap::new(), &decl.generics, &[]);
+            encode_type(ast, &mut encoder, *ty, module, type_ids, &decl.generics, &[]);
         }
     }
     encoder.finish(DOMAIN_TYPE)
@@ -542,8 +586,11 @@ impl Scope {
 
 struct BodyHasher<'a> {
     ast: &'a Ast,
-    sig_ids: &'a HashMap<Symbol, Hash>,
-    type_ids: &'a HashMap<Symbol, Hash>,
+    /// The module this body is *in*, which is where an unqualified name
+    /// is looked up (`docs/modules.md` §4).
+    module: u32,
+    sig_ids: &'a Names,
+    type_ids: &'a Names,
     generics: Vec<Symbol>,
     /// The regions nameable here: the declaration's parameters, plus one per
     /// `borrow` block currently open. Positional, like every other binder.
@@ -552,14 +599,10 @@ struct BodyHasher<'a> {
     encoder: Encoder,
 }
 
-fn hash_body(
-    ast: &Ast,
-    decl: &FnDecl,
-    sig_ids: &HashMap<Symbol, Hash>,
-    type_ids: &HashMap<Symbol, Hash>,
-) -> Hash {
+fn hash_body(ast: &Ast, decl: &FnDecl, module: u32, sig_ids: &Names, type_ids: &Names) -> Hash {
     let mut hasher = BodyHasher {
         ast,
+        module,
         sig_ids,
         type_ids,
         generics: decl.generics.clone(),
@@ -599,6 +642,7 @@ impl BodyHasher<'_> {
                             self.ast,
                             &mut self.encoder,
                             written,
+                            self.module,
                             self.type_ids,
                             &generics,
                             &regions,
@@ -698,9 +742,9 @@ impl BodyHasher<'_> {
                 self.block(body);
                 self.regions.pop();
             }
-            Stmt::Destructure { struct_name, fields, value } => {
+            Stmt::Destructure { struct_name, qualifier, fields, value } => {
                 self.encoder.tag(tag::DESTRUCTURE);
-                self.type_reference(*struct_name);
+                self.qualified_type_reference(*qualifier, *struct_name);
                 // Field *names* are encoded, because which field each binder
                 // takes is what the pattern says; the binders themselves are
                 // positional from here on, like any other local.
@@ -739,28 +783,51 @@ impl BodyHasher<'_> {
 
     /// A name: its binder's position if it is bound, otherwise its identity.
     fn name(&mut self, name: Symbol) {
-        match self.scope.position(name) {
-            Some(index) => {
+        self.qualified_name(None, name);
+    }
+
+    /// A call's target, possibly reached through an imported module.
+    ///
+    /// `docs/modules.md` §2, the claim the whole document turns on: what
+    /// is encoded is the callee's **hash**, never its spelling and never
+    /// the qualifier used to reach it. A local binding still wins over a
+    /// declaration, and only an unqualified name can be one.
+    fn qualified_name(&mut self, qualifier: Option<Symbol>, name: Symbol) {
+        if qualifier.is_none() {
+            if let Some(index) = self.scope.position(name) {
                 self.encoder.tag(tag::LOCAL).u32(index as u32);
+                return;
             }
-            None => match self.sig_ids.get(&name) {
-                // A call's target contributes its *signature*, so a callee's
-                // body may be rewritten without touching this hash.
-                Some(sig) => {
-                    self.encoder.tag(tag::FREE).hash(*sig);
-                }
-                None => {
-                    self.encoder.tag(tag::NONE).str(self.ast.name_of(name));
-                }
-            },
+        }
+        let target = self
+            .ast
+            .resolve_module(self.module, qualifier)
+            .and_then(|m| self.sig_ids.get(&(m, name)).copied());
+        match target {
+            // A call's target contributes its *signature*, so a callee's
+            // body may be rewritten without touching this hash.
+            Some(sig) => {
+                self.encoder.tag(tag::FREE).hash(sig);
+            }
+            None => {
+                self.encoder.tag(tag::NONE).str(self.ast.name_of(name));
+            }
         }
     }
 
     /// A type mentioned by name in a body, such as an enum in a pattern.
     fn type_reference(&mut self, name: Symbol) {
-        match self.type_ids.get(&name) {
+        self.qualified_type_reference(None, name);
+    }
+
+    fn qualified_type_reference(&mut self, qualifier: Option<Symbol>, name: Symbol) {
+        let target = self
+            .ast
+            .resolve_module(self.module, qualifier)
+            .and_then(|m| self.type_ids.get(&(m, name)).copied());
+        match target {
             Some(hash) => {
-                self.encoder.tag(tag::FREE).hash(*hash);
+                self.encoder.tag(tag::FREE).hash(hash);
             }
             None => {
                 self.encoder.tag(tag::NONE).str(self.ast.name_of(name));
@@ -829,9 +896,9 @@ impl BodyHasher<'_> {
                 self.region_reference(*region);
                 self.expr(*value);
             }
-            Expr::StructLit { name, fields } => {
+            Expr::StructLit { name, qualifier, fields } => {
                 self.encoder.tag(tag::STRUCT_LIT);
-                self.type_reference(*name);
+                self.qualified_type_reference(*qualifier, *name);
                 // Field order as written is *not* canonicalised here: the
                 // checker reorders into declaration order, and two literals
                 // differing only in the order they list fields are the same
@@ -851,9 +918,9 @@ impl BodyHasher<'_> {
                 self.expr(*base);
                 self.encoder.str(self.ast.name_of(*name));
             }
-            Expr::Variant { enum_name, variant, args } => {
+            Expr::Variant { enum_name, qualifier, variant, args } => {
                 self.encoder.tag(tag::VARIANT);
-                self.type_reference(*enum_name);
+                self.qualified_type_reference(*qualifier, *enum_name);
                 self.encoder.str(self.ast.name_of(*variant));
                 self.encoder.len(args.len());
                 for arg in args {
@@ -869,9 +936,9 @@ impl BodyHasher<'_> {
                 self.expr(*lhs);
                 self.expr(*rhs);
             }
-            Expr::Call { callee, args } => {
+            Expr::Call { callee, qualifier, args } => {
                 self.encoder.tag(tag::CALL);
-                self.name(*callee);
+                self.qualified_name(*qualifier, *callee);
                 self.encoder.len(args.len());
                 for arg in args {
                     self.expr(*arg);
@@ -943,6 +1010,77 @@ mod tests {
         // And order is part of it, as §2.2 says.
         let flipped = "fn f(t: (bool, int)) -> [] int { return 0; }";
         assert_ne!(sig(alone, "f"), sig(flipped, "f"));
+    }
+
+    /// `docs/modules.md` §2, the claim the document turns on.
+    ///
+    /// A module is a namespace, not an identity. Moving a declaration
+    /// into one changes neither its own hashes nor any caller's, because
+    /// a call encodes the callee's **hash** rather than its spelling --
+    /// which has been true since M0, for an unrelated reason.
+    #[test]
+    fn a_module_reaches_no_hash() {
+        let flat = "fn twice(n: int) -> [] int { return n + n; } \
+                    fn caller() -> [] int { return twice(21); }";
+        let modular = "module m; \
+                       pub fn twice(n: int) -> [] int { return n + n; }";
+        // Two files, one `Ast` -- which is how a program is compiled
+        // (`many-files.md`), so this is the real shape rather than a
+        // convenience.
+        let mut ast = Ast::new();
+        lex_sys_syntax::parse_into(
+            &mut ast,
+            "import m; fn caller() -> [] int { return m.twice(21); }",
+            0,
+        )
+        .expect("should parse");
+        lex_sys_syntax::parse_into(&mut ast, modular, 1000).expect("should parse");
+        let with_modules = identify(&ast);
+
+        assert_eq!(
+            sig(flat, "twice"),
+            with_modules.function("twice").expect("twice").sig,
+            "a module reached a signature"
+        );
+        assert_eq!(
+            body(flat, "twice"),
+            with_modules.function("twice").expect("twice").body,
+            "a module reached a body"
+        );
+        assert_eq!(
+            body(flat, "caller"),
+            with_modules.function("caller").expect("caller").body,
+            "qualifying a call reached the caller's body"
+        );
+    }
+
+    /// The other side of §2: a module is not an identity, so it cannot be
+    /// used to tell two declarations apart *in a hash*.
+    ///
+    /// Two modules each declaring `twice` give the same hash, because the
+    /// declarations are the same declaration. That is not a collision --
+    /// it is content-addressing working: identical code has one identity
+    /// however many namespaces mention it.
+    #[test]
+    fn two_modules_declaring_the_same_function_agree_on_its_hash() {
+        let mut ast = Ast::new();
+        lex_sys_syntax::parse_into(
+            &mut ast,
+            "module a; pub fn twice(n: int) -> [] int { return n + n; }",
+            0,
+        )
+        .expect("should parse");
+        lex_sys_syntax::parse_into(
+            &mut ast,
+            "module b; pub fn twice(n: int) -> [] int { return n + n; }",
+            1000,
+        )
+        .expect("should parse");
+        let ids = identify(&ast);
+        let both: Vec<_> = ids.functions.iter().filter(|f| f.name == "twice").collect();
+        assert_eq!(both.len(), 2, "two declarations");
+        assert_eq!(both[0].sig, both[1].sig);
+        assert_eq!(both[0].body, both[1].body);
     }
 
     #[test]

@@ -26,6 +26,12 @@ pub enum TokenKind {
     Res,
     Val,
     Extern,
+    /// `module a.b;` and `import a.b;` (`docs/modules.md`).
+    Module,
+    Import,
+    /// `pub` — reachable from another module. Never *safe*: §6 says a
+    /// module is not a trust boundary, and `pub` does not grant authority.
+    Pub,
     Borrow,
     Region,
     As,
@@ -91,6 +97,9 @@ impl TokenKind {
             TokenKind::Match => "`match`",
             TokenKind::Res => "`res`",
             TokenKind::Extern => "`extern`",
+            TokenKind::Module => "`module`",
+            TokenKind::Import => "`import`",
+            TokenKind::Pub => "`pub`",
             TokenKind::Borrow => "`borrow`",
             TokenKind::Region => "`region`",
             TokenKind::As => "`as`",
@@ -305,6 +314,9 @@ fn keyword(s: &str) -> Option<TokenKind> {
         "match" => TokenKind::Match,
         "res" => TokenKind::Res,
         "extern" => TokenKind::Extern,
+        "module" => TokenKind::Module,
+        "import" => TokenKind::Import,
+        "pub" => TokenKind::Pub,
         "val" => TokenKind::Val,
         "borrow" => TokenKind::Borrow,
         "region" => TokenKind::Region,

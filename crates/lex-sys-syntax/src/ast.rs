@@ -87,8 +87,13 @@ impl Interner {
 /// generics need no second syntax when they arrive.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum TypeExpr {
-    /// `int`, `Pair[int, bool]` — a name, optionally applied to arguments.
-    Name { name: Symbol, args: Vec<TypeId> },
+    /// `int`, `Pair[int, bool]`, `io.Buffer` — a name, optionally
+    /// qualified by an imported module and applied to arguments.
+    ///
+    /// The qualifier is a *binding* made by an `import`, not a path: a
+    /// module is reached as `io.`, never as `std.io.`
+    /// (`docs/modules.md` §4).
+    Name { name: Symbol, qualifier: Option<Symbol>, args: Vec<TypeId> },
     /// `&r T` and `&!r T` (`docs/linearity-and-effects.md` §5). The region is
     /// a name the parser does not resolve, exactly like a type's name.
     Ref { unique: bool, region: Symbol, inner: TypeId },
@@ -185,6 +190,7 @@ pub enum Expr {
     /// the order they were declared.
     StructLit {
         name: Symbol,
+        qualifier: Option<Symbol>,
         fields: Vec<(Symbol, ExprId)>,
     },
     /// `p.x`
@@ -214,6 +220,7 @@ pub enum Expr {
     /// enums want.
     Variant {
         enum_name: Symbol,
+        qualifier: Option<Symbol>,
         variant: Symbol,
         args: Vec<ExprId>,
     },
@@ -228,6 +235,10 @@ pub enum Expr {
     },
     Call {
         callee: Symbol,
+        /// The module this call reaches into, if it was written `q.f(..)`
+        /// (`docs/modules.md` §4). `None` is the ordinary case: a name in
+        /// the caller's own module.
+        qualifier: Option<Symbol>,
         args: Vec<ExprId>,
     },
     /// `s[i]` — one element of a slice, bounds-checked at runtime.
@@ -296,6 +307,7 @@ pub enum Stmt {
     /// the rule in turn. Fields bind under their own names.
     Destructure {
         struct_name: Symbol,
+        qualifier: Option<Symbol>,
         fields: Vec<Symbol>,
         value: ExprId,
     },
@@ -396,6 +408,9 @@ pub struct Param {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct FnDecl {
     pub name: Symbol,
+    /// `pub` — reachable from another module (`docs/modules.md` §5).
+    /// Never *safe*: §6 says a module is not a trust boundary.
+    pub public: bool,
     pub generics: Vec<Symbol>,
     /// Region parameters, written `&r` in the same bracket list as the type
     /// parameters (§5.1). They are marked at the binder rather than inferred
@@ -456,6 +471,9 @@ pub struct FieldDecl {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct StructDecl {
     pub name: Symbol,
+    /// `pub` — reachable from another module (`docs/modules.md` §5).
+    /// Never *safe*: §6 says a module is not a trust boundary.
+    pub public: bool,
     /// `None` where the declaration did not say; the checker infers it.
     pub mode: Option<Mode>,
     /// Type parameters, in declaration order. `Type::Param(i)` refers to the
@@ -474,6 +492,9 @@ pub struct VariantDecl {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct EnumDecl {
     pub name: Symbol,
+    /// `pub` — reachable from another module (`docs/modules.md` §5).
+    /// Never *safe*: §6 says a module is not a trust boundary.
+    pub public: bool,
     pub mode: Option<Mode>,
     pub generics: Vec<Symbol>,
     pub variants: Vec<VariantDecl>,
@@ -487,11 +508,52 @@ pub enum Item {
     Enum(EnumDecl),
 }
 
+/// `import a.b;` / `import a.b as c;` (`docs/modules.md` §4).
+///
+/// The binding is a **qualifier**, not a set of names: it says what `c.`
+/// means, and nothing comes into scope unqualified.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Import {
+    /// The module's path, segment by segment.
+    pub path: Vec<Symbol>,
+    /// What it is bound as: the last segment, or whatever `as` named.
+    pub alias: Symbol,
+    pub span: Span,
+}
+
+/// A namespace (`docs/modules.md` §3).
+///
+/// The root module has an empty path and needs no declaration, which is
+/// why every program written before modules still compiles.
+///
+/// Imports live here rather than on a file because §3.2 lets two files
+/// declare one module and share its namespace — and a namespace you share
+/// while each half sees different names is two namespaces wearing one
+/// name.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct Module {
+    pub path: Vec<Symbol>,
+    pub imports: Vec<Import>,
+}
+
+impl Module {
+    pub fn is_root(&self) -> bool {
+        self.path.is_empty()
+    }
+}
+
 /// A parsed compilation unit: three arenas, three span side tables, one
 /// interner, and the item order the file had.
 #[derive(Default, Debug)]
 pub struct Ast {
     pub items: Vec<Item>,
+    /// Every namespace the program declares, root first
+    /// (`docs/modules.md` §3). Index 0 is always the root.
+    pub modules: Vec<Module>,
+    /// Which module each item belongs to, parallel to `items`. A side
+    /// table rather than a field on `Item`, so nothing that walks items
+    /// has to know modules exist unless it asks.
+    item_modules: Vec<u32>,
     pub exprs: Vec<Expr>,
     pub stmts: Vec<Stmt>,
     pub types: Vec<TypeExpr>,
@@ -525,7 +587,48 @@ impl Ast {
         for name in PRELUDE {
             ast.symbols.intern(name);
         }
+        // The root is module 0 and is never declared: a file that says
+        // nothing is in it (`docs/modules.md` §3).
+        ast.modules.push(Module::default());
         ast
+    }
+
+    /// The module an item belongs to.
+    pub fn module_of(&self, item: ItemId) -> u32 {
+        self.item_modules[item.index()]
+    }
+
+    pub fn module(&self, index: u32) -> &Module {
+        &self.modules[index as usize]
+    }
+
+    /// Which module a reference resolves *into*, from `from`, given the
+    /// qualifier it was written with (`docs/modules.md` §4).
+    ///
+    /// Shared rather than implemented twice: `lex-sys-id` needs it to
+    /// decide which declaration a call names, and `lex-sys-ir` needs it to
+    /// check the same call. Two copies that disagreed would make a hash
+    /// and its meaning drift apart, which is the one thing a
+    /// content-addressed store cannot survive.
+    ///
+    /// `None` means the qualifier is not bound here, which is an error the
+    /// caller reports -- this function has no opinion about programs.
+    pub fn resolve_module(&self, from: u32, qualifier: Option<Symbol>) -> Option<u32> {
+        let Some(qualifier) = qualifier else {
+            return Some(from);
+        };
+        let import = self.modules[from as usize].imports.iter().find(|i| i.alias == qualifier)?;
+        self.modules.iter().position(|m| m.path == import.path).map(|i| i as u32)
+    }
+
+    /// Find a module by its path, or declare it. Two files declaring one
+    /// module get the same index, which is what makes §3.2 true.
+    pub fn module_named(&mut self, path: &[Symbol]) -> u32 {
+        if let Some(index) = self.modules.iter().position(|m| m.path == path) {
+            return index as u32;
+        }
+        self.modules.push(Module { path: path.to_vec(), imports: Vec::new() });
+        self.modules.len() as u32 - 1
     }
 
     pub fn push_expr(&mut self, expr: Expr, span: Span) -> ExprId {
@@ -546,9 +649,17 @@ impl Ast {
         TypeId(self.types.len() as u32 - 1)
     }
 
+    /// Push an item into the root module. Every caller that predates
+    /// `docs/modules.md` means this, and the root is where a file with no
+    /// `module` declaration puts things.
     pub fn push_item(&mut self, item: Item, span: Span) -> ItemId {
+        self.push_item_in(item, span, 0)
+    }
+
+    pub fn push_item_in(&mut self, item: Item, span: Span, module: u32) -> ItemId {
         self.items.push(item);
         self.item_spans.push(span);
+        self.item_modules.push(module);
         ItemId(self.items.len() as u32 - 1)
     }
 

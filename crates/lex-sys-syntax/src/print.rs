@@ -24,18 +24,39 @@
 use std::fmt::Write as _;
 
 use crate::ast::{
-    Ast, BinOp, Block, EffectLabel, EnumDecl, Expr, ExprId, ExternDecl, FnDecl, Item, Mode, Param,
-    Pattern, Stmt, StmtId, StructDecl, Symbol, TypeExpr, TypeId, UnOp,
+    Ast, BinOp, Block, EffectLabel, EnumDecl, Expr, ExprId, ExternDecl, FnDecl, Item, ItemId, Mode,
+    Module, Param, Pattern, Stmt, StmtId, StructDecl, Symbol, TypeExpr, TypeId, UnOp,
 };
 
 /// Render a whole unit.
 pub fn print(ast: &Ast) -> String {
     let mut printer = Printer { ast, out: String::new(), depth: 0 };
-    for (index, item) in ast.items.iter().enumerate() {
-        if index > 0 {
+    // Items grouped by module, in module order, each under its own
+    // `module` declaration and imports (`docs/modules.md` §3). One `Ast`
+    // may hold several files and therefore several modules, and the
+    // canonical form is one text -- so the grouping is what makes
+    // printing a fixed point when it does.
+    let mut first = true;
+    for index in 0..ast.modules.len() as u32 {
+        let module = ast.module(index);
+        let items: Vec<ItemId> = (0..ast.items.len() as u32)
+            .map(ItemId)
+            .filter(|id| ast.module_of(*id) == index)
+            .collect();
+        if items.is_empty() && module.imports.is_empty() {
+            continue;
+        }
+        if !first {
             printer.out.push('\n');
         }
-        printer.item(item);
+        first = false;
+        printer.module_header(module);
+        for (n, id) in items.iter().enumerate() {
+            if n > 0 || !module.is_root() || !module.imports.is_empty() {
+                printer.out.push('\n');
+            }
+            printer.item(&ast.items[id.index()]);
+        }
     }
     printer.out
 }
@@ -49,6 +70,32 @@ struct Printer<'a> {
 }
 
 impl Printer<'_> {
+    /// `module a.b;` and the module's imports, in the order written.
+    ///
+    /// Import order is *not* canonicalised. Two imports differing only in
+    /// order are the same namespace, so sorting them would be defensible
+    /// -- but nothing hashes an import (`docs/modules.md` §2), so there is
+    /// no identity to protect and no reason to move what the author
+    /// wrote. `canonical-ast.md` §8 keeps the same gap open for a struct
+    /// literal's field order, for the same reason.
+    fn module_header(&mut self, module: &Module) {
+        if !module.is_root() {
+            let path: Vec<&str> = module.path.iter().map(|s| self.name(*s)).collect();
+            let text = format!("module {};", path.join("."));
+            self.line(&text);
+        }
+        for import in &module.imports {
+            let path: Vec<&str> = import.path.iter().map(|s| self.name(*s)).collect();
+            let last = *import.path.last().expect("a path has a last segment");
+            let text = if last == import.alias {
+                format!("import {};", path.join("."))
+            } else {
+                format!("import {} as {};", path.join("."), self.name(import.alias))
+            };
+            self.line(&text);
+        }
+    }
+
     fn line(&mut self, text: &str) {
         for _ in 0..self.depth {
             self.out.push_str(INDENT);
@@ -59,6 +106,14 @@ impl Printer<'_> {
 
     fn name(&self, symbol: Symbol) -> &str {
         self.ast.name_of(symbol)
+    }
+
+    /// `name`, or `q.name` where an import qualified it.
+    fn qualified(&self, qualifier: Option<Symbol>, name: Symbol) -> String {
+        match qualifier {
+            Some(q) => format!("{}.{}", self.name(q), self.name(name)),
+            None => self.name(name).to_owned(),
+        }
     }
 
     // ---- items ---------------------------------------------------------
@@ -74,7 +129,8 @@ impl Printer<'_> {
 
     fn fn_decl(&mut self, decl: &FnDecl) {
         let header = format!(
-            "fn {}{}({}) -> {} {} {{",
+            "{}fn {}{}({}) -> {} {} {{",
+            visibility(decl.public),
             self.name(decl.name),
             self.declaration_params(&decl.generics, &decl.regions, &decl.outlives),
             self.params(&decl.params),
@@ -102,7 +158,8 @@ impl Printer<'_> {
 
     fn struct_decl(&mut self, decl: &StructDecl) {
         let header = format!(
-            "{}struct {}{} {{",
+            "{}{}struct {}{} {{",
+            visibility(decl.public),
             mode_prefix(decl.mode),
             self.name(decl.name),
             self.generic_params(&decl.generics)
@@ -119,7 +176,8 @@ impl Printer<'_> {
 
     fn enum_decl(&mut self, decl: &EnumDecl) {
         let header = format!(
-            "{}enum {}{} {{",
+            "{}{}enum {}{} {{",
+            visibility(decl.public),
             mode_prefix(decl.mode),
             self.name(decl.name),
             self.generic_params(&decl.generics)
@@ -217,11 +275,11 @@ impl Printer<'_> {
                 let text = format!("{} = {};", self.expr(*place), self.expr(*value));
                 self.line(&text);
             }
-            Stmt::Destructure { struct_name, fields, value } => {
+            Stmt::Destructure { struct_name, qualifier, fields, value } => {
                 let names: Vec<&str> = fields.iter().map(|f| self.name(*f)).collect();
                 let text = format!(
                     "let {} {{ {} }} = {};",
-                    self.name(*struct_name),
+                    self.qualified(*qualifier, *struct_name),
                     names.join(", "),
                     self.expr(*value)
                 );
@@ -318,8 +376,8 @@ impl Printer<'_> {
 
     fn ty(&self, id: TypeId) -> String {
         match self.ast.ty(id) {
-            TypeExpr::Name { name, args } => {
-                let head = self.name(*name);
+            TypeExpr::Name { name, qualifier, args } => {
+                let head = &self.qualified(*qualifier, *name);
                 match args.split_first() {
                     // `Ffi("libc")`: a literal argument is written in
                     // parentheses, because it indexes by a value (§7.4).
@@ -405,15 +463,16 @@ impl Printer<'_> {
             Expr::Bool(value) => value.to_string(),
             Expr::Str(text) => format!("\"{}\"", escape(text)),
             Expr::Name(name) => self.name(*name).to_owned(),
-            Expr::StructLit { name, fields } => {
+            Expr::StructLit { name, qualifier, fields } => {
+                let head = self.qualified(*qualifier, *name);
                 let written: Vec<String> = fields
                     .iter()
                     .map(|(field, value)| format!("{}: {}", self.name(*field), self.expr(*value)))
                     .collect();
                 if written.is_empty() {
-                    format!("{} {{ }}", self.name(*name))
+                    format!("{head} {{ }}")
                 } else {
-                    format!("{} {{ {} }}", self.name(*name), written.join(", "))
+                    format!("{head} {{ {} }}", written.join(", "))
                 }
             }
             Expr::Field { base, name } => {
@@ -431,8 +490,9 @@ impl Printer<'_> {
             Expr::Index { base, index } => {
                 format!("{}[{}]", self.expr_at(*base, POSTFIX), self.expr(*index))
             }
-            Expr::Variant { enum_name, variant, args } => {
-                let head = format!("{}::{}", self.name(*enum_name), self.name(*variant));
+            Expr::Variant { enum_name, qualifier, variant, args } => {
+                let head =
+                    format!("{}::{}", self.qualified(*qualifier, *enum_name), self.name(*variant));
                 if args.is_empty() {
                     head
                 } else {
@@ -440,9 +500,9 @@ impl Printer<'_> {
                     format!("{head}({})", written.join(", "))
                 }
             }
-            Expr::Call { callee, args } => {
+            Expr::Call { callee, qualifier, args } => {
                 let written: Vec<String> = args.iter().map(|a| self.expr(*a)).collect();
-                format!("{}({})", self.name(*callee), written.join(", "))
+                format!("{}({})", self.qualified(*qualifier, *callee), written.join(", "))
             }
             Expr::Alloc { region, value } => {
                 format!("alloc[{}]({})", self.name(*region), self.expr(*value))
@@ -546,6 +606,12 @@ fn escape(text: &str) -> String {
         }
     }
     out
+}
+
+/// `docs/modules.md` §5. Written before the mode, so a declaration reads
+/// "public, and a resource" in that order.
+fn visibility(public: bool) -> &'static str {
+    if public { "pub " } else { "" }
 }
 
 fn mode_prefix(mode: Option<Mode>) -> &'static str {

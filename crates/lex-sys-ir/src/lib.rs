@@ -956,6 +956,10 @@ struct Signature {
     /// `where a <= b` as indices into `regions`, meaning `b` outlives `a`.
     outlives: Vec<(u32, u32)>,
     name: Symbol,
+    /// The module that declares it (`docs/modules.md` §3).
+    module: u32,
+    /// `pub` — callable from another module (§5).
+    public: bool,
     /// Type parameters in declaration order; `Type::Param(i)` is the `i`th.
     generics: Vec<Symbol>,
     params: Vec<Type>,
@@ -1037,9 +1041,24 @@ pub(crate) enum DefKind {
     Enum(Vec<(Symbol, Vec<Type>)>),
 }
 
+/// The module the prelude's types belong to.
+///
+/// Not a real module: `World`, `Io`, `Box` and the rest are the
+/// *language*, not a library, so they are visible from every module and
+/// there is nothing to import. `docs/modules.md` §3 says a file that
+/// declares nothing is in the root; this is the one thing that is in no
+/// module at all.
+const PRELUDE_MODULE: u32 = u32::MAX;
+
 pub(crate) struct TypeDef {
     name: Symbol,
     def: DefId,
+    /// The module that declares it (`docs/modules.md` §3), or
+    /// [`PRELUDE_MODULE`]. Two modules may declare one name; this is what
+    /// tells them apart.
+    module: u32,
+    /// `pub` — reachable from another module (§5).
+    public: bool,
     /// Type parameters in declaration order; `Type::Param(i)` is the `i`th.
     generics: Vec<Symbol>,
     /// The mode the declaration wrote, if it wrote one. `None` means the mode
@@ -1050,6 +1069,14 @@ pub(crate) struct TypeDef {
 }
 
 impl TypeDef {
+    /// Is this declaration a candidate for a name looked up in `module`?
+    ///
+    /// Its own module, or the prelude — which is in no module and
+    /// reachable from all of them.
+    fn visible_from(&self, module: u32) -> bool {
+        self.module == module || self.module == PRELUDE_MODULE
+    }
+
     /// Every type this one holds directly, for the size check and for the
     /// structural mode computation.
     pub(crate) fn members(&self) -> Box<dyn Iterator<Item = &Type> + '_> {
@@ -1302,6 +1329,8 @@ fn prelude_types(ast: &Ast, unifier: &mut Unifier) -> Vec<TypeDef> {
         TypeDef {
             name: world,
             def: world_def,
+            module: PRELUDE_MODULE,
+            public: true,
             generics: Vec::new(),
             declared_mode: Some(Mode::Res),
             kind: DefKind::Struct(Vec::new()),
@@ -1310,6 +1339,8 @@ fn prelude_types(ast: &Ast, unifier: &mut Unifier) -> Vec<TypeDef> {
         TypeDef {
             name: io,
             def: io_def,
+            module: PRELUDE_MODULE,
+            public: true,
             generics: Vec::new(),
             declared_mode: Some(Mode::Res),
             kind: DefKind::Struct(Vec::new()),
@@ -1322,6 +1353,8 @@ fn prelude_types(ast: &Ast, unifier: &mut Unifier) -> Vec<TypeDef> {
         TypeDef {
             name: ffi,
             def: ffi_def,
+            module: PRELUDE_MODULE,
+            public: true,
             generics: vec![library],
             declared_mode: Some(Mode::Res),
             kind: DefKind::Struct(Vec::new()),
@@ -1333,6 +1366,8 @@ fn prelude_types(ast: &Ast, unifier: &mut Unifier) -> Vec<TypeDef> {
         TypeDef {
             name: fs,
             def: fs_def,
+            module: PRELUDE_MODULE,
+            public: true,
             generics: vec![prefix],
             declared_mode: Some(Mode::Res),
             kind: DefKind::Struct(Vec::new()),
@@ -1344,6 +1379,8 @@ fn prelude_types(ast: &Ast, unifier: &mut Unifier) -> Vec<TypeDef> {
         TypeDef {
             name: heap,
             def: heap_def,
+            module: PRELUDE_MODULE,
+            public: true,
             generics: Vec::new(),
             declared_mode: Some(Mode::Res),
             kind: DefKind::Struct(Vec::new()),
@@ -1360,6 +1397,8 @@ fn prelude_types(ast: &Ast, unifier: &mut Unifier) -> Vec<TypeDef> {
         TypeDef {
             name: boxed,
             def: box_def,
+            module: PRELUDE_MODULE,
+            public: true,
             generics: vec![boxed_param],
             declared_mode: Some(Mode::Res),
             kind: DefKind::Struct(Vec::new()),
@@ -1373,6 +1412,8 @@ fn prelude_types(ast: &Ast, unifier: &mut Unifier) -> Vec<TypeDef> {
         TypeDef {
             name: arguments,
             def: args_def,
+            module: PRELUDE_MODULE,
+            public: true,
             generics: Vec::new(),
             declared_mode: Some(Mode::Res),
             kind: DefKind::Struct(Vec::new()),
@@ -1382,6 +1423,8 @@ fn prelude_types(ast: &Ast, unifier: &mut Unifier) -> Vec<TypeDef> {
         TypeDef {
             name: split,
             def: split_def,
+            module: PRELUDE_MODULE,
+            public: true,
             generics: Vec::new(),
             declared_mode: None,
             kind: DefKind::Struct(vec![
@@ -1401,6 +1444,62 @@ fn prelude_types(ast: &Ast, unifier: &mut Unifier) -> Vec<TypeDef> {
     ]
 }
 
+/// The first private type this one mentions, if any (`docs/modules.md`
+/// §5).
+///
+/// A walk rather than a look at the head, because `Box[Secret]` and
+/// `&r Secret` hide one just as surely as `Secret` does.
+fn private_type_in(defs: &[TypeDef], module: u32, ty: &Type) -> Option<Symbol> {
+    match ty {
+        Type::Named(def, args) => {
+            let declared = defs.iter().find(|d| d.def == *def)?;
+            if declared.module == module && !declared.public {
+                return Some(declared.name);
+            }
+            args.iter().find_map(|a| private_type_in(defs, module, a))
+        }
+        Type::Tuple(parts) => parts.iter().find_map(|p| private_type_in(defs, module, p)),
+        Type::Ref { inner, .. } | Type::Slice(inner) => private_type_in(defs, module, inner),
+        _ => None,
+    }
+}
+
+/// Every `import` names a module the program declares, and no two bind
+/// the same qualifier (`docs/modules.md` §4).
+///
+/// Checked here rather than where a qualified name is used, because an
+/// import that names nothing is wrong whether or not anything reached
+/// through it -- and an unused wrong import is exactly the one a
+/// programmer wants told about.
+fn check_imports(ast: &Ast) -> Result<(), Diagnostic> {
+    for module in &ast.modules {
+        let mut bound: Vec<Symbol> = Vec::new();
+        for import in &module.imports {
+            let path: Vec<&str> = import.path.iter().map(|s| ast.name_of(*s)).collect();
+            if !ast.modules.iter().any(|m| m.path == import.path) {
+                return Err(Diagnostic::new(
+                    format!(
+                        "no module `{}` in this program; a module exists where a file declares it",
+                        path.join(".")
+                    ),
+                    import.span,
+                ));
+            }
+            if bound.contains(&import.alias) {
+                return Err(Diagnostic::new(
+                    format!(
+                        "`{}` is already bound to another import here; name one of them with `as`",
+                        ast.name_of(import.alias)
+                    ),
+                    import.span,
+                ));
+            }
+            bound.push(import.alias);
+        }
+    }
+    Ok(())
+}
+
 /// Collect every type declaration, in three passes.
 ///
 /// Names first, so a member may mention a type declared later in the file;
@@ -1412,12 +1511,16 @@ fn collect_types(ast: &Ast, unifier: &mut Unifier) -> Result<Vec<TypeDef>, Diagn
     let predeclared = defs.len();
 
     for (index, item) in ast.items.iter().enumerate() {
-        let (name_sym, noun, generics, declared_mode) = match item {
-            Item::Struct(decl) => (decl.name, "struct", decl.generics.clone(), decl.mode),
-            Item::Enum(decl) => (decl.name, "enum", decl.generics.clone(), decl.mode),
+        let (name_sym, noun, generics, declared_mode, public) = match item {
+            Item::Struct(decl) => {
+                (decl.name, "struct", decl.generics.clone(), decl.mode, decl.public)
+            }
+            Item::Enum(decl) => (decl.name, "enum", decl.generics.clone(), decl.mode, decl.public),
             Item::Fn(_) | Item::Extern(_) => continue,
         };
-        let span = ast.item_span(ast::ItemId(index as u32));
+        let item_id = ast::ItemId(index as u32);
+        let module = ast.module_of(item_id);
+        let span = ast.item_span(item_id);
         let name = ast.name_of(name_sym);
 
         if matches!(name, "int" | "bool") || defs[..predeclared].iter().any(|d| d.name == name_sym)
@@ -1427,8 +1530,12 @@ fn collect_types(ast: &Ast, unifier: &mut Unifier) -> Result<Vec<TypeDef>, Diagn
                 span,
             ));
         }
-        if let Some(previous) = defs.iter().find(|d| d.name == name_sym) {
-            let _ = previous;
+        // Scoped to the module: two modules may each declare a `Buffer`,
+        // and that is the point of having them (`docs/modules.md` §3).
+        // Within one module it is still an error, and the root is a module
+        // like any other, so every program written before this is
+        // unaffected.
+        if defs.iter().any(|d| d.name == name_sym && d.module == module) {
             return Err(Diagnostic::new(format!("type `{name}` is declared twice"), span));
         }
 
@@ -1440,13 +1547,26 @@ fn collect_types(ast: &Ast, unifier: &mut Unifier) -> Result<Vec<TypeDef>, Diagn
             _ => DefKind::Enum(Vec::new()),
         };
         check_generic_names(ast, &generics, span)?;
-        defs.push(TypeDef { name: name_sym, def, generics, declared_mode, kind, span });
+        defs.push(TypeDef {
+            name: name_sym,
+            def,
+            module,
+            public,
+            generics,
+            declared_mode,
+            kind,
+            span,
+        });
     }
 
-    for item in ast.items.iter() {
+    for (index, item) in ast.items.iter().enumerate() {
+        let module = ast.module_of(ast::ItemId(index as u32));
         match item {
             Item::Struct(decl) => {
-                let position = defs.iter().position(|d| d.name == decl.name).expect("declared");
+                let position = defs
+                    .iter()
+                    .position(|d| d.name == decl.name && d.module == module)
+                    .expect("declared");
                 let span = defs[position].span;
                 let mut fields: Vec<(Symbol, Type)> = Vec::new();
                 for field in &decl.fields {
@@ -1461,12 +1581,18 @@ fn collect_types(ast: &Ast, unifier: &mut Unifier) -> Result<Vec<TypeDef>, Diagn
                         ));
                     }
                     let generics = defs[position].generics.clone();
-                    fields.push((field.name, resolve_type(ast, &defs, &generics, &[], field.ty)?));
+                    fields.push((
+                        field.name,
+                        resolve_type(ast, &defs, module, &generics, &[], field.ty)?,
+                    ));
                 }
                 defs[position].kind = DefKind::Struct(fields);
             }
             Item::Enum(decl) => {
-                let position = defs.iter().position(|d| d.name == decl.name).expect("declared");
+                let position = defs
+                    .iter()
+                    .position(|d| d.name == decl.name && d.module == module)
+                    .expect("declared");
                 let span = defs[position].span;
                 if decl.variants.is_empty() {
                     return Err(Diagnostic::new(
@@ -1493,7 +1619,7 @@ fn collect_types(ast: &Ast, unifier: &mut Unifier) -> Result<Vec<TypeDef>, Diagn
                     let payload = variant
                         .payload
                         .iter()
-                        .map(|ty| resolve_type(ast, &defs, &generics, &[], *ty))
+                        .map(|ty| resolve_type(ast, &defs, module, &generics, &[], *ty))
                         .collect::<Result<Vec<_>, _>>()?;
                     variants.push((variant.name, payload));
                 }
@@ -1544,6 +1670,7 @@ fn collect_types(ast: &Ast, unifier: &mut Unifier) -> Result<Vec<TypeDef>, Diagn
 
 /// Resolve and check an AST, producing IR a backend can lower without failing.
 pub fn lower(ast: &Ast) -> Result<Program, Diagnostic> {
+    check_imports(ast)?;
     let mut unifier = Unifier::new();
     let defs = collect_types(ast, &mut unifier)?;
 
@@ -1556,7 +1683,12 @@ pub fn lower(ast: &Ast) -> Result<Program, Diagnostic> {
     for (index, item) in ast.items.iter().enumerate() {
         let Item::Extern(decl) = item else { continue };
         let name = ast.name_of(decl.name);
-        let span = ast.item_span(ast::ItemId(index as u32));
+        let item_id = ast::ItemId(index as u32);
+        // An `extern` has no `pub` and lives wherever it is written; a
+        // foreign symbol is global to the linker either way, so the module
+        // is only for resolving the name.
+        let module = ast.module_of(item_id);
+        let span = ast.item_span(item_id);
         if Builtin::from_name(name).is_some() {
             return Err(Diagnostic::new(
                 format!("`{name}` is a builtin and cannot be declared foreign"),
@@ -1573,9 +1705,9 @@ pub fn lower(ast: &Ast) -> Result<Program, Diagnostic> {
         let params = decl
             .params
             .iter()
-            .map(|p| resolve_type(ast, &defs, &[], &region_scope, p.ty))
+            .map(|p| resolve_type(ast, &defs, module, &[], &region_scope, p.ty))
             .collect::<Result<Vec<_>, _>>()?;
-        let ret = resolve_type(ast, &defs, &[], &region_scope, decl.ret)?;
+        let ret = resolve_type(ast, &defs, module, &[], &region_scope, decl.ret)?;
         let declared =
             Effects::new(decl.effects.iter().map(|e| Label {
                 name: ast.name_of(e.name).to_owned(),
@@ -1684,7 +1816,9 @@ pub fn lower(ast: &Ast) -> Result<Program, Diagnostic> {
     for (index, item) in ast.items.iter().enumerate() {
         let Item::Fn(decl) = item else { continue };
         let name = ast.name_of(decl.name);
-        let span = ast.item_span(ast::ItemId(index as u32));
+        let item_id = ast::ItemId(index as u32);
+        let module = ast.module_of(item_id);
+        let span = ast.item_span(item_id);
 
         if Builtin::from_name(name).is_some() {
             return Err(Diagnostic::new(
@@ -1692,7 +1826,9 @@ pub fn lower(ast: &Ast) -> Result<Program, Diagnostic> {
                 span,
             ));
         }
-        if signatures.iter().any(|s| s.name == decl.name) {
+        // Scoped to the module, like a type declaration: two modules may
+        // each define `print_nat` (`docs/modules.md` §3).
+        if signatures.iter().any(|s| s.name == decl.name && s.module == module) {
             return Err(Diagnostic::new(format!("function `{name}` is defined twice"), span));
         }
         // A foreign declaration and a written function are two answers to
@@ -1737,11 +1873,30 @@ pub fn lower(ast: &Ast) -> Result<Program, Diagnostic> {
                 ));
             }
             seen.push(param.name);
-            params.push(resolve_type(ast, &defs, &decl.generics, &region_scope, param.ty)?);
+            params.push(resolve_type(ast, &defs, module, &decl.generics, &region_scope, param.ty)?);
         }
 
-        let ret = resolve_type(ast, &defs, &decl.generics, &region_scope, decl.ret)?;
+        let ret = resolve_type(ast, &defs, module, &decl.generics, &region_scope, decl.ret)?;
+        // §5: a usable signature names usable types. A `pub fn` whose
+        // parameter or return type is private to this module cannot be
+        // called from outside it -- the caller has no way to name the
+        // type -- so the `pub` is a promise the declaration cannot keep.
+        if decl.public {
+            for ty in params.iter().chain(std::iter::once(&ret)) {
+                if let Some(private) = private_type_in(&defs, module, ty) {
+                    return Err(Diagnostic::new(
+                        format!(
+                            "`{name}` is `pub`, but its signature names `{}`, which is not; a caller in another module could not write the type",
+                            ast.name_of(private)
+                        ),
+                        span,
+                    ));
+                }
+            }
+        }
         signatures.push(Signature {
+            module,
+            public: decl.public,
             name: decl.name,
             generics: decl.generics.clone(),
             regions: decl.regions.clone(),
@@ -2043,6 +2198,7 @@ fn lower_function(
         slot_origin: Vec::new(),
         ret: ret.clone(),
         trace: Trace::new(),
+        module: signature.module,
     };
 
     for (param, ty) in decl.params.iter().zip(params.iter()) {
@@ -2244,18 +2400,20 @@ fn check_generic_names(ast: &Ast, generics: &[Symbol], span: Span) -> Result<(),
 fn resolve_type(
     ast: &Ast,
     defs: &[TypeDef],
+    module: u32,
     generics: &[Symbol],
     regions: &[(Symbol, Region)],
     id: TypeId,
 ) -> Result<Type, Diagnostic> {
     // Sized by default: `[T]` is a referent, and the one caller that may
     // have one is the reference that points at it.
-    resolve_type_at(ast, defs, generics, regions, id, false)
+    resolve_type_at(ast, defs, module, generics, regions, id, false)
 }
 
 fn resolve_type_at(
     ast: &Ast,
     defs: &[TypeDef],
+    module: u32,
     generics: &[Symbol],
     regions: &[(Symbol, Region)],
     id: TypeId,
@@ -2285,7 +2443,9 @@ fn resolve_type_at(
             return Ok(Type::Ref {
                 unique: false,
                 region: Region::Static,
-                inner: Box::new(resolve_type_at(ast, defs, generics, regions, *inner, true)?),
+                inner: Box::new(resolve_type_at(
+                    ast, defs, module, generics, regions, *inner, true,
+                )?),
             });
         }
         let Some((_, found)) = regions.iter().rev().find(|(name, _)| name == region) else {
@@ -2301,7 +2461,7 @@ fn resolve_type_at(
             region: *found,
             // The one place an unsized referent is allowed: `&r [T]` is how
             // a slice is written, and the reference is what gives it a size.
-            inner: Box::new(resolve_type_at(ast, defs, generics, regions, *inner, true)?),
+            inner: Box::new(resolve_type_at(ast, defs, module, generics, regions, *inner, true)?),
         });
     }
 
@@ -2325,7 +2485,7 @@ fn resolve_type_at(
                 span,
             ));
         }
-        let element = resolve_type(ast, defs, generics, regions, *inner)?;
+        let element = resolve_type(ast, defs, module, generics, regions, *inner)?;
         return Ok(Type::Slice(Box::new(element)));
     }
 
@@ -2344,28 +2504,45 @@ fn resolve_type_at(
         }
         let components = parts
             .iter()
-            .map(|part| resolve_type(ast, defs, generics, regions, *part))
+            .map(|part| resolve_type(ast, defs, module, generics, regions, *part))
             .collect::<Result<Vec<_>, _>>()?;
         return Ok(Type::Tuple(components));
     }
 
-    let TypeExpr::Name { name: written_name, args: written_args } = ast.ty(id) else {
+    let TypeExpr::Name { name: written_name, qualifier: written_qualifier, args: written_args } =
+        ast.ty(id)
+    else {
         unreachable!("a reference, a literal, a slice and a tuple were handled above");
     };
-    let (written_name, written_args) = (*written_name, written_args.clone());
+    let (written_name, written_qualifier, written_args) =
+        (*written_name, *written_qualifier, written_args.clone());
     let name = ast.name_of(written_name);
+
+    // `docs/modules.md` §4: a qualifier says which module to look in, and
+    // an unqualified name means this one. A qualifier that no `import`
+    // bound is an error here rather than a silent fall back to the local
+    // module -- falling back is how a typo becomes a different program.
+    let Some(target) = ast.resolve_module(module, written_qualifier) else {
+        return Err(Diagnostic::new(
+            format!(
+                "`{}` is not an imported module here; `import` it to reach its types",
+                ast.name_of(written_qualifier.expect("resolve only fails with a qualifier"))
+            ),
+            span,
+        ));
+    };
+    let lookup = |defs: &[TypeDef]| -> Option<usize> {
+        defs.iter().position(|d| d.name == written_name && d.visible_from(target))
+    };
 
     // `Box[[T]]` is the one place an unsized referent may stand as a type
     // argument (`docs/boxed-slices.md` §2). Everywhere else `[T]` has no
     // size of its own and only a reference may point at one; a box is a
     // pointer *and* a length precisely so that it can hold one.
-    let boxed = defs
-        .iter()
-        .find(|d| d.name == written_name)
-        .is_some_and(|d| d.def.0 as usize == PRELUDE_BOX);
+    let boxed = lookup(defs).is_some_and(|i| defs[i].def.0 as usize == PRELUDE_BOX);
     let args = written_args
         .iter()
-        .map(|arg| resolve_type_at(ast, defs, generics, regions, *arg, boxed))
+        .map(|arg| resolve_type_at(ast, defs, module, generics, regions, *arg, boxed))
         .collect::<Result<Vec<_>, _>>()?;
 
     if let Some(index) = generics.iter().position(|g| *g == written_name) {
@@ -2382,8 +2559,21 @@ fn resolve_type_at(
         "int" => (Type::Int, 0),
         "byte" => (Type::Byte, 0),
         "bool" => (Type::Bool, 0),
-        other => match defs.iter().find(|d| d.name == written_name) {
-            Some(def) => (Type::Named(def.def, args.clone()), def.generics.len()),
+        other => match lookup(defs) {
+            Some(index) => {
+                let def = &defs[index];
+                // §5: private is private, including in a type. A caller
+                // that cannot name the type cannot use what mentions it.
+                if target != module && !def.public {
+                    return Err(Diagnostic::new(
+                        format!(
+                            "`{other}` is not `pub`, so it cannot be named from another module"
+                        ),
+                        span,
+                    ));
+                }
+                (Type::Named(def.def, args.clone()), def.generics.len())
+            }
             None => return Err(Diagnostic::new(format!("unknown type `{other}`"), span)),
         },
     };
@@ -2470,6 +2660,9 @@ struct FnLowering<'a> {
     /// What the linearity checker replays once the types are settled
     /// (`linear.rs`). Recorded here because this is where the spans are.
     trace: Trace,
+    /// The module this function is in, which is where an unqualified name
+    /// resolves (`docs/modules.md` §4).
+    module: u32,
 }
 
 impl<'a> FnLowering<'a> {
@@ -2507,6 +2700,45 @@ impl<'a> FnLowering<'a> {
         self.slot_scope.push(self.open_blocks.last().copied());
         self.slot_origin.push((None, Span::new(0, 0)));
         slot
+    }
+
+    /// Which module a qualified reference reaches into
+    /// (`docs/modules.md` §4), or a located refusal naming the qualifier.
+    fn target_module(&self, qualifier: Option<Symbol>, span: Span) -> Result<u32, Diagnostic> {
+        self.ast.resolve_module(self.module, qualifier).ok_or_else(|| {
+            Diagnostic::new(
+                format!(
+                    "`{}` is not an imported module here; `import` it to reach what is in it",
+                    self.ast.name_of(qualifier.expect("resolve only fails with a qualifier"))
+                ),
+                span,
+            )
+        })
+    }
+
+    /// §5: a declaration in another module has to be `pub`.
+    ///
+    /// Within one module everything is visible, which is why the root --
+    /// where every program written before modules lives -- needs no `pub`
+    /// anywhere.
+    fn check_visible(
+        &self,
+        target: u32,
+        public: bool,
+        what: &str,
+        name: Symbol,
+        span: Span,
+    ) -> Result<(), Diagnostic> {
+        if target != self.module && target != PRELUDE_MODULE && !public {
+            return Err(Diagnostic::new(
+                format!(
+                    "{what} `{}` is not `pub`, so it cannot be reached from another module",
+                    self.ast.name_of(name)
+                ),
+                span,
+            ));
+        }
+        Ok(())
     }
 
     fn lookup(&self, name: Symbol) -> Option<&Binding> {
@@ -2559,7 +2791,8 @@ impl<'a> FnLowering<'a> {
         for id in &self.open_blocks {
             regions.push((self.blocks[*id as usize].name, Region::Block(*id)));
         }
-        let resolved = resolve_type(self.ast, self.defs, &self.generic_names, &regions, id)?;
+        let resolved =
+            resolve_type(self.ast, self.defs, self.module, &self.generic_names, &regions, id)?;
         Ok(resolved.substitute(&self.generics, &[]))
     }
 
@@ -3061,18 +3294,23 @@ impl<'a> FnLowering<'a> {
     /// make();` calls `make` once however many fields it has.
     fn destructure(&mut self, id: StmtId) -> Result<Vec<Stmt>, Diagnostic> {
         let span = self.ast.stmt_span(id);
-        let AstStmt::Destructure { struct_name, fields, value } = self.ast.stmt(id) else {
+        let AstStmt::Destructure { struct_name, qualifier, fields, value } = self.ast.stmt(id)
+        else {
             unreachable!("only called for a destructuring `let`");
         };
-        let (struct_name, fields, value_id) = (*struct_name, fields.clone(), *value);
+        let (struct_name, qualifier, fields, value_id) =
+            (*struct_name, *qualifier, fields.clone(), *value);
         let value_span = self.ast.expr_span(value_id);
         let (value, found) = self.expr(value_id)?;
 
         let text = self.ast.name_of(struct_name);
-        let Some(def) = self.defs.iter().find(|d| d.name == struct_name) else {
+        let target = self.target_module(qualifier, span)?;
+        let Some(def) = self.defs.iter().find(|d| d.name == struct_name && d.visible_from(target))
+        else {
             return Err(Diagnostic::new(format!("`{text}` is not a struct"), span));
         };
-        let (def_id, generic_count) = (def.def, def.generics.len());
+        let (def_id, generic_count, public) = (def.def, def.generics.len(), def.public);
+        self.check_visible(target, public, "type", struct_name, span)?;
         if released_only(def_id) {
             return Err(Diagnostic::new(
                 format!(
@@ -4235,9 +4473,12 @@ impl<'a> FnLowering<'a> {
                     }
                 }
             }
-            AstExpr::StructLit { name, fields } => {
+            AstExpr::StructLit { name, qualifier, fields } => {
                 let text = self.ast.name_of(*name);
-                let Some(def) = self.defs.iter().find(|d| d.name == *name) else {
+                let target = self.target_module(*qualifier, span)?;
+                let Some(def) =
+                    self.defs.iter().find(|d| d.name == *name && d.visible_from(target))
+                else {
                     return Err(Diagnostic::new(format!("`{text}` is not a struct"), span));
                 };
                 if is_capability(def.def) {
@@ -4254,6 +4495,7 @@ impl<'a> FnLowering<'a> {
                         span,
                     ));
                 };
+                self.check_visible(target, def.public, "type", *name, span)?;
                 // Copied out before checking any field value, because
                 // checking borrows `self` and the table lives beside it.
                 let (def_id, generic_count) = (def.def, def.generics.len());
@@ -4494,12 +4736,16 @@ impl<'a> FnLowering<'a> {
                     ty,
                 )
             }
-            AstExpr::Variant { enum_name, variant, args } => {
+            AstExpr::Variant { enum_name, qualifier, variant, args } => {
                 let enum_text = self.ast.name_of(*enum_name);
                 let variant_text = self.ast.name_of(*variant);
-                let Some(def) = self.defs.iter().find(|d| d.name == *enum_name) else {
+                let target = self.target_module(*qualifier, span)?;
+                let Some(def) =
+                    self.defs.iter().find(|d| d.name == *enum_name && d.visible_from(target))
+                else {
                     return Err(Diagnostic::new(format!("`{enum_text}` is not an enum"), span));
                 };
+                let public = def.public;
                 let DefKind::Enum(variants) = &def.kind else {
                     return Err(Diagnostic::new(
                         format!("`{enum_text}` is a struct, not an enum"),
@@ -4514,6 +4760,7 @@ impl<'a> FnLowering<'a> {
                 };
                 let (def_id, generic_count) = (def.def, def.generics.len());
                 let declared_payload = variants[index].1.clone();
+                self.check_visible(target, public, "type", *enum_name, span)?;
                 // Inferred from the payload values, or left for the context:
                 // `Option::None` learns its `T` from where it is used.
                 let type_args = self.fresh_args(generic_count);
@@ -4627,7 +4874,7 @@ impl<'a> FnLowering<'a> {
                 return self.alloc_slice(*region, *count, *fill, span);
             }
             AstExpr::Index { base, index } => return self.index(*base, *index, span),
-            AstExpr::Call { callee, args } => {
+            AstExpr::Call { callee, qualifier, args } => {
                 let text = self.ast.name_of(*callee);
                 if self.lookup(*callee).is_some() {
                     return Err(Diagnostic::new(
@@ -4724,13 +4971,23 @@ impl<'a> FnLowering<'a> {
                         ret.substitute(&[], &fresh),
                     )
                 } else {
-                    let index = self.signatures.iter().position(|s| s.name == *callee).ok_or_else(
-                        || {
+                    let target = self.target_module(*qualifier, span)?;
+                    let index = self
+                        .signatures
+                        .iter()
+                        .position(|s| s.name == *callee && s.module == target)
+                        .ok_or_else(|| {
                             Diagnostic::new(
                                 format!("`{text}` is not a function in this program"),
                                 span,
                             )
-                        },
+                        })?;
+                    self.check_visible(
+                        target,
+                        self.signatures[index].public,
+                        "function",
+                        *callee,
+                        span,
                     )?;
                     let fresh = self.fresh_args(self.signatures[index].generics.len());
                     // §5.1: each region parameter gets a variable the
@@ -7670,6 +7927,126 @@ mod linearity_tests {
              borrow mut io as &!i in { c = getchar(i) + peek(i); } \
              release(io); return 0; }",
         );
+    }
+
+    // ---- modules (`docs/modules.md`) -----------------------------------
+
+    /// §3: a name is scoped to its module, so two modules may declare one.
+    ///
+    /// In one flat namespace this was "declared twice". It still is
+    /// *within* a module -- and the root is a module, which is why every
+    /// program written before this is unaffected.
+    #[test]
+    fn two_modules_may_declare_the_same_name() {
+        let mut ast = lex_sys_syntax::ast::Ast::new();
+        lex_sys_syntax::parse_into(
+            &mut ast,
+            "module a; pub struct Buffer { n: int } pub fn make() -> [] Buffer { return Buffer { n: 1 }; }",
+            0,
+        )
+        .expect("parses");
+        lex_sys_syntax::parse_into(
+            &mut ast,
+            "module b; pub struct Buffer { n: int } pub fn make() -> [] Buffer { return Buffer { n: 2 }; }",
+            2000,
+        )
+        .expect("parses");
+        lex_sys_syntax::parse_into(
+            &mut ast,
+            "import a; import b; fn main(world: World) -> [] int { \
+             let Split { io, ffi, fs, heap, args } = split(world); \
+             release(args); release(ffi); release(fs); release(heap); release(io); \
+             let x: a.Buffer = a.make(); let y: b.Buffer = b.make(); return x.n + y.n - 3; }",
+            4000,
+        )
+        .expect("parses");
+        crate::lower(&ast).expect("two modules, one name, no clash");
+    }
+
+    /// §6, the one that matters: a module is **not** a trust boundary.
+    ///
+    /// `pub` means reachable, never safe. A `pub fn` that writes to the
+    /// console still needs a caller holding an `Io`, and its row still
+    /// says `io_write` -- being public buys it nothing, and a caller that
+    /// declares `[]` is refused exactly as it would be within one module.
+    ///
+    /// Worth a test rather than a sentence, because "public API" means
+    /// "sanctioned" in most languages and here it must not.
+    #[test]
+    fn pub_grants_no_authority_and_hides_no_effect() {
+        let mut ast = lex_sys_syntax::ast::Ast::new();
+        lex_sys_syntax::parse_into(
+            &mut ast,
+            "module lib; pub fn shout[&i](io: &!i Io) -> [io_write] int { return putchar(io, 33); }",
+            0,
+        )
+        .expect("parses");
+        lex_sys_syntax::parse_into(
+            &mut ast,
+            "import lib; \
+             fn quiet[&i](io: &!i Io) -> [] int { return lib.shout(io); } \
+             fn main(world: World) -> [] int { \
+             let Split { io, ffi, fs, heap, args } = split(world); \
+             release(args); release(ffi); release(fs); release(heap); release(io); return 0; }",
+            2000,
+        )
+        .expect("parses");
+        let message = crate::lower(&ast).expect_err("the row is still exact").message;
+        assert!(message.contains("performs `io_write`"), "{message}");
+    }
+
+    /// §4.2: a module may import one that imports it back.
+    ///
+    /// In most languages a cycle is a problem because imports drive load
+    /// order. Here the program is the set of files on the command line,
+    /// compiled at once, and an import is a rule for resolving a name --
+    /// so there is no order to be circular.
+    #[test]
+    fn modules_may_import_each_other() {
+        let mut ast = lex_sys_syntax::ast::Ast::new();
+        lex_sys_syntax::parse_into(
+            &mut ast,
+            "module a; import b; pub fn one() -> [] int { return 1; } \
+             pub fn three() -> [] int { return one() + b.two(); }",
+            0,
+        )
+        .expect("parses");
+        lex_sys_syntax::parse_into(
+            &mut ast,
+            "module b; import a; pub fn two() -> [] int { return a.one() + a.one(); }",
+            2000,
+        )
+        .expect("parses");
+        lex_sys_syntax::parse_into(
+            &mut ast,
+            "import a; fn main(world: World) -> [] int { \
+             let Split { io, ffi, fs, heap, args } = split(world); \
+             release(args); release(ffi); release(fs); release(heap); release(io); \
+             return a.three() - 3; }",
+            4000,
+        )
+        .expect("parses");
+        crate::lower(&ast).expect("a cycle is not a problem here");
+    }
+
+    /// §5.1: the root has no name, so nothing can import it.
+    ///
+    /// The root sees out and nothing sees in. A module reaching a
+    /// root-module function fails the same way any unresolved name does,
+    /// because there is no qualifier that could name the root.
+    #[test]
+    fn a_module_cannot_reach_into_the_root() {
+        let mut ast = lex_sys_syntax::ast::Ast::new();
+        lex_sys_syntax::parse_into(&mut ast, "fn helper() -> [] int { return 7; }", 0)
+            .expect("parses");
+        lex_sys_syntax::parse_into(
+            &mut ast,
+            "module lib; pub fn use_it() -> [] int { return helper(); }",
+            2000,
+        )
+        .expect("parses");
+        let message = crate::lower(&ast).expect_err("the root is not reachable").message;
+        assert!(message.contains("`helper` is not a function"), "{message}");
     }
 
     #[test]
