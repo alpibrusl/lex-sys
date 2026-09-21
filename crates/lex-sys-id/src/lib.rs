@@ -134,6 +134,11 @@ mod tag {
     /// it expands to: `defer close(f);` and `close(f);` run at different
     /// points, so they are two programs.
     pub const DEFER: u8 = 0x71;
+    /// A floating-point literal, encoded as its bits
+    /// (`docs/floating-point.md` §1) so that `0.0` and `-0.0` — equal
+    /// under `==`, different in behaviour — hash as the two values they
+    /// are.
+    pub const FLOAT: u8 = 0x72;
 
     /// The tag for a declared mode. Written out rather than cast from the
     /// enum, so adding a mode cannot silently renumber the others.
@@ -909,6 +914,9 @@ impl BodyHasher<'_> {
         match self.ast.expr(id) {
             Expr::Int(value) => {
                 self.encoder.tag(tag::INT).i64(*value);
+            }
+            Expr::Float(bits) => {
+                self.encoder.tag(tag::FLOAT).i64(*bits as i64);
             }
             Expr::Bool(value) => {
                 self.encoder.tag(tag::BOOL).bool(*value);

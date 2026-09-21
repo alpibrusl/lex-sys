@@ -179,9 +179,9 @@ intended.
 
 ## What exists
 
-`int`, `byte` and `bool`; functions and calls; arithmetic and comparison;
-`&&`/`||` with short-circuiting; the bit operators and hexadecimal
-literals; `if`/`else`, `while`, `let`/`var`; structs,
+`int`, `byte`, `bool` and `float`; functions and calls; arithmetic and
+comparison; `&&`/`||` with short-circuiting; the bit operators and
+hexadecimal literals; `if`/`else`, `while`, `let`/`var`; structs,
 enums with exhaustive `match`, tuples, and generics over all of them with
 `[T: val]` mode bounds; `res`/`val` linearity with destructuring `let` and
 liveness-checked shadowing; shared and unique borrows with lexical regions;

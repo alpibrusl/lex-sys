@@ -249,6 +249,29 @@ pub enum Builtin {
     /// wants the low eight bits says so, once there is a mask to say it
     /// with.
     ByteOf,
+    /// `float_of(n: int) -> [] float` — the nearest `float` to an `int`
+    /// (`docs/floating-point.md` §4).
+    ///
+    /// Rounds rather than trapping, which is the deliberate difference
+    /// from `byte_of`: `byte_of(300)` loses the magnitude and hands back
+    /// a different number, where this loses at most one unit in the last
+    /// place, under IEEE's round-to-nearest-even. One is a lie about
+    /// which number this is; the other is what a floating type *means*.
+    FloatOf,
+    /// `truncate(x: float) -> [] int` — toward zero, trapping on NaN,
+    /// ±infinity and any magnitude at or past `2^63` (§4).
+    ///
+    /// Exactly the inputs C leaves undefined. The name states the
+    /// rounding because the rounding is what a reader needs to know;
+    /// `floor`, `ceil` and round-to-nearest belong in `std.math`, where
+    /// each can say which it is.
+    Truncate,
+    /// `is_nan(x: float) -> [] bool` (§5).
+    ///
+    /// Exists because NaN breaks comparison — `x == x` is false for it —
+    /// so the hazard has to be checkable, and `x != x` is a riddle
+    /// rather than a test.
+    IsNan,
     /// `int_of(b: byte) -> [] int` — widen a byte, which is always defined
     /// and always lands in 0..255.
     IntOf,
@@ -340,6 +363,9 @@ impl Builtin {
         Builtin::Len,
         Builtin::ByteOf,
         Builtin::IntOf,
+        Builtin::FloatOf,
+        Builtin::Truncate,
+        Builtin::IsNan,
         Builtin::FsRead,
         Builtin::FsWrite,
         Builtin::Box,
@@ -364,6 +390,9 @@ impl Builtin {
             Builtin::Len => "len",
             Builtin::ByteOf => "byte_of",
             Builtin::IntOf => "int_of",
+            Builtin::FloatOf => "float_of",
+            Builtin::Truncate => "truncate",
+            Builtin::IsNan => "is_nan",
             Builtin::FsRead => "fs_read",
             Builtin::FsWrite => "fs_write",
             Builtin::Box => "box",
@@ -491,6 +520,9 @@ impl Builtin {
             ),
             Builtin::ByteOf => (vec![Type::Int], Type::Byte),
             Builtin::IntOf => (vec![Type::Byte], Type::Int),
+            Builtin::FloatOf => (vec![Type::Int], Type::Float),
+            Builtin::Truncate => (vec![Type::Float], Type::Int),
+            Builtin::IsNan => (vec![Type::Float], Type::Bool),
             // Both are checked at the call site rather than here, because a
             // fixed signature cannot say what they need. `release` ends any
             // capability, and there is more than one kind; `narrow` has an
@@ -804,6 +836,8 @@ pub enum Expr {
         variant: u32,
         payload: Vec<Expr>,
     },
+    /// A floating-point constant, as bits (`docs/floating-point.md` §1).
+    Float(u64),
     Neg(Box<Expr>),
     Not(Box<Expr>),
     /// `~a` (`docs/bitwise.md` §1). Its own node rather than
@@ -2287,7 +2321,7 @@ fn settle_types(stmts: &mut [Stmt], unifier: &Unifier) {
 
 fn settle_expr(expr: &mut Expr, unifier: &Unifier) {
     match expr {
-        Expr::Int(_) | Expr::Bool(_) | Expr::Load(_) => {}
+        Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Load(_) => {}
         Expr::Neg(inner) | Expr::Not(inner) | Expr::BitNot(inner) => settle_expr(inner, unifier),
         Expr::Bin { lhs, rhs, .. } => {
             settle_expr(lhs, unifier);
@@ -2862,6 +2896,7 @@ fn resolve_type_at(
     let (ty, arity) = match name {
         "int" => (Type::Int, 0),
         "byte" => (Type::Byte, 0),
+        "float" => (Type::Float, 0),
         "bool" => (Type::Bool, 0),
         other => match lookup(defs) {
             Some(index) => {
@@ -4961,6 +4996,7 @@ impl<'a> FnLowering<'a> {
         let span = self.ast.expr_span(id);
         Ok(match self.ast.expr(id) {
             AstExpr::Int(v) => (Expr::Int(*v), Type::Int),
+            AstExpr::Float(bits) => (Expr::Float(*bits), Type::Float),
             // A literal the checker reads and the program never holds.
             // `docs/strings.md` §4: the bytes go in the object file and the
             // slice points at them, so the region is `static` -- it outlives
@@ -5340,8 +5376,17 @@ impl<'a> FnLowering<'a> {
                 let (inner, found) = self.expr(*operand)?;
                 match op {
                     ast::UnOp::Neg => {
-                        self.expect_type(&Type::Int, &found, operand_span)?;
-                        (Expr::Neg(Box::new(inner)), Type::Int)
+                        if !matches!(self.unifier.resolve(&found), Type::Int | Type::Float) {
+                            return Err(Diagnostic::new(
+                                format!(
+                                    "`{}` cannot be negated (`int` and `float` can)",
+                                    self.unifier.display(&found)
+                                ),
+                                operand_span,
+                            ));
+                        }
+                        let ty = self.unifier.resolve(&found);
+                        (Expr::Neg(Box::new(inner)), ty)
                     }
                     ast::UnOp::Not => {
                         self.expect_type(&Type::Bool, &found, operand_span)?;
@@ -5378,14 +5423,42 @@ impl<'a> FnLowering<'a> {
                 self.expect_type(&lt, &rt, rhs_span)?;
                 let operand = self.unifier.resolve(&lt);
                 match op {
-                    BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem => {
+                    // `+ - * /` are `int` or `float`; `%` is `int` only.
+                    // There is no `frem` primitive worth the name -- C's
+                    // `fmod` is a library call with its own rounding
+                    // story -- so it belongs in `std.math` when floats
+                    // get one (`docs/floating-point.md` §7).
+                    BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div => {
+                        if !matches!(operand, Type::Int | Type::Float) {
+                            return Err(Diagnostic::new(
+                                format!(
+                                    "`{}` has no arithmetic (`int` and `float` do)",
+                                    self.unifier.display(&operand)
+                                ),
+                                lhs_span,
+                            ));
+                        }
+                    }
+                    BinOp::Rem => {
                         self.expect_type(&Type::Int, &operand, lhs_span)?;
                     }
                     BinOp::And | BinOp::Or => {
                         self.expect_type(&Type::Bool, &operand, lhs_span)?;
                     }
+                    // `docs/floating-point.md` §5: IEEE's comparisons,
+                    // which means NaN is unordered against everything and
+                    // trichotomy fails. That is inherited rather than
+                    // chosen, and `is_nan` exists so it is checkable.
                     BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
-                        self.expect_type(&Type::Int, &operand, lhs_span)?;
+                        if !matches!(operand, Type::Int | Type::Float) {
+                            return Err(Diagnostic::new(
+                                format!(
+                                    "`{}` has no ordering (`int` and `float` do)",
+                                    self.unifier.display(&operand)
+                                ),
+                                lhs_span,
+                            ));
+                        }
                     }
                     // `int` and nothing else. A `bool` is refused here
                     // rather than treated as one bit, because `&` and `&&`
@@ -5405,10 +5478,10 @@ impl<'a> FnLowering<'a> {
                     // arithmetic (`docs/strings.md` §2), and a parser that
                     // cannot say `b == byte_of(44)` is not worth having.
                     BinOp::Eq | BinOp::Ne => {
-                        if !matches!(operand, Type::Int | Type::Bool | Type::Byte) {
+                        if !matches!(operand, Type::Int | Type::Bool | Type::Byte | Type::Float) {
                             return Err(Diagnostic::new(
                                 format!(
-                                    "`{}` cannot be compared with `==` (`int`, `byte` and `bool` can)",
+                                    "`{}` cannot be compared with `==` (`int`, `byte`, `bool` and `float` can)",
                                     self.unifier.display(&operand)
                                 ),
                                 lhs_span,
@@ -5942,19 +6015,37 @@ mod tests {
     }
 
     #[test]
-    fn arithmetic_is_for_ints_and_logic_is_for_bools() {
-        assert!(error("fn f() -> [] int { return true + true; }").contains("expected `int`"));
+    fn arithmetic_is_for_numbers_and_logic_is_for_bools() {
+        // Two numeric types now, so the refusal names both rather than
+        // saying "expected `int`" (`docs/floating-point.md` §2).
+        assert!(error("fn f() -> [] int { return true + true; }").contains("has no arithmetic"));
         assert!(error("fn f() -> [] bool { return 1 && 2; }").contains("expected `bool`"));
-        assert!(error("fn f() -> [] int { return -true; }").contains("expected `int`"));
+        assert!(error("fn f() -> [] int { return -true; }").contains("cannot be negated"));
         assert!(error("fn f() -> [] bool { return !1; }").contains("expected `bool`"));
+    }
+
+    #[test]
+    fn float_arithmetic_is_ieee754() {
+        // `float` is arithmetic, and mixing it with `int` is not: there is
+        // no implicit conversion in either direction (§4).
+        assert_eq!(main_fn("fn f() -> [] float { return 1.5 + 2.0; }").ret, Type::Float);
+        assert_eq!(main_fn("fn f() -> [] bool { return 1.5 < 2.0; }").ret, Type::Bool);
+        assert!(error("fn f() -> [] float { return 1.5 + 2; }").contains("expected `float`"));
+        assert!(error("fn f() -> [] int { return 1.5; }").contains("expected `int`"));
+        // `%` is the one arithmetic operator a `float` does not get (§2).
+        assert!(error("fn f() -> [] float { return 1.5 % 2.0; }").contains("expected `int`"));
+        // And the conversions are spelled, both ways.
+        assert_eq!(main_fn("fn f() -> [] float { return float_of(1); }").ret, Type::Float);
+        assert_eq!(main_fn("fn f() -> [] int { return truncate(1.5); }").ret, Type::Int);
+        assert_eq!(main_fn("fn f() -> [] bool { return is_nan(1.5); }").ret, Type::Bool);
     }
 
     #[test]
     fn a_comparison_yields_a_bool() {
         let f = main_fn("fn f() -> [] bool { return 1 < 2; }");
         assert_eq!(f.ret, Type::Bool);
-        // ...and ordering is for ints only.
-        assert!(error("fn f() -> [] bool { return true < false; }").contains("expected `int`"));
+        // ...and ordering is for numbers only.
+        assert!(error("fn f() -> [] bool { return true < false; }").contains("has no ordering"));
     }
 
     #[test]

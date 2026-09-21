@@ -10,6 +10,13 @@ pub enum TokenKind {
     // literals and names
     Ident,
     Int,
+    /// `1.0`, `2.5e-3`, `1e9` (`docs/floating-point.md` §1).
+    ///
+    /// Needs a decimal point with digits on *both* sides, or an
+    /// exponent. That is what keeps it from colliding with `t.0`, the
+    /// tuple component: an index follows a name and a float follows a
+    /// digit, so the character before the dot decides.
+    Float,
     // keywords
     Fn,
     Let,
@@ -96,6 +103,7 @@ impl TokenKind {
         match self {
             TokenKind::Ident => "an identifier",
             TokenKind::Int => "an integer literal",
+            TokenKind::Float => "a floating-point literal",
             TokenKind::Fn => "`fn`",
             TokenKind::Let => "`let`",
             TokenKind::Var => "`var`",
@@ -261,6 +269,42 @@ pub fn tokenize(text: &str) -> Result<Vec<Token>, Diagnostic> {
             {
                 i += 1;
             }
+
+            // A floating-point literal, if what follows says so
+            // (`docs/floating-point.md` §1). Never after `0x`, where `e`
+            // is a digit and `.` is nothing -- and never when this number
+            // is itself a tuple index, because `t.0.1` is two components
+            // and not one component and a float.
+            //
+            // That last case is the one bit of context the rule needs: a
+            // number *immediately after a dot* is an index, so it does
+            // not get to start a float of its own.
+            let after_dot = out.last().is_some_and(|t: &Token| t.kind == TokenKind::Dot);
+            let mut float = false;
+            if !hex && !after_dot {
+                // `.` only counts with a digit after it, which is what
+                // leaves `t.0` and a bare `1.` alone.
+                if bytes.get(i) == Some(&b'.') && bytes.get(i + 1).is_some_and(u8::is_ascii_digit) {
+                    float = true;
+                    i += 1;
+                    while i < bytes.len() && (bytes[i].is_ascii_digit() || bytes[i] == b'_') {
+                        i += 1;
+                    }
+                }
+                if matches!(bytes.get(i), Some(b'e' | b'E')) {
+                    let mut after = i + 1;
+                    if matches!(bytes.get(after), Some(b'+' | b'-')) {
+                        after += 1;
+                    }
+                    if bytes.get(after).is_some_and(u8::is_ascii_digit) {
+                        float = true;
+                        i = after;
+                        while i < bytes.len() && (bytes[i].is_ascii_digit() || bytes[i] == b'_') {
+                            i += 1;
+                        }
+                    }
+                }
+            }
             // A literal may not run straight into a name: `1x` is a typo, not `1 x`.
             if i < bytes.len() && is_ident_continue(bytes[i]) {
                 return Err(Diagnostic::new(
@@ -268,7 +312,8 @@ pub fn tokenize(text: &str) -> Result<Vec<Token>, Diagnostic> {
                     Span::new(i as u32, i as u32 + 1),
                 ));
             }
-            out.push(Token { kind: TokenKind::Int, span: Span::new(start as u32, i as u32) });
+            let kind = if float { TokenKind::Float } else { TokenKind::Int };
+            out.push(Token { kind, span: Span::new(start as u32, i as u32) });
             continue;
         }
 

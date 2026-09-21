@@ -986,6 +986,15 @@ impl<'a> Parser<'a> {
                 let value = self.int_value(tok, true)?;
                 return Ok(self.ast.push_expr(Expr::Int(value), minus.span.to(tok.span)));
             }
+            // `-1.5` is one literal for the same reason `-x` is not: the
+            // sign belongs to the number, and `-0.0` is a value a
+            // negation of `0.0` would also produce but a *literal* should
+            // be able to say directly (`docs/floating-point.md` §1).
+            if self.peek().kind == TokenKind::Float {
+                let tok = self.bump();
+                let bits = self.float_value(tok, true)?;
+                return Ok(self.ast.push_expr(Expr::Float(bits), minus.span.to(tok.span)));
+            }
             let operand = self.unary()?;
             let span = minus.span.to(self.ast.expr_span(operand));
             return Ok(self.ast.push_expr(Expr::Unary { op: UnOp::Neg, operand }, span));
@@ -1072,6 +1081,11 @@ impl<'a> Parser<'a> {
                 self.bump();
                 let value = self.int_value(tok, false)?;
                 Ok(self.ast.push_expr(Expr::Int(value), tok.span))
+            }
+            TokenKind::Float => {
+                self.bump();
+                let bits = self.float_value(tok, false)?;
+                Ok(self.ast.push_expr(Expr::Float(bits), tok.span))
             }
             TokenKind::Str => {
                 let text = self.string_literal()?;
@@ -1236,6 +1250,27 @@ impl<'a> Parser<'a> {
             }
             other => Err(self.err(format!("expected an expression, found {}", other.describe()))),
         }
+    }
+
+    /// A floating-point literal's bits.
+    ///
+    /// Rust's `f64::from_str` is correctly rounded, so `0.1` is the
+    /// nearest binary64 to one tenth and not something near it. A literal
+    /// too large to represent is refused where it is written rather than
+    /// quietly becoming infinity — the same rule the integer literal
+    /// follows, for the same reason.
+    fn float_value(&self, tok: Token, negated: bool) -> Result<u64, Diagnostic> {
+        let digits: String = self.text(tok).chars().filter(|c| *c != '_').collect();
+        let value: f64 = digits
+            .parse()
+            .map_err(|_| Diagnostic::new("not a floating-point literal", tok.span))?;
+        if !value.is_finite() {
+            return Err(Diagnostic::new(
+                "floating-point literal does not fit in `float` (IEEE-754 binary64)",
+                tok.span,
+            ));
+        }
+        Ok(if negated { (-value).to_bits() } else { value.to_bits() })
     }
 
     fn int_value(&self, tok: Token, negated: bool) -> Result<i64, Diagnostic> {
@@ -1493,7 +1528,11 @@ mod tests {
     /// two postfix accesses rather than as a number that has to be taken
     /// apart again.
     #[test]
-    fn a_positional_field_chains_without_a_lexer_hack() {
+    fn a_positional_field_chains() {
+        // `t.0.1` is two components, not one and the float `0.1`. The
+        // lexer settles it with one bit of context -- a number straight
+        // after a dot is an index -- which floating-point literals made
+        // necessary and `docs/floating-point.md` §1 records.
         let (ast, decl) = one_fn("fn f() -> [] int { return t.0.1; }");
         let Stmt::Return(e) = ast.stmt(decl.body.stmts[0]) else { panic!() };
         let Expr::TupleField { base, index } = ast.expr(*e) else { panic!() };

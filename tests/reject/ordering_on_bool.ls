@@ -1,4 +1,4 @@
-//~ ERROR expected `int`, found `bool`
+//~ ERROR `bool` has no ordering (`int` and `float` do)
 
 fn main() -> [] int {
     if true < false {
