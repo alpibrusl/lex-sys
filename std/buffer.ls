@@ -116,6 +116,20 @@ pub fn push_nat[&h](heap: &!h Heap, b: Buffer, n: int) -> [heap] Buffer {
     return push(heap, out, byte_of(48 + n % 10));
 }
 
+// The bytes the buffer holds — exactly `used` of them, not the whole
+// allocation.
+//
+// This is the function `docs/slicing.md` §6 was written for. A buffer
+// holds more than it uses, so handing its contents to anything taking a
+// `&r [byte]` means saying *which* of them, and until `[a..b]` existed
+// there was no way to say it. That is why the library had a `write` of
+// its own instead of formatting into a buffer and emitting it, and why
+// there is no `Writer` type: the buffer is the abstraction, and this is
+// how it crosses to one.
+pub fn bytes[&b](b: &b Buffer) -> [] &b [byte] {
+    return contents(b.held)[0..b.used];
+}
+
 // Print what is in the buffer.
 //
 // By reference, which took two slices to become possible. A `Buffer`
@@ -125,11 +139,11 @@ pub fn push_nat[&h](heap: &!h Heap, b: Buffer, n: int) -> [heap] Buffer {
 // `&b Box[[byte]]` now (`docs/reading-references.md` §2.0), and the
 // buffer is not disturbed by being printed.
 pub fn write[&i, &b](io: &!i Io, b: &b Buffer) -> [io_write] int {
-    let whole = contents(b.held);
+    let whole = bytes(b);
     var i = 0;
-    while i < b.used {
+    while i < len(whole) {
         putchar(io, int_of(whole[i]));
         i = i + 1;
     }
-    return b.used;
+    return len(whole);
 }

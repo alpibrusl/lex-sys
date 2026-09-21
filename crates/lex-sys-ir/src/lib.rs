@@ -647,6 +647,18 @@ pub enum Expr {
         index: Box<Expr>,
         element: Type,
     },
+    /// `s[a..b]` — a half-open run of a slice (`docs/slicing.md`).
+    ///
+    /// A slice is a pointer and a length in two registers, so this is
+    /// `(ptr + a * stride, b - a)` after the bounds check: nothing is
+    /// copied, nothing is allocated, and the result is the same two values
+    /// a slice always was.
+    Subslice {
+        base: Box<Expr>,
+        start: Box<Expr>,
+        end: Box<Expr>,
+        element: Type,
+    },
     /// `fs_read(fs, path, into)` or `fs_write(fs, path, bytes)`.
     ///
     /// The prefix the capability was narrowed to travels with the node,
@@ -2251,6 +2263,12 @@ fn settle_expr(expr: &mut Expr, unifier: &Unifier) {
             *element = unifier.resolve(element);
             settle_expr(base, unifier);
             settle_expr(index, unifier);
+        }
+        Expr::Subslice { base, start, end, element } => {
+            *element = unifier.resolve(element);
+            settle_expr(base, unifier);
+            settle_expr(start, unifier);
+            settle_expr(end, unifier);
         }
         Expr::Len(inner) => settle_expr(inner, unifier),
         Expr::Bytes(_) => {}
@@ -4424,6 +4442,57 @@ impl<'a> FnLowering<'a> {
         ))
     }
 
+    /// `s[a..b]` — a half-open run (`docs/slicing.md` §1).
+    ///
+    /// The result carries the base's region *and its mode*: §4 of that
+    /// document is why the unique case stays unique, and it comes down to
+    /// `linearity-and-effects.md` §5 already saying that two copies of one
+    /// `&!r` alias correctly because there is one buffer behind them.
+    /// Overlapping subslices are that, generalised from one address to
+    /// several into the same locked buffer.
+    fn subslice(
+        &mut self,
+        base: ExprId,
+        start: ExprId,
+        end: ExprId,
+        span: Span,
+    ) -> Result<(Expr, Type), Diagnostic> {
+        let base_span = self.ast.expr_span(base);
+        let (base_expr, base_ty) = self.expr(base)?;
+        let element = self.element_of(&base_ty, base_span)?;
+
+        // The base is a reference to a run; what comes back is the same
+        // kind of reference to a shorter one. `element_of` has already
+        // refused anything that is not.
+        let Type::Ref { unique, region, .. } = self.unifier.resolve(&base_ty) else {
+            return Err(Diagnostic::new(
+                format!(
+                    "`{}` is not a slice, so it has no range to take",
+                    self.unifier.display(&base_ty)
+                ),
+                base_span,
+            ));
+        };
+
+        let start_span = self.ast.expr_span(start);
+        let (start_expr, start_ty) = self.expr(start)?;
+        self.expect_type(&Type::Int, &start_ty, start_span)?;
+        let end_span = self.ast.expr_span(end);
+        let (end_expr, end_ty) = self.expr(end)?;
+        self.expect_type(&Type::Int, &end_ty, end_span)?;
+        let _ = span;
+
+        Ok((
+            Expr::Subslice {
+                base: Box::new(base_expr),
+                start: Box::new(start_expr),
+                end: Box::new(end_expr),
+                element: element.clone(),
+            },
+            Type::Ref { unique, region, inner: Box::new(Type::Slice(Box::new(element))) },
+        ))
+    }
+
     /// The element type of whatever `ty` is, if it is a slice at all.
     fn element_of(&mut self, ty: &Type, span: Span) -> Result<Type, Diagnostic> {
         let resolved = self.unifier.resolve(ty);
@@ -4434,7 +4503,7 @@ impl<'a> FnLowering<'a> {
         }
         Err(Diagnostic::new(
             format!(
-                "`{}` is not a slice, so it cannot be indexed",
+                "`{}` is not a slice, so it has no elements to index or take a range of",
                 self.unifier.display(&resolved)
             ),
             span,
@@ -5164,6 +5233,9 @@ impl<'a> FnLowering<'a> {
                 return self.alloc_slice(*region, *count, *fill, span);
             }
             AstExpr::Index { base, index } => return self.index(*base, *index, span),
+            AstExpr::Slice { base, start, end } => {
+                return self.subslice(*base, *start, *end, span);
+            }
             AstExpr::Call { callee, qualifier, args } => {
                 let text = self.ast.name_of(*callee);
                 if self.lookup(*callee).is_some() {
@@ -6566,6 +6638,34 @@ mod slice_tests {
              fn main() -> [] int { region a { let s = alloc_slice[a](2, open(1)); } return 0; }",
         );
         assert!(message.contains("arena holds `val` data only"), "{message}");
+    }
+
+    /// `docs/slicing.md` §1 and §4: `s[a..b]` is a slice of the same
+    /// element type, region and **mode**.
+    #[test]
+    fn a_subslice_keeps_the_bases_mode() {
+        // A shared base gives a shared slice, usable where `&r [T]` is.
+        accepted(&in_main(
+            "region a { let xs = alloc_slice[a](4, 0); let part = xs[1..3]; \
+             let n = part[0]; }",
+        ));
+
+        // And a unique base keeps uniqueness, which §4 justifies from
+        // `linearity-and-effects.md` §5: every reference derived from one
+        // borrow points into the one buffer the referent was spilled to,
+        // so overlapping subslices alias correctly rather than racing.
+        // That is why there is no `split_at` here for *safety*.
+        accepted(&in_main(
+            "region a { let xs = alloc_slice[a](4, 0); let part = xs[0..3]; \
+             part[0] = 1; let other = xs[1..4]; other[0] = 2; }",
+        ));
+    }
+
+    /// §1: `..` takes a range of a **run**, so there has to be one.
+    #[test]
+    fn a_range_needs_a_slice_to_range_over() {
+        let message = refused(&in_main("let n = 7; let part = n[0..2];"));
+        assert!(message.contains("is not a slice"), "{message}");
     }
 
     #[test]

@@ -1165,6 +1165,36 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
         self.builder.ins().iadd(start, offset)
     }
 
+    /// `s[a..b]` — a half-open run (`docs/slicing.md`).
+    ///
+    /// The same two comparisons an index does, against the same length that
+    /// is already in the slice's second register, and then the arithmetic
+    /// that makes a slice: a pointer and a length. Nothing is copied and
+    /// nothing is allocated.
+    ///
+    /// `a > b` traps rather than yielding empty (§2): an inverted range is a
+    /// bug in the program that wrote it, and a defined-but-wrong answer is
+    /// what `defined-behaviour.md` §2.1 refuses.
+    fn subslice(&mut self, base: &Expr, start: &Expr, end: &Expr, element: &Type) -> Vec<Value> {
+        let slice = self.expr(base);
+        let (at, len) = (slice[0], slice[1]);
+        let start = self.scalar(start);
+        let end = self.scalar(end);
+
+        // `end > len` or `start > end` -- and an unsigned comparison catches
+        // a negative bound as a very large one, exactly as indexing does.
+        let past = self.builder.ins().icmp(IntCC::UnsignedGreaterThan, end, len);
+        self.builder.ins().trapnz(past, TrapCode::HEAP_OUT_OF_BOUNDS);
+        let inverted = self.builder.ins().icmp(IntCC::UnsignedGreaterThan, start, end);
+        self.builder.ins().trapnz(inverted, TrapCode::HEAP_OUT_OF_BOUNDS);
+
+        let stride = self.stride(element);
+        let offset = self.builder.ins().imul_imm(start, stride);
+        let address = self.builder.ins().iadd(at, offset);
+        let length = self.builder.ins().isub(end, start);
+        vec![address, length]
+    }
+
     /// `alloc[a](value)` — bump-allocate and write the value there (§6).
     fn alloc(&mut self, arena: u32, ty: &Type, value: &Expr) -> Value {
         let values = self.expr(value);
@@ -1618,6 +1648,11 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
                 let address = self.element_address(base, index, element);
                 let kinds = leaves(element, self.program, self.pointer);
                 self.load_leaves(address, &kinds)
+            }
+            Expr::Subslice { base, start, end, element } => {
+                let (base, start, end, element) =
+                    (base.clone(), start.clone(), end.clone(), element.clone());
+                self.subslice(&base, &start, &end, &element)
             }
             // The length is the slice's second leaf: already there, never
             // computed.

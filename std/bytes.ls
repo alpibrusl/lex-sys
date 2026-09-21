@@ -89,21 +89,19 @@ pub fn starts_with[&t, &p](text: &t [byte], prefix: &p [byte]) -> [] bool {
     if len(prefix) > len(text) {
         return false;
     }
-    var i = 0;
-    while i < len(prefix) {
-        if text[i] != prefix[i] {
-            return false;
-        }
-        i = i + 1;
-    }
-    return true;
+    // One line, and it used to be a loop. `docs/slicing.md`: this
+    // function existed *because* `text[0..len(prefix)]` could not be
+    // written, so it is the clearest measure of what slicing bought.
+    return equal(text[0..len(prefix)], prefix);
 }
 
-// Where `needle` first occurs in `text`, or `-1`.
-//
-// The naive scan: no Boyer-Moore, no table. A better algorithm is a
-// policy this library could choose later, and until a program here is
-// slow because of this one it would be a guess.
+pub fn ends_with[&t, &p](text: &t [byte], suffix: &p [byte]) -> [] bool {
+    if len(suffix) > len(text) {
+        return false;
+    }
+    return equal(text[len(text) - len(suffix)..len(text)], suffix);
+}
+
 pub fn find[&t, &n](text: &t [byte], needle: &n [byte]) -> [] int {
     if len(needle) > len(text) {
         return 0 - 1;
