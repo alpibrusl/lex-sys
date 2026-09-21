@@ -1,21 +1,25 @@
-//~ ERROR nothing moves out of a reference
+//~ ERROR expected `Box[?0]`, found `&p Box[int]`
 
 // `docs/tuples.md` §3.1, the reference case, and
-// `reading-references.md` §2 in the place tuples add.
+// `reading-references.md` §2.0 in the place tuples add.
 //
-// The rule is one sentence -- *nothing moves out of a reference, ever* --
-// and the last time it was stated for one way of reaching into a value
-// and not enforced for another, the gap was a double free reachable from
-// ordinary code (`boxed-slices.md`, the `res` field through a reference).
-// So this is a fixture written with the feature rather than after it.
+// A tuple is an anonymous struct, so it had better not need its own
+// ideas about reading a component. `pair.0` through a reference is a
+// `&p Box[int]` -- a borrow, because a `res` component cannot be copied
+// -- exactly as `holder.held` is on a struct.
 //
-// A `val` component still reads through a reference, because copying one
-// costs the referent nothing. `tests/accept/tuple_roundtrip.ls` is that
-// half.
+// *Binding* it is fine, and `tests/accept/borrowed_fields.ls` is that
+// half. Consuming it is not, and that is this fixture: `unbox` takes a
+// `Box`, a borrow is not one, and the double free the old rule was
+// written to prevent is unexpressible without any rule about reading at
+// all.
+//
+// A `val` component still copies, because copying one costs the referent
+// nothing. `tests/accept/tuple_roundtrip.ls` is that half.
 
-fn peek[&p](pair: &p (Box[int], int)) -> [] int {
+fn steal[&h, &p](heap: &!h Heap, pair: &p (Box[int], int)) -> [heap] int {
     let held = pair.0;
-    return 0;
+    return unbox(heap, held);
 }
 
 fn main(world: World) -> [] int {
@@ -29,10 +33,11 @@ fn main(world: World) -> [] int {
     borrow mut heap as &!h in {
         let pair = (box(h, 41), 1);
         borrow pair as &p in {
-            status = peek(p);
+            status = steal(h, p);
         }
+        // The tuple still owns a box `steal` already freed.
         let (held, tag) = pair;
-        status = unbox(h, held) + tag;
+        status = status + unbox(h, held) + tag;
     }
     release(heap);
     return status;

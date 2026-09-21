@@ -100,15 +100,20 @@ fn run[&h, &i](heap: &!h Heap, io: &!i Io) -> [heap, io_write] int {
     putchar(io, 46);
     putchar(io, 32);
 
-    // The array-shaped collection, at a copyable element. `get` hands
-    // the vector back because a `res` field cannot be read through a
-    // reference, so reaching the box means owning the whole vector.
+    // The array-shaped collection, at a copyable element. `get` takes a
+    // reference and reads like a getter should -- it used to hand the
+    // vector back in a tuple, because a `res` field could not be reached
+    // through a reference at all (`docs/reading-references.md` §2.0).
     var v = vec.empty(heap, 2, 0);
     v = vec.push(heap, v, 7);
     v = vec.push(heap, v, 8);
     v = vec.push(heap, v, 9);
-    let (first, v) = vec.get(v, 0);
-    let (third, v) = vec.get(v, 2);
+    var first = 0;
+    var third = 0;
+    borrow v as &b in {
+        first = vec.get(b, 0);
+        third = vec.get(b, 2);
+    }
     console.print_int(io, first * 100 + third);
     console.newline(io);
     let freed = vec.drop(heap, v);

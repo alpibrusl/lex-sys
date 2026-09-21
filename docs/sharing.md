@@ -52,13 +52,23 @@ compiled, and the compiler refused each for its own reason:
 
 | Attempt | Refusal |
 |---|---|
-| `clone` from a borrow — `Rc { held: rc.held }` | *"`Box[Cell]` is `res`, and nothing moves out of a reference"* |
+| `clone` from a borrow — `Rc { held: rc.held }` | *"expected `Box[Cell]`, found `&r Box[Cell]`"* |
 | Consume one and hand back two | *"`held` has already been consumed; a `res` value is used exactly once"* |
 | Declare `Rc` itself `val` so it copies | *"`Rc` is declared `val`, but it holds `Box[Cell]`, which is `res`"* |
 
 Three rules, none of which was written with `Rc` in mind, and each of
 which is individually right. Together they say the same thing: **nothing
 here copies a pointer.**
+
+The first refusal has since got *plainer*, which is worth recording
+because it makes the argument stronger rather than weaker.
+`reading-references.md` §2.0 used to refuse reading a `res` field through
+a reference outright; now it hands back a **borrow** of that field, and
+`rc.held` is a `&r Box[Cell]`. The `Rc` still does not compile, because
+the struct literal wants a `Box[Cell]` it owns and a borrow is not an
+owner. So what refuses `clone` is no longer a rule about reading at all —
+it is the type — and the three refusals are still three, still unrelated,
+and one of them is now something no design decision had to choose.
 
 ### 2.2 What it would take, and why not yet
 

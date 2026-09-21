@@ -54,27 +54,65 @@ it.
 ### 2.0 The same rule, for field access
 
 Stated here for `match`, and it holds for the other way to reach into a
-value. **Field access is not an exception**, and for a while it was one.
+value. **Field access is not an exception**, and for two separate
+stretches it was one.
 
-`h.field` through a reference *copies* a `val` field out, which costs the
-referent nothing and is what a reference is for. A `res` field cannot be
-copied — that is what `res` means — so reading one would produce a second
-owner of a value the referent still owns: two obligations where one is
-owed. It is refused, and `res_field_read_through_reference.ls` is the
-fixture.
+The rule decides *what comes back*, not whether anything does:
 
-That fixture exists because it was **not** refused until `boxed-slices.md`
-was built, and the hole was real rather than theoretical: a `res` field
-read through a *shared* reference and then consumed gave an `Invalid
-free()` under valgrind, from ordinary code, with no `unsafe` anywhere —
-which this language does not have. It contradicted `heap.md` §3.1's
-"a double free is unexpressible", and that section is only true with this
-check in place.
+| Through a reference | `val` member | `res` member |
+|---|---|---|
+| `match` payload | borrows — `*value` reads it | borrows |
+| field access `h.f` | **copies** | **borrows** |
 
-Reaching a `res` field therefore means owning the value: take it apart,
-use the parts, put it back together. `examples/buffer/` does exactly that,
-and its `write_buffer` takes a `Buffer` by value and hands it back for
-this reason rather than as a matter of taste.
+A `val` field is copied out, which costs the referent nothing and is what
+a reference is for. A `res` field cannot be copied — that is what `res`
+means — so what comes back is a **reference to** it, exactly as `match`
+on a reference binds a `res` payload. `h.held` on a `&r Holder` is a
+`&r Box[int]`, carrying the base's mode and its region: a field of a
+`&!r` is reachable uniquely, a field of a `&r` is not, and either way the
+field's reference lives exactly as long as the one it was reached
+through.
+
+The remaining difference in that table — a `val` field copies where a
+`val` payload borrows — is the ergonomic one, and it is the reason
+`b.used` is not `*b.used`.
+
+#### The hole this closed, twice
+
+Reading a `res` field through a reference was first **allowed and
+unsound**. It produced a second owner of a value the referent still
+owned, and under valgrind that was an `Invalid free()` from ordinary
+code with no `unsafe` anywhere — which this language does not have. It
+contradicted `heap.md` §3.1's "a double free is unexpressible".
+
+It was then **refused outright**, which fixed the unsoundness and
+overshot: a struct with a `res` field could not be read through a
+reference *at all*, while the equivalent enum could. Two standard-library
+modules paid for that with an accessor that takes the whole value and
+hands it back — `std.buffer`'s `write` and `std.vec`'s `get` — and
+`collections.md` §5.1 recorded it as the next thing to settle.
+
+A borrow is the answer to both, and the reason is worth stating plainly:
+**the double free was never about reading, it was about owning.** So the
+refusal belongs at the use rather than at the read, and it is already
+there. Every route to a second owner is refused by the ordinary type
+rule, because `&r Box[int]` is not `Box[int]`:
+
+```
+unbox(heap, holder.held)          // expected `Box[?0]`, found `&r Box[int]`
+Holder { held: holder.held }      // expected `Box[int]`, found `&r Box[int]`
+return holder.held;               // expected `Box[int]`, found `&r Box[int]`
+```
+
+That is one rule doing the work two were doing, and the surviving one is
+the rule the language already had.
+
+#### Reaching a `res` field on an *owner* is still refused
+
+Unchanged, and for a different reason: there is no reference involved, so
+reading the field would **move** it out of a value that is still whole,
+leaving a half-consumed aggregate the checker cannot describe. Take it
+apart with a destructuring `let`, which names every part at once.
 
 ### 2.1 Why not Rust's binding modes
 
@@ -184,7 +222,7 @@ three times, then freed once.
 | Nested patterns | Orthogonal; this rule composes with them unchanged |
 | `match` on a slice | Needs patterns over lengths, which is a different feature |
 | Moving out of a unique reference | Would need the referent marked as moved-from; a real feature, and not one anything needs yet |
-| Reading a `res` field *as a borrow* | §2.0 refuses the move. Handing back `&r Field` instead would be useful, and is exactly the binding-mode question §2.1 declines |
+| ~~Reading a `res` field *as a borrow*~~ | **Done, and the reason given here was wrong.** It said this "is exactly the binding-mode question §2.1 declines". It is not: §2.1 declines *inferring* among several possible modes, and for a `res` field there is only one — it cannot be copied, so a borrow is the only thing reading one could mean. Nothing is inferred, and §2.0 hands back `&r Field` |
 | `*r` on a `res` behind a *unique* reference | A swap, not a read: it would have to put something back. Wants its own operation |
 
 ---
@@ -198,11 +236,13 @@ three times, then freed once.
 | `write_through_shared_deref.ls` | `*r = v` needs a unique reference | 3 |
 | `match_reference_binding_escapes.ls` | A binding from a matched reference dies with the region | 2 |
 | `match_reference_payload_consumed.ls` | A `res` payload bound by reference may not be consumed | 2 |
-| `res_field_read_through_reference.ls` | The same rule for field access — the hole §2.0 records | 2.0 |
+| `res_field_read_through_reference.ls` | A borrowed `res` field may not be **consumed** — refused at the use, by the type | 2.0 |
+| `res_tuple_component_through_reference.ls` | The same, where the aggregate is a tuple | 2.0 |
 
 And the accepting counterparts:
 
 | Fixture | Shows |
 |---|---|
+| `borrowed_fields.ls` | A `res` field and a `res` tuple component read through a reference, at both modes — and `std.buffer` printed **twice** without being spent |
 | `match_a_reference.ls` | A list read twice and then freed |
 | `deref_roundtrip.ls` | `*r` reads, `*r = v` writes, through the right modes |

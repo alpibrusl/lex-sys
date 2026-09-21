@@ -1656,6 +1656,32 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
                     })
                     .collect()
             }
+            // A reference *to* the field: the same arithmetic as
+            // `Expr::FieldRef`, stopping one step earlier
+            // (`docs/reading-references.md` §2.0). That node loads the
+            // field's leaves from `address + offset`; this one is the
+            // address itself, so one `iadd_imm` replaces the loads.
+            Expr::FieldAddr { base, def, args, index } => {
+                let address = self.scalar(base);
+                let TypeInfo::Struct { fields, .. } = self.program.type_info(*def) else {
+                    unreachable!("a field access on an enum should have been refused");
+                };
+                let start: u32 = fields[..*index as usize]
+                    .iter()
+                    .map(|(_, ty)| {
+                        leaf_count(&ty.substitute(args, &[]), self.program, self.pointer)
+                    })
+                    .sum();
+                let offset = start as i64 * RETURN_SLOT_STRIDE as i64;
+                vec![self.builder.ins().iadd_imm(address, offset)]
+            }
+            // The same, for a type with no declaration to consult.
+            Expr::TupleFieldAddr { base, components, index } => {
+                let address = self.scalar(base);
+                let (start, _) = self.tuple_slice(components, *index);
+                let offset = start as i64 * RETURN_SLOT_STRIDE as i64;
+                vec![self.builder.ins().iadd_imm(address, offset)]
+            }
             // The same arithmetic as `Expr::FieldRef`, over a type with no
             // declaration to consult: the component types travel with the
             // node instead.

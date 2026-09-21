@@ -216,23 +216,29 @@ declaration's hash, which the qualifier is only used to look up
 (`modules.md` §2). The same `match` written flat and written through an
 import is one body, and there is a test.
 
-### 5.1 The asymmetry that is still open
+### 5.1 The asymmetry that was still open — now closed
 
 `match` on a reference **borrows**: a reference gives references
-(`reading-references.md` §2). Field access on a reference **copies**,
-which is why it is refused for a `res` field. The consequence is that a
-struct with a `res` field cannot be read through a reference at all,
-while the equivalent enum can.
+(`reading-references.md` §2). Field access on one used to **copy**, which
+is why it was refused for a `res` field — so a struct with a `res` field
+could not be read through a reference at all, while the equivalent enum
+could.
 
-Two library modules have now paid for this. `std.buffer`'s `write` takes
-the buffer by value and hands it back; `std.vec`'s `get` does the same,
-and needs a stored `fill` besides, because a generic function cannot
-*name* a `T` to seed a `var` with before the `borrow` that fills it in.
-That the bound makes keeping a spare `T` free is a nice accident, not a
-design.
+Two library modules paid for that, and both are fixed:
 
-This is the next thing to settle here, and it is a change to
-`reading-references.md` rather than to this document.
+```
+pub fn get[T: val](v: Vec[T], i: int) -> [] (T, Vec[T])    // before
+pub fn get[T: val, &v](v: &v Vec[T], i: int) -> [] T       // after
+```
+
+`reading-references.md` §2.0 now hands back a **borrow** of a `res`
+field, so `v.held` is a `&v Box[[T]]` and a getter is a getter.
+`std.buffer`'s `write` lost the same workaround — it takes a `&b Buffer`
+and the buffer is not spent by being printed.
+
+The `fill` this module keeps is *not* one of those workarounds and
+stayed: `reserve` needs a value to fill a bigger run with, and keeping a
+spare `T` is free precisely because `T` is `val`.
 
 ---
 
@@ -256,7 +262,7 @@ caller still owes.
 
 | Question | Why it waits |
 |---|---|
-| Reading a `res` field through a reference | §5.1. A change to `reading-references.md`, and the second module to pay for it is the point at which it stops being hypothetical |
+| ~~Reading a `res` field through a reference~~ | **Done** — §5.1. It is a borrow now, and both modules that worked around it are simpler for it |
 | A writer abstraction | Still missing, and still unaddressed by this slice. It wants either closures or a dispatch story, and the effect row of a writer that could be a file *or* the console is the interesting part |
 | `map` / `and_then` on `Option` | No closures, so there is nothing to pass |
 | A hash map | Wants `Vec`, so it inherits §2 — a map holding resources is the same wall |
