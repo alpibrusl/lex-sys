@@ -217,6 +217,27 @@ way to write it — which is also how the C writes it.
 `docs/porting.md` is the report, including §6 on what one small port does
 not establish.
 
+### `sort/` — the port with resources in it
+
+`LC_ALL=C sort`: the files named on the command line, or standard input
+when none are, sorted by byte order. Checked against GNU `sort` the same
+way `base64/` is checked against GNU `base64` — seven input shapes, named
+files, several at once, a missing file, and 1.2 MB past the first read.
+
+This is the one to read for **linearity in a program that has some**.
+Five owned resources, all on the heap: the text, two parallel runs saying
+where each line is, and the permutation being sorted with its scratch.
+`main` creates all five, lends them down, and destroys all five.
+
+The shape that repeats is `out = buffer.push(heap, out, byte)` — the
+library is move-based, so a loop that fills a buffer moves it round and
+round. `docs/porting.md` §9.2 is honest about what that costs: nothing
+hard, and three tokens every time.
+
+Also worth reading for the rows. Four of the eight functions declare
+`[]`, and they are the four doing the sorting — the effects live at the
+edges, which is §9.3.
+
 ### `serve/` — a REST endpoint over a real socket
 
 The answer to *can this language do X?*, where X is the one everybody

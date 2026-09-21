@@ -147,3 +147,37 @@ pub fn write[&i, &b](io: &!i Io, b: &b Buffer) -> [io_write] int {
     }
     return len(whole);
 }
+
+// The unused tail, for something that writes bytes itself to fill.
+//
+// `fs_read` takes a `&!r [byte]` and writes into it
+// (`docs/filesystem.md` §3), so a program reading a file into a buffer
+// needs the room *before* it knows how much will be used. Until a port
+// wanted exactly that there was no way to ask: `push` and `append` both
+// take the bytes as an argument, which is the wrong direction when the
+// filesystem is the one producing them (`docs/porting.md` §9).
+//
+// Unique, because the caller writes through it. What it hands back is a
+// reference into this buffer's allocation, so it lives as long as the
+// borrow and no longer.
+pub fn room[&b](b: &!b Buffer) -> [] &!b [byte] {
+    let s = contents(b.held);
+    return s[b.used..len(s)];
+}
+
+// Commit `n` bytes that `room` was just filled with.
+//
+// Separate from `room` because the two answer different questions and
+// only the caller knows the second: `fs_read` says how much it wrote,
+// and a buffer cannot see a write it did not make. Traps if `n` would
+// take `used` past the allocation, which is the same bounds check every
+// other operation here gets, arriving one step later.
+pub fn filled[&b](b: &!b Buffer, n: int) -> [] int {
+    let s = contents(b.held);
+    // `s[b.used..b.used + n]` is the range that was written; evaluating
+    // it is the check, and an out-of-range commit traps here rather than
+    // corrupting `used` for every later reader.
+    let written = s[b.used..b.used + n];
+    b.used = b.used + len(written);
+    return b.used;
+}

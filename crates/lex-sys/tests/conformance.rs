@@ -279,6 +279,7 @@ fn printing_preserves_every_identity_and_is_idempotent() {
         // careless edit would land without anyone reading it.
         "benches",
         "examples/base64",
+        "examples/sort",
         // The standard library is code, and gets the same contract every
         // other file here gets: printed, reparsed, identical hashes, and
         // a fixed point.
@@ -2428,6 +2429,154 @@ fn base64_agrees_with_coreutils() {
     assert_eq!(status, Some(0), "a megabyte should decode");
     assert_eq!(decoded.len(), large.len(), "the round trip changed a megabyte's length");
     assert!(decoded == large, "the round trip changed a megabyte's contents");
+
+    let _ = std::fs::remove_dir_all(&scratch);
+}
+
+/// `examples/sort/` — the second port, checked against GNU `sort`.
+///
+/// The comparison is `LC_ALL=C`, because that is the ordering the program
+/// implements: byte order, with no locale anywhere in this language to
+/// implement anything else. Same GNU-detection rule as the `base64` test,
+/// for the same reason — BSD's `sort` is a different program.
+///
+/// Where a reference is absent the shape checks still run: the output is
+/// still required to be a sorted permutation of the input's lines, which
+/// is most of what "sorted" means and needs nobody else's binary.
+#[test]
+fn sort_agrees_with_gnu_sort() {
+    use std::collections::BTreeMap;
+
+    let scratch = scratch("example-sort");
+    let exe = scratch.join("sort");
+    let build = Command::new(BIN)
+        .args([
+            "build".as_ref(),
+            repo_root().join("examples/sort/sort.ls").as_os_str(),
+            "--std".as_ref(),
+            "-o".as_ref(),
+            exe.as_os_str(),
+        ])
+        .output()
+        .expect("the compiler runs");
+    assert!(
+        build.status.success(),
+        "`sort` should compile, but the compiler said:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+
+    /// Run with `input` on stdin and `args` on the command line.
+    fn run(command: &Path, args: &[&Path], input: &str) -> (String, Option<i32>) {
+        let mut child = Command::new(command)
+            .args(args)
+            .env("LC_ALL", "C")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("the program runs");
+        let mut stdin = child.stdin.take().expect("a piped stdin");
+        let owned = input.to_owned();
+        let writer = std::thread::spawn(move || {
+            let _ = stdin.write_all(owned.as_bytes());
+        });
+        let out = child.wait_with_output().expect("it exits");
+        writer.join().expect("the writer thread finishes");
+        (String::from_utf8_lossy(&out.stdout).into_owned(), out.status.code())
+    }
+
+    /// How many times each line appears, so the output can be checked to
+    /// be a rearrangement of the input rather than merely sorted.
+    fn multiset(lines: &str) -> BTreeMap<&str, usize> {
+        let mut counts = BTreeMap::new();
+        // A trailing newline *ends* the last line rather than starting an
+        // empty one, which is the one thing a plain `split` gets wrong.
+        let body = lines.strip_suffix('\n').unwrap_or(lines);
+        if !body.is_empty() {
+            for line in body.split('\n') {
+                *counts.entry(line).or_default() += 1;
+            }
+        }
+        counts
+    }
+
+    let reference = Path::new("/usr/bin/sort");
+    let have_reference = reference.exists()
+        && Command::new(reference).arg("--version").stdin(Stdio::null()).output().is_ok_and(|v| {
+            v.status.success() && String::from_utf8_lossy(&v.stdout).contains("GNU coreutils")
+        });
+
+    // The shapes that decide a line sort: nothing, no trailing newline,
+    // blank lines, one line a prefix of another, bytes outside the
+    // letters, and enough lines to be a real merge.
+    let bulk: String = (0..5000)
+        .map(|i| format!("{}{}\n", "xyzab".as_bytes()[i % 5] as char, (i * 7919) % 10007))
+        .collect();
+    let corpus = [
+        "",
+        "zebra\nant",
+        "\n\nb\n\na\n",
+        "ab\na\nabc\nb\n",
+        "~\n!\nA\na\n0\n",
+        "same\nsame\nsame\n",
+        &bulk,
+    ];
+
+    for input in corpus {
+        let (ours, status) = run(&exe, &[], input);
+        assert_eq!(status, Some(0), "sorting should succeed");
+
+        // A permutation of the input's lines, in non-descending order.
+        // Both halves hold with or without a reference to compare
+        // against, which is what the darwin job checks when the `sort`
+        // on that machine is not GNU's.
+        assert_eq!(
+            multiset(&ours),
+            multiset(input),
+            "the output is not a permutation of the input:\n{ours}"
+        );
+        let got: Vec<&str> = ours.lines().collect();
+        assert!(got.windows(2).all(|w| w[0] <= w[1]), "the output is not in byte order:\n{ours}");
+
+        if have_reference {
+            let (theirs, _) = run(reference, &[], input);
+            assert_eq!(ours, theirs, "differs from GNU sort on input {input:?}");
+        }
+    }
+
+    // Named files, several at once, and one that is not there.
+    let one = scratch.join("one.txt");
+    let two = scratch.join("two.txt");
+    std::fs::write(&one, "pear\napple\n").expect("a writable fixture");
+    std::fs::write(&two, "fig\nbanana\n").expect("a writable fixture");
+
+    let (ours, status) = run(&exe, &[&one, &two], "");
+    assert_eq!(status, Some(0), "sorting two files should succeed");
+    assert_eq!(ours, "apple\nbanana\nfig\npear\n", "two files should sort together");
+    if have_reference {
+        let (theirs, _) = run(reference, &[&one, &two], "");
+        assert_eq!(ours, theirs, "differs from GNU sort across two files");
+    }
+
+    let missing = scratch.join("not-here.txt");
+    let (_, status) = run(&exe, &[&missing], "");
+    assert_eq!(status, Some(2), "a missing file should exit 2, as GNU does");
+
+    // Past the 64 KiB first read, so the doubling in `read_file` runs.
+    let large: String = (0..40_000).map(|i| format!("line {:06}\n", (i * 31) % 40_000)).collect();
+    let big = scratch.join("big.txt");
+    std::fs::write(&big, &large).expect("a writable fixture");
+    let (ours, status) = run(&exe, &[&big], "");
+    assert_eq!(status, Some(0), "a file past the first read should succeed");
+    assert_eq!(ours.lines().count(), 40_000, "it lost lines while growing");
+    assert!(
+        ours.lines().collect::<Vec<_>>().windows(2).all(|w| w[0] <= w[1]),
+        "a file past the first read came out unsorted"
+    );
+    if have_reference {
+        let (theirs, _) = run(reference, &[&big], "");
+        assert_eq!(ours, theirs, "differs from GNU sort on a file past the first read");
+    }
 
     let _ = std::fs::remove_dir_all(&scratch);
 }
