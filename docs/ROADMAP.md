@@ -45,10 +45,11 @@ reasoning — this table is the index, not the argument.
 | [#34](https://github.com/alpibrusl/lex-sys/pull/34) | [Collections](collections.md) | Which collections hold a resource is decided by **shape**, not generics: a list works because taking it apart produces its elements; an array does not because freeing one is a single `free` that runs nothing |
 | [#35](https://github.com/alpibrusl/lex-sys/pull/35) | The README | Not a language change: the README had grown a paragraph per slice in three places at once, so the history moved here and the per-example prose moved to `examples/` |
 | [#36](https://github.com/alpibrusl/lex-sys/pull/36) | [A borrowed field](reading-references.md) | The double free was never about **reading**, it was about **owning**. A `res` field through a reference is a borrow, and the refusal that used to guard it was doing work the type rule already does |
+| [#37](https://github.com/alpibrusl/lex-sys/pull/37) | [Slicing](slicing.md) | `s[a..b]`, and the answer to "a writer abstraction": there should not be one, because a function taking a `Writer` must declare the **union** of what every destination could do, and a union row is not an exact row. The abstraction is the buffer |
 
 ### The pattern, if there is one
 
-Eight of these fourteen slices found a bug, falsified a claim the project
+Nine of these fifteen slices found a bug, falsified a claim the project
 had already written down, or both — and three of those were soundness
 bugs reachable from ordinary code. That is not an accident of luck: each
 slice is built by writing the thing the previous document said was
@@ -71,7 +72,6 @@ for.
 
 | Next | Why it is next |
 |---|---|
-| A writer abstraction | Format into a buffer or a file rather than only the console. Wants either closures or a dispatch story, and the interesting part is the effect row of a writer that could be either |
 | `defer` | [`linearity-and-effects.md`](linearity-and-effects.md) §4.2 is verbose without it. The expansion is mechanical; the question is whether a consumption the programmer did not write at the point it happens is still "visible" |
 | Capability release at `main` | Four `release` calls is ceremony. Letting the runtime reclaim `World`'s parts is convenient and is *exactly* the affine hole §4 refuses everywhere else |
 | `[budget]` | Carried over from Lex and not specified here. Plainly a capability carrying an integer; what it costs at runtime, and whether it is checked or merely accounted, is unanswered |

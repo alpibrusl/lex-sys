@@ -1001,10 +1001,24 @@ impl<'a> Parser<'a> {
                 // `grid[i][j]` need no special case.
                 TokenKind::LBracket => {
                     self.bump();
-                    let index = self.bracketed(|p| p.expr())?;
+                    // `s[i]` or `s[a..b]` — one bracket, told apart by the
+                    // `..` after the first expression (`docs/slicing.md` §1).
+                    let (index, range) = self.bracketed(|p| {
+                        let first = p.expr()?;
+                        if p.eat(TokenKind::DotDot) {
+                            let second = p.expr()?;
+                            return Ok((first, Some(second)));
+                        }
+                        Ok((first, None))
+                    })?;
                     let end = self.expect(TokenKind::RBracket)?.span;
                     let span = self.ast.expr_span(base).to(end);
-                    base = self.ast.push_expr(Expr::Index { base, index }, span);
+                    base = match range {
+                        Some(last) => {
+                            self.ast.push_expr(Expr::Slice { base, start: index, end: last }, span)
+                        }
+                        None => self.ast.push_expr(Expr::Index { base, index }, span),
+                    };
                 }
                 _ => return Ok(base),
             }

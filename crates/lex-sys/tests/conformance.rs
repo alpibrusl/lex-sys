@@ -398,6 +398,80 @@ fn indexing_past_a_slice_traps_rather_than_reading_on() {
     }
 }
 
+/// `docs/slicing.md` §2: a range past the end traps.
+///
+/// The same rule indexing has, applied to the operation that produces a
+/// range rather than an element -- and it has to be, because the
+/// alternative is a slice claiming a length its allocation does not
+/// have, which is a buffer overrun with a type on it.
+#[test]
+fn slicing_past_the_end_traps() {
+    // One unsigned comparison covers both ends, as it does for an index:
+    // a negative bound read as unsigned is enormous.
+    for range in ["0..13", "0 - 1..3"] {
+        let tag = format!("slice-bounds-{}", range.replace([' ', '-', '.'], ""));
+        let dir = scratch(&tag);
+        let source = dir.join("bounds.ls");
+        std::fs::write(
+            &source,
+            format!(
+                "fn main(world: World) -> [] int {{\n\
+                     let Split {{ io, ffi, fs, heap, args }} = split(world); release(args); release(heap); release(fs); release(ffi); release(io);\n\
+                     let text = \"hello, world\";\n\
+                     return len(text[{range}]);\n\
+                 }}\n"
+            ),
+        )
+        .expect("a writable fixture");
+        let exe = dir.join("bounds");
+        let build = Command::new(BIN)
+            .args(["build".as_ref(), source.as_os_str(), "-o".as_ref(), exe.as_os_str()])
+            .output()
+            .expect("the compiler runs");
+        assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+
+        let run = Command::new(&exe).output().expect("the compiled program runs");
+        assert_eq!(
+            run.status.code(),
+            None,
+            "`text[{range}]` should be killed by a signal, not exit"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// §2 again: `a > b` stops rather than yielding empty.
+///
+/// An inverted range is a bug in the program that wrote it, and quietly
+/// returning nothing is the defined-but-wrong answer
+/// `defined-behaviour.md` §2.1 refuses.
+#[test]
+fn an_inverted_range_traps() {
+    let dir = scratch("slice-inverted");
+    let source = dir.join("inverted.ls");
+    std::fs::write(
+        &source,
+        "fn main(world: World) -> [] int {\n\
+             let Split { io, ffi, fs, heap, args } = split(world); release(args); release(heap); release(fs); release(ffi); release(io);\n\
+             let text = \"hello, world\";\n\
+             return len(text[5..2]);\n\
+         }\n",
+    )
+    .expect("a writable fixture");
+    let exe = dir.join("inverted");
+    let build = Command::new(BIN)
+        .args(["build".as_ref(), source.as_os_str(), "-o".as_ref(), exe.as_os_str()])
+        .output()
+        .expect("the compiler runs");
+    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+
+    let run = Command::new(&exe).output().expect("the compiled program runs");
+    assert_eq!(run.status.code(), None, "`text[5..2]` should be killed by a signal");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn integer_overflow_traps_rather_than_wrapping() {
     // `docs/defined-behaviour.md` §2.1. Wrapping would be *defined* -- C has

@@ -496,6 +496,14 @@ impl Printer<'_> {
             Expr::Index { base, index } => {
                 format!("{}[{}]", self.expr_at(*base, POSTFIX), self.expr(*index))
             }
+            Expr::Slice { base, start, end } => {
+                format!(
+                    "{}[{}..{}]",
+                    self.expr_at(*base, POSTFIX),
+                    self.expr(*start),
+                    self.expr(*end)
+                )
+            }
             Expr::Variant { enum_name, qualifier, variant, args } => {
                 let head =
                     format!("{}::{}", self.qualified(*qualifier, *enum_name), self.name(*variant));

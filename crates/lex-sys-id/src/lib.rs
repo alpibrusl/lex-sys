@@ -126,6 +126,10 @@ mod tag {
     pub const TUPLE: u8 = 0x6d;
     pub const TUPLE_FIELD: u8 = 0x6e;
     pub const DESTRUCTURE_TUPLE: u8 = 0x6f;
+    /// `s[a..b]` (`docs/slicing.md`). Its own tag rather than `INDEX` with
+    /// an extra operand: an index yields an element and a range yields a
+    /// slice, so they are two operations and must be two encodings.
+    pub const SUBSLICE: u8 = 0x70;
 
     /// The tag for a declared mode. Written out rather than cast from the
     /// enum, so adding a mode cannot silently renumber the others.
@@ -905,6 +909,12 @@ impl BodyHasher<'_> {
                 self.expr(*base);
                 self.expr(*index);
             }
+            Expr::Slice { base, start, end } => {
+                self.encoder.tag(tag::SUBSLICE);
+                self.expr(*base);
+                self.expr(*start);
+                self.expr(*end);
+            }
             Expr::Tuple(parts) => {
                 let parts = parts.clone();
                 self.encoder.tag(tag::TUPLE).len(parts.len());
@@ -1006,6 +1016,24 @@ mod tests {
     }
 
     // ---- what must not change a hash -----------------------------------
+
+    /// `docs/slicing.md`: an index and a range are two operations, so they
+    /// are two encodings.
+    ///
+    /// `s[1]` yields an element and `s[1..2]` yields a slice; encoding the
+    /// second as the first with an extra operand would make two different
+    /// programs collide, which is the one thing a content hash may never do.
+    #[test]
+    fn an_index_and_a_range_are_different_bodies() {
+        let index = "fn f[&r](s: &r [int]) -> [] int { return s[1]; }";
+        let range = "fn f[&r](s: &r [int]) -> [] int { return len(s[1..2]); }";
+        assert_ne!(body(index, "f"), body(range, "f"));
+
+        // And the bounds are part of it: a different range is a different
+        // body, the same way a different index is.
+        let other = "fn f[&r](s: &r [int]) -> [] int { return len(s[1..3]); }";
+        assert_ne!(body(range, "f"), body(other, "f"));
+    }
 
     /// `docs/collections.md` §3 as a hash: a bound on a type
     /// declaration's parameter is part of what a user of that type

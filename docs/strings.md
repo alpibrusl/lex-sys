@@ -186,7 +186,7 @@ rather than a surprise.
 | Question | Why it waits |
 |---|---|
 | Bitwise operators on `int` | Needed for masking, and `defined-behaviour.md` §8 wants shift semantics settled with them |
-| A growable buffer | Needs an allocator that is not one arena chunk |
+| ~~A growable buffer~~ | **Done** — `boxed-slices.md` gave it an allocator that is not one arena chunk, and `std.buffer` is the buffer. `slicing.md` §6 added `bytes`, which is how one crosses to anything taking a `&r [byte]` |
 | UTF-8 decoding | Library work over `[byte]`, in lex-sys, once there is enough language to write it |
 | `\x` and `\u` escapes | Each is a claim this design declines to make (§4) |
 | Interning literals | An optimisation, and one that changes whether two literals share an address — which is observable, so it needs a rule before it needs code |

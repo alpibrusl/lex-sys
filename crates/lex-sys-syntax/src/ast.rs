@@ -251,6 +251,17 @@ pub enum Expr {
         base: ExprId,
         index: ExprId,
     },
+    /// `s[a..b]` — a half-open run of a slice (`docs/slicing.md`).
+    ///
+    /// Parsed where `Index` is and chaining the same way, because it is the
+    /// same postfix bracket with a `..` inside it. What comes back is a
+    /// slice of the same element type, region and mode, so nothing about
+    /// references had to be written twice.
+    Slice {
+        base: ExprId,
+        start: ExprId,
+        end: ExprId,
+    },
     /// `alloc[a](Node { value: 1 })` — allocate in an arena (§6).
     ///
     /// Its own node rather than a call, because the brackets name a *region*
