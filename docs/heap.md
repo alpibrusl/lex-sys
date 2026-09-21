@@ -126,6 +126,12 @@ exactly once on every path — so a box that is never unboxed is a **compile
 error**, at the point the program forgot it, with the same message an
 unreleased capability gets.
 
+*(That this holds at all depends on `reading-references.md` §2.0, which was
+added later. Until it was, a `res` field could be read out of a shared
+reference — including a `Box` — which produced a second owner and a real
+double free. The claim in this section was false for as long as that hole
+was open, and is true with it closed.)*
+
 So in this language, *the general heap does not leak*. Not "should not":
 cannot, checked, before the program runs. Nor can it double-free or
 use-after-free, for the same reason from the other direction — `unbox`

@@ -213,7 +213,8 @@ fn printing_preserves_every_identity_and_is_idempotent() {
     // filter on the `.ls` extension, which a directory does not have --
     // that is what keeps a multi-file example out of the single-file
     // harnesses, and it would keep it out of this one too.
-    for dir in ["tests/accept", "tests/reject", "examples", "examples/wordfreq"] {
+    for dir in ["tests/accept", "tests/reject", "examples", "examples/wordfreq", "examples/buffer"]
+    {
         for entry in std::fs::read_dir(repo_root().join(dir)).expect("a readable directory") {
             let path = entry.expect("a readable entry").path();
             if path.extension().and_then(|e| e.to_str()) != Some("ls") {
@@ -871,6 +872,79 @@ fn identity_is_content_not_location() {
     let first = ids_of(&alone);
     assert!(!first.is_empty(), "`double` should have hashes");
     assert_eq!(first, ids_of(&crowded), "a unit hashes its content, not where it sits");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_boxed_slice_checks_its_own_size() {
+    // `docs/boxed-slices.md` §3. Two runtime rules, both of which would
+    // otherwise reserve less memory than is about to be written.
+    //
+    // A negative count is not a small allocation, it is a mistake -- and
+    // `s[0]` of one would read memory nobody reserved. A `count * stride`
+    // that overflows is the same mistake arrived at by arithmetic, which
+    // is why it is checked for the reason every other multiplication is.
+    for count in ["0 - 3", "4611686018427387904"] {
+        let dir = scratch("boxed-slice-size");
+        let source = dir.join("size.ls");
+        std::fs::write(
+            &source,
+            format!(
+                "fn main(world: World) -> [] int {{\n\
+                     let Split {{ io, ffi, fs, heap, args }} = split(world);\n\
+                     release(args); release(fs); release(ffi); release(io);\n\
+                     var n = 0;\n\
+                     borrow mut heap as &!h in {{\n\
+                         let b = box_slice(h, {count}, 0);\n\
+                         n = unbox_slice(h, b);\n\
+                     }}\n\
+                     release(heap);\n\
+                     return n;\n\
+                 }}\n"
+            ),
+        )
+        .expect("a writable fixture");
+
+        let exe = dir.join("size");
+        let build = Command::new(BIN)
+            .args(["build".as_ref(), source.as_os_str(), "-o".as_ref(), exe.as_os_str()])
+            .output()
+            .expect("the compiler runs");
+        assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+
+        let run = Command::new(&exe).output().expect("the compiled program runs");
+        assert_eq!(
+            run.status.code(),
+            None,
+            "`box_slice(h, {count}, 0)` should be killed by a signal, not exit"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[test]
+fn the_growable_buffer_example_builds_and_runs() {
+    // `examples/buffer/` is the library `docs/boxed-slices.md` §4
+    // describes: growing is allocate-copy-end, written down rather than
+    // built in, so the doubling policy belongs to the program.
+    let root = repo_root().join("examples").join("buffer");
+    let dir = scratch("buffer-example");
+    let exe = dir.join("buffer");
+    let build = Command::new(BIN)
+        .arg("build")
+        .arg(root.join("main.ls"))
+        .arg(root.join("buffer.ls"))
+        .arg("-o")
+        .arg(&exe)
+        .output()
+        .expect("the compiler runs");
+    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+
+    let run = Command::new(&exe).output().expect("the compiled program runs");
+    assert_eq!(String::from_utf8_lossy(&run.stdout), "counting: 1 4 9 16 25 36 49 64\n");
+    assert_eq!(run.status.code(), Some(0), "thirty-one bytes built from a one-byte buffer");
 
     let _ = std::fs::remove_dir_all(&dir);
 }

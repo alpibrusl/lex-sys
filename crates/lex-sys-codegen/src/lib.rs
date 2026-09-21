@@ -72,7 +72,17 @@ fn leaves_into(ty: &Type, program: &Program, pointer: types::Type, out: &mut Vec
         // a load rather than a computation, and why §4 can let a type
         // contain itself through one: it is a single leaf however large what
         // it points at is.
-        Type::Named(def, _) if def.0 as usize == lex_sys_ir::PRELUDE_BOX => out.push(pointer),
+        Type::Named(def, args) if def.0 as usize == lex_sys_ir::PRELUDE_BOX => {
+            out.push(pointer);
+            // `docs/boxed-slices.md` §2: the second shape. A box of an
+            // *unsized* referent carries the length too, because nothing
+            // else knows how many elements there are -- which is the same
+            // pair `&r [T]` already is, and why `contents` needed no new
+            // rule for it.
+            if matches!(args.first(), Some(Type::Slice(_))) {
+                out.push(types::I64);
+            }
+        }
         Type::Named(def, args) => match program.type_info(*def) {
             TypeInfo::Struct { fields, .. } => {
                 for (_, field) in fields {
@@ -1000,22 +1010,58 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
         let count = self.scalar(count);
         let values = self.expr(fill);
         let stride = self.stride(element);
+        let bytes = self.slice_bytes(count, stride);
+        let start = self.bump(arena, bytes);
+        self.fill_slice(start, count, stride, &values);
+        vec![start, count]
+    }
 
-        // A negative length is not a small allocation, it is a mistake, and
-        // reading `s[0]` of one would be reading memory nobody reserved.
+    /// `box_slice(h, count, fill)` — a run of values on the heap
+    /// (`docs/boxed-slices.md` §3).
+    ///
+    /// The same sizing and the same fill as an arena slice; only where the
+    /// memory comes from differs. What comes back is two leaves, a pointer
+    /// *and* a length, because nothing else knows how many elements there
+    /// are (§2).
+    fn boxed_slice(&mut self, element: &Type, count: &Expr, fill: &Expr) -> Vec<Value> {
+        let count = self.scalar(count);
+        let values = self.expr(fill);
+        let stride = self.stride(element);
+        let bytes = self.slice_bytes(count, stride);
+
+        let pointer = self.pointer;
+        let id = self.libc_fn("malloc", &[pointer], &[pointer]);
+        let f = self.module.declare_func_in_func(id, self.builder.func);
+        let call = self.builder.ins().call(f, &[bytes]);
+        let start = self.builder.inst_results(call)[0];
+        // Out of memory traps, exactly as `box` and an exhausted arena do.
+        self.builder.ins().trapz(start, TrapCode::HEAP_OUT_OF_BOUNDS);
+
+        self.fill_slice(start, count, stride, &values);
+        vec![start, count]
+    }
+
+    /// How many bytes `count` elements take, checked.
+    ///
+    /// A negative length is not a small allocation, it is a mistake, and
+    /// reading `s[0]` of one would be reading memory nobody reserved.
+    /// `count * stride` is checked for the reason every other
+    /// multiplication is: a length that overflows the byte count would ask
+    /// for less than is about to be written.
+    fn slice_bytes(&mut self, count: Value, stride: i64) -> Value {
         let negative = self.builder.ins().icmp_imm(IntCC::SignedLessThan, count, 0);
         self.builder.ins().trapnz(negative, TrapCode::HEAP_OUT_OF_BOUNDS);
-
-        // `count * stride` is checked for the same reason every other
-        // multiplication is: a length that overflows the byte count would
-        // ask the arena for less than it is about to write.
         let width = self.builder.ins().iconst(types::I64, stride);
         let (bytes, overflowed) = self.builder.ins().smul_overflow(count, width);
         self.builder.ins().trapnz(overflowed, TrapCode::INTEGER_OVERFLOW);
-        let start = self.bump(arena, bytes);
+        bytes
+    }
 
-        // Fill it. A loop rather than an unrolled run, because the length is
-        // a runtime value -- which is what makes this a slice.
+    /// Write `values` into every element of a freshly reserved run.
+    ///
+    /// A loop rather than an unrolled run, because the length is a runtime
+    /// value -- which is what makes it a slice.
+    fn fill_slice(&mut self, start: Value, count: Value, stride: i64, values: &[Value]) {
         let header = self.builder.create_block();
         let body = self.builder.create_block();
         let done = self.builder.create_block();
@@ -1034,7 +1080,7 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
         let i = self.builder.use_var(cursor);
         let offset = self.builder.ins().imul_imm(i, stride);
         let address = self.builder.ins().iadd(start, offset);
-        self.store_leaves(address, &values);
+        self.store_leaves(address, values);
         let next = self.builder.ins().iadd_imm(i, 1);
         self.builder.def_var(cursor, next);
         self.builder.ins().jump(header, &[]);
@@ -1042,7 +1088,6 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
 
         self.builder.switch_to_block(done);
         self.builder.seal_block(done);
-        vec![start, count]
     }
 
     /// How many bytes one element of a slice takes.
@@ -1463,6 +1508,14 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
             // than picked out of leaves already in registers.
             Expr::Alloc { arena, ty, value } => vec![self.alloc(*arena, ty, value)],
             Expr::Boxed { ty, value } => vec![self.boxed(ty, value)],
+            Expr::BoxedSlice { element, count, fill } => self.boxed_slice(element, count, fill),
+            // One `free`, and the element count back. The pointer is the
+            // first leaf and the length the second (§2).
+            Expr::UnboxedSlice { value } => {
+                let leaves = self.expr(value);
+                self.free(leaves[0]);
+                vec![leaves[1]]
+            }
             Expr::Unboxed { ty, value } => self.unboxed(ty, value),
             // One load. A reference to a box points at where the box's own
             // pointer lives, so reading it *is* the reference to what the
@@ -1476,10 +1529,24 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
                 let kinds = leaves(ty, self.program, self.pointer);
                 self.load_leaves(address, &kinds)
             }
-            Expr::Contents(inner) => {
-                let reference = self.expr(inner)[0];
+            Expr::Contents { ty, value } => {
+                let reference = self.scalar(value);
                 let pointer = self.pointer;
-                vec![self.builder.ins().load(pointer, MemFlags::trusted(), reference, 0)]
+                let held = self.builder.ins().load(pointer, MemFlags::trusted(), reference, 0);
+                // A boxed slice's second leaf is its length, and `&r [T]`
+                // is that same pair -- which is why one dereference serves
+                // both shapes (`docs/boxed-slices.md` §3).
+                if matches!(ty, Type::Slice(_)) {
+                    let length = self.builder.ins().load(
+                        types::I64,
+                        MemFlags::trusted(),
+                        reference,
+                        RETURN_SLOT_STRIDE,
+                    );
+                    vec![held, length]
+                } else {
+                    vec![held]
+                }
             }
             Expr::AllocSlice { arena, element, count, fill } => {
                 self.alloc_slice(*arena, element, count, fill)
@@ -1690,7 +1757,13 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
                     // Like `len` and the file operations: checked and
                     // lowered at the call site, because the type being boxed
                     // is what decides every one of them.
-                    Callee::Builtin(Builtin::Box | Builtin::Unbox | Builtin::Contents) => {
+                    Callee::Builtin(
+                        Builtin::Box
+                        | Builtin::Unbox
+                        | Builtin::Contents
+                        | Builtin::BoxSlice
+                        | Builtin::UnboxSlice,
+                    ) => {
                         unreachable!("a heap operation is lowered as its own node")
                     }
                     // `docs/arguments.md` §3: `argc`, exactly as the
