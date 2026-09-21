@@ -460,8 +460,20 @@ pub enum Mode {
 pub enum Pattern {
     /// `_` — matches anything and binds nothing.
     Wildcard,
-    /// `Shape::Rect(w, h)`. Each binding is a name, or `None` for `_`.
-    Variant { enum_name: Symbol, variant: Symbol, bindings: Vec<Option<Symbol>> },
+    /// `Shape::Rect(w, h)`, or `m.Shape::Rect(w, h)` for an enum reached
+    /// through an imported module. Each binding is a name, or `None` for
+    /// `_`.
+    ///
+    /// The qualifier is the same `import` binding [`Expr::Variant`] takes,
+    /// and it is here for a plain reason: without it a `match` cannot name
+    /// an enum another module declares, so `std.option` would be a type a
+    /// program could hold and never take apart.
+    Variant {
+        enum_name: Symbol,
+        qualifier: Option<Symbol>,
+        variant: Symbol,
+        bindings: Vec<Option<Symbol>>,
+    },
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -487,6 +499,16 @@ pub struct StructDecl {
     /// Type parameters, in declaration order. `Type::Param(i)` refers to the
     /// `i`th of these.
     pub generics: Vec<Symbol>,
+    /// A `val` bound per type parameter, parallel to `generics`
+    /// (`docs/collections.md` §3).
+    ///
+    /// Written only where it is not already implied: a `val` aggregate
+    /// bounds every parameter by saying `val`, so writing it there is a
+    /// second way to say one thing and is refused. A `res` aggregate
+    /// implies nothing about its parameters, which is what `Vec[T: val]`
+    /// needs -- the vector owns an allocation and its elements are still
+    /// copyable.
+    pub bounds: Vec<Option<Mode>>,
     pub fields: Vec<FieldDecl>,
 }
 
@@ -505,6 +527,8 @@ pub struct EnumDecl {
     pub public: bool,
     pub mode: Option<Mode>,
     pub generics: Vec<Symbol>,
+    /// As [`StructDecl::bounds`].
+    pub bounds: Vec<Option<Mode>>,
     pub variants: Vec<VariantDecl>,
 }
 

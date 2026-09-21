@@ -26,14 +26,21 @@ let number = wrap(41, 0);                     // val
 ```
 
 Both instantiations compile, and each copy is checked at the type it was
-instantiated at. So `Option[T]`, `Result[T]` and `Vec[T]` over a
-resource type are **expressible**, and have been since M2.
+instantiated at. So `Option[T]` and `Result[T]` over a resource type are
+**expressible**, and have been since M2.
+
+> A first version of this paragraph said `Vec[T]` too, and that was
+> wrong — the third wrong answer in a row about the same question, each
+> one looking at the generics. A `Vec` keeps its elements in a boxed
+> slice and a boxed slice holds `val` data only, for reasons that have
+> nothing to do with mode polymorphism. `docs/collections.md` §2.
 
 `docs/standard-library.md` §4 said otherwise — that a `Vec[T]` "wants
-generics over a mode" and would "promise more than it delivers". That
-was wrong, written from §12's open list rather than from a test. The
-reason those types are still not in `std` is §5 below, which is a
-different and smaller reason.
+generics over a mode" and would "promise more than it delivers". The
+diagnosis was wrong, written from §12's open list rather than from a
+test; the conclusion about `Vec` happened to be right, for a reason
+neither document had found yet. They are all in `std` now except the
+one that cannot be — §5.
 
 ---
 
@@ -155,15 +162,20 @@ until now nothing in the signature said so.
 
 ---
 
-## 5. What is still not in `std`
+## 5. What went into `std`
 
-Not mode polymorphism, which §1 shows was never the blocker. What
-`Option[T]` and `Result[T]` want is a **place to put the value that is
-not returned**: `unwrap_or` needs `T: val`, and the `res` version needs
-a different signature — one that hands the fallback back.
+Not held up by mode polymorphism, which §1 shows was never the blocker.
+`std.option`, `std.result`, `std.list` and `std.vec` are
+`docs/collections.md`, and the bound did two things for them.
 
-That is a library design question, and now that a bound can say which
-version is which, it is an ordinary one. §6.
+`unwrap_or` says `[T: val]`, because it drops one of two values — which
+is the "place to put the value that is not returned" this section first
+asked about, answered by saying out loud that there isn't one for a
+resource.
+
+And `res struct Vec[T: val]` needed the bound on a **type**
+declaration, which §6 had listed as harmless-but-unnecessary. It is
+neither.
 
 ---
 
@@ -171,8 +183,8 @@ version is which, it is an ordinary one. §6.
 
 | Question | Why it waits |
 |---|---|
-| `Option[T]` / `Result[T]` in `std` | §5. A design, not a blocker, now that `[T: val]` exists |
-| Bounds on a generic *type*'s parameters, written rather than implied | `val struct X[T]` implies `T: val`. Writing it is harmless and the implication is clearer than a second syntax |
+| ~~`Option[T]` / `Result[T]` in `std`~~ | **Done** — `docs/collections.md`, along with `List` and `Vec` |
+| ~~Bounds on a generic *type*'s parameters~~ | **Done, and the reasoning here was wrong.** It is true that `val struct X[T]` implies `T: val`, and that is the *only* case where it does: a `res` aggregate promises nothing about its parameters, and `res struct Vec[T: val]` is exactly what a vector needs — it owns an allocation, its elements are copyable. Writing the bound is refused on a `val` declaration and required on the others. `collections.md` §3 |
 | Effect polymorphism | A function generic over the *row* it performs. Named nowhere yet, and much larger |
 
 ---

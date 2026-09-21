@@ -475,12 +475,7 @@ fn hash_signature(ast: &Ast, decl: &FnDecl, module: u32, type_ids: &Names) -> Ha
     // same thing) and wrong here. An unbounded parameter is checked as
     // `res`, so `[T]` and `[T: val]` are two different contracts and must
     // be two different hashes.
-    for position in 0..decl.generics.len() {
-        match decl.bounds.get(position).copied().flatten() {
-            Some(Mode::Val) => encoder.tag(tag::MODE_VAL),
-            _ => encoder.tag(tag::NONE),
-        };
-    }
+    encode_bounds(&mut encoder, decl.generics.len(), &decl.bounds);
     // The *count* of region parameters, and the `where` clauses as pairs of
     // positions: both are part of the contract, and neither depends on the
     // names chosen.
@@ -554,12 +549,30 @@ fn hash_extern(ast: &Ast, decl: &ExternDecl, module: u32, type_ids: &Names) -> H
     encoder.finish(DOMAIN_SIG)
 }
 
+/// Each parameter's `val` bound, in declaration order
+/// (`docs/collections.md` §3).
+///
+/// A bound narrows what may instantiate the declaration, so it is part of
+/// what a user of the declaration depends on — the same argument
+/// `hash_signature` makes for a function, and the same reason `mode_tag` is
+/// wrong for it: that helper reads an *absent* mode as `val`, and an
+/// unbounded parameter is checked as `res`.
+fn encode_bounds(encoder: &mut Encoder, count: usize, bounds: &[Option<Mode>]) {
+    for position in 0..count {
+        match bounds.get(position).copied().flatten() {
+            Some(Mode::Val) => encoder.tag(tag::MODE_VAL),
+            _ => encoder.tag(tag::NONE),
+        };
+    }
+}
+
 fn hash_struct(ast: &Ast, decl: &StructDecl, module: u32, type_ids: &Names) -> Hash {
     let mut encoder = Encoder::default();
     encoder.tag(tag::STRUCT_DECL);
     encoder.tag(tag::mode_tag(decl.mode));
     encoder.str(ast.name_of(decl.name));
     encoder.len(decl.generics.len());
+    encode_bounds(&mut encoder, decl.generics.len(), &decl.bounds);
     encoder.len(decl.fields.len());
     for field in &decl.fields {
         // Field names *are* observable: a literal names them, and field order
@@ -576,6 +589,7 @@ fn hash_enum(ast: &Ast, decl: &EnumDecl, module: u32, type_ids: &Names) -> Hash 
     encoder.tag(tag::mode_tag(decl.mode));
     encoder.str(ast.name_of(decl.name));
     encoder.len(decl.generics.len());
+    encode_bounds(&mut encoder, decl.generics.len(), &decl.bounds);
     encoder.len(decl.variants.len());
     for variant in &decl.variants {
         encoder.str(ast.name_of(variant.name));
@@ -715,9 +729,18 @@ impl BodyHasher<'_> {
                         lex_sys_syntax::ast::Pattern::Wildcard => {
                             self.encoder.tag(tag::PATTERN_WILDCARD);
                         }
-                        lex_sys_syntax::ast::Pattern::Variant { enum_name, variant, bindings } => {
+                        lex_sys_syntax::ast::Pattern::Variant {
+                            enum_name,
+                            qualifier,
+                            variant,
+                            bindings,
+                        } => {
                             self.encoder.tag(tag::PATTERN_VARIANT);
-                            self.type_reference(*enum_name);
+                            // Through the qualifier, like every other type
+                            // reference: what is encoded is the declaration's
+                            // *hash*, so a module still reaches no hash
+                            // (`docs/modules.md` §2).
+                            self.qualified_type_reference(*qualifier, *enum_name);
                             self.encoder.str(self.ast.name_of(*variant));
                             self.encoder.len(bindings.len());
                             for binding in bindings {
@@ -833,10 +856,6 @@ impl BodyHasher<'_> {
     }
 
     /// A type mentioned by name in a body, such as an enum in a pattern.
-    fn type_reference(&mut self, name: Symbol) {
-        self.qualified_type_reference(None, name);
-    }
-
     fn qualified_type_reference(&mut self, qualifier: Option<Symbol>, name: Symbol) {
         let target = self
             .ast
@@ -988,6 +1007,36 @@ mod tests {
 
     // ---- what must not change a hash -----------------------------------
 
+    /// `docs/collections.md` §3 as a hash: a bound on a type
+    /// declaration's parameter is part of what a user of that type
+    /// depends on.
+    ///
+    /// Adding `[T: val]` narrows what may instantiate the declaration,
+    /// exactly as narrowing a field's type would, so it has to change the
+    /// hash. Not through `mode_tag`, which reads an *absent* mode as
+    /// `val`: an unbounded parameter is checked as `res`, so `[T]` and
+    /// `[T: val]` are two contracts and must be two hashes.
+    #[test]
+    fn a_bound_on_a_type_parameter_reaches_its_hash() {
+        let unbounded = "res struct Vec[T] { held: Box[[T]], used: int }";
+        let bounded = "res struct Vec[T: val] { held: Box[[T]], used: int }";
+        assert_ne!(ty(unbounded, "Vec"), ty(bounded, "Vec"));
+
+        // And the bound is per parameter rather than per declaration: two
+        // parameters bounded the other way round is a third type.
+        let first = "enum Pair[A: val, B] { One(A), Two(B) }";
+        let second = "enum Pair[A, B: val] { One(A), Two(B) }";
+        assert_ne!(ty(first, "Pair"), ty(second, "Pair"));
+    }
+
+    /// And the `val` declaration's *implied* bound is not written into
+    /// the hash twice: `val struct X[T]` cannot say `[T: val]`, so there
+    /// is only one spelling and nothing to keep in agreement.
+    #[test]
+    fn a_val_declarations_implied_bound_has_one_spelling() {
+        assert!(parse("val struct Wrap[T: val] { held: T }").is_err());
+    }
+
     /// `docs/tuples.md` §6: a tuple pattern encodes its **arity**, not its
     /// names.
     ///
@@ -1068,6 +1117,40 @@ mod tests {
             body(flat, "caller"),
             with_modules.function("caller").expect("caller").body,
             "qualifying a call reached the caller's body"
+        );
+    }
+
+    /// §2 again, in the place `docs/collections.md` §5 added: a **pattern**
+    /// now carries a qualifier too, and it must reach no hash either.
+    ///
+    /// It does not, for the same reason a qualified call does not: what
+    /// gets encoded is the referenced declaration's *hash*, which the
+    /// qualifier is only used to look up. So the same `match` written
+    /// flat and written through an import is one body.
+    #[test]
+    fn qualifying_a_pattern_reaches_no_hash() {
+        let flat = "enum Shape { Flat, Tall(int) } \
+                    fn height(s: Shape) -> [] int { \
+                        match s { Shape::Flat => { return 0; } Shape::Tall(n) => { return n; } } \
+                    }";
+        let mut ast = Ast::new();
+        lex_sys_syntax::parse_into(
+            &mut ast,
+            "import m; \
+             fn height(s: m.Shape) -> [] int { \
+                 match s { m.Shape::Flat => { return 0; } m.Shape::Tall(n) => { return n; } } \
+             }",
+            0,
+        )
+        .expect("should parse");
+        lex_sys_syntax::parse_into(&mut ast, "module m; pub enum Shape { Flat, Tall(int) }", 1000)
+            .expect("should parse");
+        let with_modules = identify(&ast);
+
+        assert_eq!(
+            body(flat, "height"),
+            with_modules.function("height").expect("height").body,
+            "qualifying a pattern reached the body"
         );
     }
 

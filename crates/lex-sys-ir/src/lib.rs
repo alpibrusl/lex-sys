@@ -1074,6 +1074,10 @@ pub(crate) struct TypeDef {
     public: bool,
     /// Type parameters in declaration order; `Type::Param(i)` is the `i`th.
     generics: Vec<Symbol>,
+    /// A `val` bound per parameter, parallel to `generics`
+    /// (`docs/collections.md` §3). Kept where the type argument is
+    /// supplied, which is where the argument is known.
+    bounds: Vec<Option<Mode>>,
     /// The mode the declaration wrote, if it wrote one. `None` means the mode
     /// is whatever the members make it (§3).
     pub(crate) declared_mode: Option<Mode>,
@@ -1082,6 +1086,20 @@ pub(crate) struct TypeDef {
 }
 
 impl TypeDef {
+    /// The bound on the `i`th parameter, counting what the declaration's own
+    /// mode implies (`docs/collections.md` §3).
+    ///
+    /// A `val` aggregate is `val` at *every* instantiation, which is only
+    /// true if every argument is -- so saying `val` bounds them all, and the
+    /// parser refuses writing it a second time. Anything else carries only
+    /// what it wrote.
+    fn bound(&self, i: usize) -> Option<Mode> {
+        if self.declared_mode == Some(Mode::Val) {
+            return Some(Mode::Val);
+        }
+        self.bounds.get(i).copied().flatten()
+    }
+
     /// Is this declaration a candidate for a name looked up in `module`?
     ///
     /// Its own module, or the prelude — which is in no module and
@@ -1345,6 +1363,7 @@ fn prelude_types(ast: &Ast, unifier: &mut Unifier) -> Vec<TypeDef> {
             module: PRELUDE_MODULE,
             public: true,
             generics: Vec::new(),
+            bounds: Vec::new(),
             declared_mode: Some(Mode::Res),
             kind: DefKind::Struct(Vec::new()),
             span,
@@ -1355,6 +1374,7 @@ fn prelude_types(ast: &Ast, unifier: &mut Unifier) -> Vec<TypeDef> {
             module: PRELUDE_MODULE,
             public: true,
             generics: Vec::new(),
+            bounds: Vec::new(),
             declared_mode: Some(Mode::Res),
             kind: DefKind::Struct(Vec::new()),
             span,
@@ -1369,6 +1389,7 @@ fn prelude_types(ast: &Ast, unifier: &mut Unifier) -> Vec<TypeDef> {
             module: PRELUDE_MODULE,
             public: true,
             generics: vec![library],
+            bounds: Vec::new(),
             declared_mode: Some(Mode::Res),
             kind: DefKind::Struct(Vec::new()),
             span,
@@ -1382,6 +1403,7 @@ fn prelude_types(ast: &Ast, unifier: &mut Unifier) -> Vec<TypeDef> {
             module: PRELUDE_MODULE,
             public: true,
             generics: vec![prefix],
+            bounds: Vec::new(),
             declared_mode: Some(Mode::Res),
             kind: DefKind::Struct(Vec::new()),
             span,
@@ -1395,6 +1417,7 @@ fn prelude_types(ast: &Ast, unifier: &mut Unifier) -> Vec<TypeDef> {
             module: PRELUDE_MODULE,
             public: true,
             generics: Vec::new(),
+            bounds: Vec::new(),
             declared_mode: Some(Mode::Res),
             kind: DefKind::Struct(Vec::new()),
             span,
@@ -1413,6 +1436,7 @@ fn prelude_types(ast: &Ast, unifier: &mut Unifier) -> Vec<TypeDef> {
             module: PRELUDE_MODULE,
             public: true,
             generics: vec![boxed_param],
+            bounds: Vec::new(),
             declared_mode: Some(Mode::Res),
             kind: DefKind::Struct(Vec::new()),
             span,
@@ -1428,6 +1452,7 @@ fn prelude_types(ast: &Ast, unifier: &mut Unifier) -> Vec<TypeDef> {
             module: PRELUDE_MODULE,
             public: true,
             generics: Vec::new(),
+            bounds: Vec::new(),
             declared_mode: Some(Mode::Res),
             kind: DefKind::Struct(Vec::new()),
             span,
@@ -1439,6 +1464,7 @@ fn prelude_types(ast: &Ast, unifier: &mut Unifier) -> Vec<TypeDef> {
             module: PRELUDE_MODULE,
             public: true,
             generics: Vec::new(),
+            bounds: Vec::new(),
             declared_mode: None,
             kind: DefKind::Struct(vec![
                 (io_field, Type::Named(io_def, Vec::new())),
@@ -1524,11 +1550,23 @@ fn collect_types(ast: &Ast, unifier: &mut Unifier) -> Result<Vec<TypeDef>, Diagn
     let predeclared = defs.len();
 
     for (index, item) in ast.items.iter().enumerate() {
-        let (name_sym, noun, generics, declared_mode, public) = match item {
-            Item::Struct(decl) => {
-                (decl.name, "struct", decl.generics.clone(), decl.mode, decl.public)
-            }
-            Item::Enum(decl) => (decl.name, "enum", decl.generics.clone(), decl.mode, decl.public),
+        let (name_sym, noun, generics, bounds, declared_mode, public) = match item {
+            Item::Struct(decl) => (
+                decl.name,
+                "struct",
+                decl.generics.clone(),
+                decl.bounds.clone(),
+                decl.mode,
+                decl.public,
+            ),
+            Item::Enum(decl) => (
+                decl.name,
+                "enum",
+                decl.generics.clone(),
+                decl.bounds.clone(),
+                decl.mode,
+                decl.public,
+            ),
             Item::Fn(_) | Item::Extern(_) => continue,
         };
         let item_id = ast::ItemId(index as u32);
@@ -1566,6 +1604,7 @@ fn collect_types(ast: &Ast, unifier: &mut Unifier) -> Result<Vec<TypeDef>, Diagn
             module,
             public,
             generics,
+            bounds,
             declared_mode,
             kind,
             span,
@@ -1594,11 +1633,12 @@ fn collect_types(ast: &Ast, unifier: &mut Unifier) -> Result<Vec<TypeDef>, Diagn
                         ));
                     }
                     let generics = defs[position].generics.clone();
+                    let bounds = defs[position].bounds.clone();
                     fields.push((
                         field.name,
                         resolve_type(
                             Resolving { ast, defs: &defs, unifier, module },
-                            &generics,
+                            Params { names: &generics, bounds: &bounds },
                             &[],
                             field.ty,
                         )?,
@@ -1634,13 +1674,14 @@ fn collect_types(ast: &Ast, unifier: &mut Unifier) -> Result<Vec<TypeDef>, Diagn
                         ));
                     }
                     let generics = defs[position].generics.clone();
+                    let bounds = defs[position].bounds.clone();
                     let payload = variant
                         .payload
                         .iter()
                         .map(|ty| {
                             resolve_type(
                                 Resolving { ast, defs: &defs, unifier, module },
-                                &generics,
+                                Params { names: &generics, bounds: &bounds },
                                 &[],
                                 *ty,
                             )
@@ -1755,7 +1796,7 @@ pub fn lower(ast: &Ast) -> Result<Program, Diagnostic> {
             .map(|p| {
                 resolve_type(
                     Resolving { ast, defs: &defs, unifier: &unifier, module },
-                    &[],
+                    Params::unbounded(&[]),
                     &region_scope,
                     p.ty,
                 )
@@ -1763,7 +1804,7 @@ pub fn lower(ast: &Ast) -> Result<Program, Diagnostic> {
             .collect::<Result<Vec<_>, _>>()?;
         let ret = resolve_type(
             Resolving { ast, defs: &defs, unifier: &unifier, module },
-            &[],
+            Params::unbounded(&[]),
             &region_scope,
             decl.ret,
         )?;
@@ -1937,7 +1978,7 @@ pub fn lower(ast: &Ast) -> Result<Program, Diagnostic> {
             seen.push(param.name);
             params.push(resolve_type(
                 Resolving { ast, defs: &defs, unifier: &unifier, module },
-                &decl.generics,
+                Params { names: &decl.generics, bounds: &decl.bounds },
                 &region_scope,
                 param.ty,
             )?);
@@ -1945,7 +1986,7 @@ pub fn lower(ast: &Ast) -> Result<Program, Diagnostic> {
 
         let ret = resolve_type(
             Resolving { ast, defs: &defs, unifier: &unifier, module },
-            &decl.generics,
+            Params { names: &decl.generics, bounds: &decl.bounds },
             &region_scope,
             decl.ret,
         )?;
@@ -2523,25 +2564,49 @@ struct Resolving<'a> {
     module: u32,
 }
 
+/// The type parameters of the declaration a type is written *inside*: their
+/// names, and the `val` bound each carries.
+///
+/// Two parallel slices because `Type::Param(i)` indexes both, and together
+/// rather than separately because the bound is only ever needed where the
+/// name is. Threading it is not bookkeeping: a bound on the enclosing
+/// declaration is what makes `Wrap[T]` legal inside `fn f[T: val]`, and
+/// reading the names without the bounds is what made it illegal
+/// (`docs/collections.md` §4).
+#[derive(Clone, Copy)]
+struct Params<'a> {
+    names: &'a [Symbol],
+    bounds: &'a [Option<Mode>],
+}
+
+impl<'a> Params<'a> {
+    /// A declaration that takes no type parameters, or one whose parameters
+    /// are all unbounded.
+    fn unbounded(names: &'a [Symbol]) -> Self {
+        Params { names, bounds: &[] }
+    }
+}
+
 fn resolve_type(
     cx: Resolving<'_>,
-    generics: &[Symbol],
+    params: Params<'_>,
     regions: &[(Symbol, Region)],
     id: TypeId,
 ) -> Result<Type, Diagnostic> {
     // Sized by default: `[T]` is a referent, and the one caller that may
     // have one is the reference that points at it.
-    resolve_type_at(cx, generics, regions, id, false)
+    resolve_type_at(cx, params, regions, id, false)
 }
 
 fn resolve_type_at(
     cx: Resolving<'_>,
-    generics: &[Symbol],
+    params: Params<'_>,
     regions: &[(Symbol, Region)],
     id: TypeId,
     unsized_ok: bool,
 ) -> Result<Type, Diagnostic> {
     let Resolving { ast, defs, unifier, module } = cx;
+    let generics = params.names;
     let span = ast.type_span(id);
 
     // `&r T`: the region must already be in scope. A name that is not a
@@ -2566,7 +2631,7 @@ fn resolve_type_at(
             return Ok(Type::Ref {
                 unique: false,
                 region: Region::Static,
-                inner: Box::new(resolve_type_at(cx, generics, regions, *inner, true)?),
+                inner: Box::new(resolve_type_at(cx, params, regions, *inner, true)?),
             });
         }
         let Some((_, found)) = regions.iter().rev().find(|(name, _)| name == region) else {
@@ -2582,7 +2647,7 @@ fn resolve_type_at(
             region: *found,
             // The one place an unsized referent is allowed: `&r [T]` is how
             // a slice is written, and the reference is what gives it a size.
-            inner: Box::new(resolve_type_at(cx, generics, regions, *inner, true)?),
+            inner: Box::new(resolve_type_at(cx, params, regions, *inner, true)?),
         });
     }
 
@@ -2606,7 +2671,7 @@ fn resolve_type_at(
                 span,
             ));
         }
-        let element = resolve_type(cx, generics, regions, *inner)?;
+        let element = resolve_type(cx, params, regions, *inner)?;
         return Ok(Type::Slice(Box::new(element)));
     }
 
@@ -2625,7 +2690,7 @@ fn resolve_type_at(
         }
         let components = parts
             .iter()
-            .map(|part| resolve_type(cx, generics, regions, *part))
+            .map(|part| resolve_type(cx, params, regions, *part))
             .collect::<Result<Vec<_>, _>>()?;
         return Ok(Type::Tuple(components));
     }
@@ -2663,7 +2728,7 @@ fn resolve_type_at(
     let boxed = lookup(defs).is_some_and(|i| defs[i].def.0 as usize == PRELUDE_BOX);
     let args = written_args
         .iter()
-        .map(|arg| resolve_type_at(cx, generics, regions, *arg, boxed))
+        .map(|arg| resolve_type_at(cx, params, regions, *arg, boxed))
         .collect::<Result<Vec<_>, _>>()?;
 
     if let Some(index) = generics.iter().position(|g| *g == written_name) {
@@ -2693,40 +2758,53 @@ fn resolve_type_at(
                         span,
                     ));
                 }
-                // `docs/mode-polymorphism.md` §2, the soundness fix.
+                // Where a `val` bound on a type parameter is kept
+                // (`docs/collections.md` §3, `mode-polymorphism.md` §2).
                 //
-                // Declaring an aggregate `val` is a promise about *every*
-                // instantiation, and it was believed rather than checked:
-                // `mode_of` returned the declared mode without substituting,
-                // so `Wrap[Box[int]]` was `val` by assertion. That is a leak
-                // (the box need never be unboxed) and, because `val` means
-                // copyable, a double free.
+                // Two bounds meet here. Declaring an aggregate `val` is a
+                // promise about *every* instantiation, and it used to be
+                // believed rather than checked -- a leak and a double free.
+                // A `res` or undeclared aggregate promises nothing, so it
+                // writes its bound instead, which is what lets a vector own
+                // an allocation and still require copyable elements.
                 //
-                // The promise is a bound on the declaration's own parameters
-                // (§3), so it is kept here, where the arguments are known.
-                if def.declared_mode == Some(Mode::Val) {
-                    let unbounded: [Option<Mode>; 0] = [];
-                    if let Some(argument) =
-                        args.iter().find(|a| mode_of(defs, unifier, &unbounded, a) == Mode::Res)
-                    {
-                        // Named as the source wrote it: a type parameter
-                        // renders as `T`, not as the `T0` the unifier
-                        // falls back to when no declaration has set its
-                        // parameter names.
-                        let written = match argument {
-                            Type::Param(i) => generics
-                                .get(*i as usize)
-                                .map(|g| ast.name_of(*g).to_owned())
-                                .unwrap_or_else(|| unifier.display(argument)),
-                            other => unifier.display(other),
-                        };
-                        return Err(Diagnostic::new(
-                            format!(
-                                "`{other}` is declared `val`, so its type arguments are `val` too, and `{written}` is `res`"
-                            ),
-                            span,
-                        ));
+                // The mode of an argument is read against **this**
+                // declaration's bounds -- the one the type is written
+                // inside. Reading it against nothing made a rigid `T` `res`
+                // however it was bounded, so a `[T: val]` function could not
+                // name a `val` aggregate at `T` at all (§4).
+                for (i, argument) in args.iter().enumerate() {
+                    if def.bound(i) != Some(Mode::Val) {
+                        continue;
                     }
+                    if mode_of(defs, unifier, params.bounds, argument) != Mode::Res {
+                        continue;
+                    }
+                    // Named as the source wrote it: a type parameter renders
+                    // as `T`, not as the `T0` the unifier falls back to when
+                    // no declaration has set its parameter names.
+                    let written = match argument {
+                        Type::Param(i) => generics
+                            .get(*i as usize)
+                            .map(|g| ast.name_of(*g).to_owned())
+                            .unwrap_or_else(|| unifier.display(argument)),
+                        other => unifier.display(other),
+                    };
+                    let because = if def.declared_mode == Some(Mode::Val) {
+                        format!("`{other}` is declared `val`, so its type arguments are `val` too")
+                    } else {
+                        format!(
+                            "`{other}` bounds `{}` by `val`",
+                            def.generics
+                                .get(i)
+                                .map(|g| ast.name_of(*g).to_owned())
+                                .unwrap_or_else(|| i.to_string())
+                        )
+                    };
+                    return Err(Diagnostic::new(
+                        format!("{because}, and `{written}` is `res`"),
+                        span,
+                    ));
                 }
                 (Type::Named(def.def, args.clone()), def.generics.len())
             }
@@ -2958,7 +3036,7 @@ impl<'a> FnLowering<'a> {
                 unifier: self.unifier,
                 module: self.module,
             },
-            &self.generic_names,
+            Params { names: &self.generic_names, bounds: &self.bounds },
             &regions,
             id,
         )?;
@@ -4441,9 +4519,25 @@ impl<'a> FnLowering<'a> {
                     wildcard = true;
                     (None, Vec::new())
                 }
-                ast::Pattern::Variant { enum_name: written, variant, bindings } => {
+                ast::Pattern::Variant { enum_name: written, qualifier, variant, bindings } => {
                     let written_text = self.ast.name_of(*written);
-                    if *written != def.name {
+                    // The scrutinee already decides which enum this is, so
+                    // the written name is a check rather than a lookup --
+                    // and the qualifier is part of the name
+                    // (`docs/modules.md` §4). Without it a `match` could
+                    // not name an enum another module declares, which made
+                    // `std.option` a type a program could hold and never
+                    // take apart.
+                    let Some(target) = self.ast.resolve_module(self.module, *qualifier) else {
+                        return Err(Diagnostic::new(
+                            format!(
+                                "`{}` is not an imported module here",
+                                self.ast.name_of(qualifier.expect("a `None` qualifier resolves"))
+                            ),
+                            span,
+                        ));
+                    };
+                    if *written != def.name || !def.visible_from(target) {
                         return Err(Diagnostic::new(
                             format!(
                                 "expected a variant of `{enum_name}`, found one of `{written_text}`"
@@ -7183,6 +7277,59 @@ mod linearity_tests {
         );
         assert!(call_site.contains("needs `T` to be `val`"), "{call_site}");
         assert!(call_site.contains("`File` is `res`"), "{call_site}");
+    }
+
+    /// `docs/collections.md` §3: a `res` aggregate may bound its own
+    /// parameters, and the bound is kept where the argument is supplied.
+    ///
+    /// This is the declaration `std.vec` needed and a `val`/`res` keyword
+    /// cannot express: the vector *owns* an allocation, so it is `res`,
+    /// while its elements have to be copyable, because a boxed slice
+    /// holds `val` data only. The keyword speaks about the aggregate;
+    /// this is about a parameter.
+    #[test]
+    fn a_res_aggregate_may_bound_its_parameters() {
+        accepted(
+            "res struct Vec[T: val] { held: Box[[T]], used: int } \
+             fn size[T: val, &v](v: &v Vec[T]) -> [] int { return v.used; } \
+             fn main() -> [] int { return 0; }",
+        );
+
+        // And the refusal lands where the caller wrote the type argument,
+        // not inside the library at some `box_slice` it cannot change.
+        let message = refused(
+            "res struct Vec[T: val] { held: Box[[T]], used: int } \
+             fn hold(v: Vec[File]) -> [] int { return 0; } \
+             fn main() -> [] int { return 0; }",
+        );
+        assert!(message.contains("`Vec` bounds `T` by `val`"), "{message}");
+        assert!(message.contains("`File` is `res`"), "{message}");
+    }
+
+    /// The bug the bound was unusable for (`docs/collections.md` §4).
+    ///
+    /// Keeping a declaration's bound reads the argument's mode, and it
+    /// read it against *nothing* -- so a rigid `T` came out `res` however
+    /// the enclosing function had bounded it, and a `[T: val]` function
+    /// could not name a `val` aggregate at `T` at all. The bound was
+    /// refused in exactly the position it exists for.
+    #[test]
+    fn a_bounded_parameter_may_stand_where_a_val_aggregate_wants_one() {
+        accepted(
+            "val struct Wrap[T] { held: T } \
+             fn rewrap[T: val](w: Wrap[T]) -> [] T { let Wrap { held } = w; return held; } \
+             fn main() -> [] int { return rewrap(Wrap { held: 7 }) - 7; }",
+        );
+
+        // Unbounded is still refused, and that is the point of the pair:
+        // an unbounded `T` is checked as `res`, so `Wrap[T]` would be a
+        // `val` aggregate holding a resource.
+        let message = refused(
+            "val struct Wrap[T] { held: T } \
+             fn rewrap[T](w: Wrap[T]) -> [] T { let Wrap { held } = w; return held; } \
+             fn main() -> [] int { return 0; }",
+        );
+        assert!(message.contains("its type arguments are `val` too"), "{message}");
     }
 
     #[test]
