@@ -592,6 +592,15 @@ pub enum Callee {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct ExternFn {
     pub name: String,
+    /// The module that declares it (`docs/modules.md` §3).
+    ///
+    /// A foreign *symbol* is global to the linker, but a foreign *name*
+    /// is a name like any other: `extern fn write` in one module and
+    /// `pub fn write` in another are two functions, and only the first
+    /// binds `write` in the object file. Without this, `std.buffer`
+    /// owning a `write` made `extern fn write` unwritable anywhere in
+    /// the program.
+    pub module: u32,
     pub symbol: String,
     pub params: Vec<Type>,
     pub effects: Effects,
@@ -956,6 +965,10 @@ struct Signature {
     /// `where a <= b` as indices into `regions`, meaning `b` outlives `a`.
     outlives: Vec<(u32, u32)>,
     name: Symbol,
+    /// A `val` bound per type parameter (`docs/mode-polymorphism.md`
+    /// §3.1). Part of the signature: it is what a caller is checked
+    /// against, so it is also what a caller depends on.
+    bounds: Vec<Option<Mode>>,
     /// The module that declares it (`docs/modules.md` §3).
     module: u32,
     /// `pub` — callable from another module (§5).
@@ -1583,7 +1596,12 @@ fn collect_types(ast: &Ast, unifier: &mut Unifier) -> Result<Vec<TypeDef>, Diagn
                     let generics = defs[position].generics.clone();
                     fields.push((
                         field.name,
-                        resolve_type(ast, &defs, module, &generics, &[], field.ty)?,
+                        resolve_type(
+                            Resolving { ast, defs: &defs, unifier, module },
+                            &generics,
+                            &[],
+                            field.ty,
+                        )?,
                     ));
                 }
                 defs[position].kind = DefKind::Struct(fields);
@@ -1619,7 +1637,14 @@ fn collect_types(ast: &Ast, unifier: &mut Unifier) -> Result<Vec<TypeDef>, Diagn
                     let payload = variant
                         .payload
                         .iter()
-                        .map(|ty| resolve_type(ast, &defs, module, &generics, &[], *ty))
+                        .map(|ty| {
+                            resolve_type(
+                                Resolving { ast, defs: &defs, unifier, module },
+                                &generics,
+                                &[],
+                                *ty,
+                            )
+                        })
                         .collect::<Result<Vec<_>, _>>()?;
                     variants.push((variant.name, payload));
                 }
@@ -1653,7 +1678,16 @@ fn collect_types(ast: &Ast, unifier: &mut Unifier) -> Result<Vec<TypeDef>, Diagn
             continue;
         }
         let members: Vec<Type> = def.members().cloned().collect();
-        if let Some(member) = members.iter().find(|m| mode_of(&defs, unifier, m) == Mode::Res) {
+        // `docs/mode-polymorphism.md` §3: declaring the aggregate `val` is
+        // a bound on its own parameters, so `Param(i)` is `val` *here*.
+        // What makes that honest rather than circular is the instantiation
+        // check in `resolve_type_at`, which refuses `Wrap[Box[int]]` where
+        // `Wrap` is declared `val` -- without it, this check passes and the
+        // promise is never kept (§2).
+        let all_val: Vec<Option<Mode>> = vec![Some(Mode::Val); def.generics.len()];
+        if let Some(member) =
+            members.iter().find(|m| mode_of(&defs, unifier, &all_val, m) == Mode::Res)
+        {
             return Err(Diagnostic::new(
                 format!(
                     "`{}` is declared `val`, but it holds `{}`, which is `res`",
@@ -1695,9 +1729,22 @@ pub fn lower(ast: &Ast) -> Result<Program, Diagnostic> {
                 span,
             ));
         }
-        if externs.iter().any(|e| e.name == name) {
+        // Twice in one module is a duplicate name; twice in two modules
+        // would be two names for one linker symbol, which is also a
+        // mistake -- so the *symbol* stays program-wide unique while the
+        // name is module-scoped (`docs/modules.md` §3).
+        if externs.iter().any(|e| e.name == name && e.module == module) {
             return Err(Diagnostic::new(
                 format!("foreign function `{name}` is declared twice"),
+                span,
+            ));
+        }
+        if let Some(clash) = externs.iter().find(|e| e.symbol == decl.symbol) {
+            return Err(Diagnostic::new(
+                format!(
+                    "`{name}` binds the foreign symbol `{}`, which `{}` already binds; a symbol is one function to the linker",
+                    decl.symbol, clash.name
+                ),
                 span,
             ));
         }
@@ -1705,9 +1752,21 @@ pub fn lower(ast: &Ast) -> Result<Program, Diagnostic> {
         let params = decl
             .params
             .iter()
-            .map(|p| resolve_type(ast, &defs, module, &[], &region_scope, p.ty))
+            .map(|p| {
+                resolve_type(
+                    Resolving { ast, defs: &defs, unifier: &unifier, module },
+                    &[],
+                    &region_scope,
+                    p.ty,
+                )
+            })
             .collect::<Result<Vec<_>, _>>()?;
-        let ret = resolve_type(ast, &defs, module, &[], &region_scope, decl.ret)?;
+        let ret = resolve_type(
+            Resolving { ast, defs: &defs, unifier: &unifier, module },
+            &[],
+            &region_scope,
+            decl.ret,
+        )?;
         let declared =
             Effects::new(decl.effects.iter().map(|e| Label {
                 name: ast.name_of(e.name).to_owned(),
@@ -1805,6 +1864,7 @@ pub fn lower(ast: &Ast) -> Result<Program, Diagnostic> {
 
         externs.push(ExternFn {
             name: name.to_owned(),
+            module,
             symbol: decl.symbol.clone(),
             params,
             effects: declared,
@@ -1832,8 +1892,10 @@ pub fn lower(ast: &Ast) -> Result<Program, Diagnostic> {
             return Err(Diagnostic::new(format!("function `{name}` is defined twice"), span));
         }
         // A foreign declaration and a written function are two answers to
-        // the same call, and a call resolves to one thing.
-        if externs.iter().any(|e| e.name == name) {
+        // the same call, and a call resolves to one thing -- within one
+        // module. Across modules they are two names (`docs/modules.md`
+        // §3), and only the `extern` binds a linker symbol.
+        if externs.iter().any(|e| e.name == name && e.module == module) {
             return Err(Diagnostic::new(
                 format!("`{name}` is already declared foreign, so this name is taken"),
                 span,
@@ -1873,10 +1935,20 @@ pub fn lower(ast: &Ast) -> Result<Program, Diagnostic> {
                 ));
             }
             seen.push(param.name);
-            params.push(resolve_type(ast, &defs, module, &decl.generics, &region_scope, param.ty)?);
+            params.push(resolve_type(
+                Resolving { ast, defs: &defs, unifier: &unifier, module },
+                &decl.generics,
+                &region_scope,
+                param.ty,
+            )?);
         }
 
-        let ret = resolve_type(ast, &defs, module, &decl.generics, &region_scope, decl.ret)?;
+        let ret = resolve_type(
+            Resolving { ast, defs: &defs, unifier: &unifier, module },
+            &decl.generics,
+            &region_scope,
+            decl.ret,
+        )?;
         // §5: a usable signature names usable types. A `pub fn` whose
         // parameter or return type is private to this module cannot be
         // called from outside it -- the caller has no way to name the
@@ -1895,6 +1967,7 @@ pub fn lower(ast: &Ast) -> Result<Program, Diagnostic> {
             }
         }
         signatures.push(Signature {
+            bounds: decl.bounds.clone(),
             module,
             public: decl.public,
             name: decl.name,
@@ -2221,6 +2294,13 @@ fn lower_function(
         ret: ret.clone(),
         trace: Trace::new(),
         module: signature.module,
+        // A copy being emitted has its parameters substituted away, so
+        // only the rigid check of pass 1 has bounds to consult.
+        bounds: if args.iter().any(|a| matches!(a, Type::Param(_))) || args.is_empty() {
+            signature.bounds.clone()
+        } else {
+            Vec::new()
+        },
     };
 
     for (param, ty) in decl.params.iter().zip(params.iter()) {
@@ -2230,6 +2310,7 @@ fn lower_function(
         f.declare(param.name, ty.clone(), false, ast.type_span(param.ty));
     }
     let mut body = f.block(&decl.body)?;
+    let bounds = f.bounds.clone();
     let mut slots = f.slots.clone();
     let escapes = f.escaped_slot();
     let performed = f.performed.clone();
@@ -2270,15 +2351,25 @@ fn lower_function(
     // Linearity runs last, on settled types: a mode is a fact about a type,
     // and a type is not a fact until inference is done (`linear.rs`).
     //
-    // A generic body is checked once with its parameters rigid, where a
-    // parameter is `val` (§3 — mode is never inferred), and then again per
-    // instantiation, where it is whatever it was instantiated at. So mode
-    // polymorphism does fall out of monomorphisation, at the price §12
-    // warned about: a body that leaks its `T` is refused when someone
-    // instantiates it at a `res` type, not where it is written. The
-    // instantiation is named so the message says which one.
-    if let Err(error) = linear::check(defs, unifier, &slots, &trace) {
-        if args.is_empty() {
+    // A generic body is checked once with its parameters rigid, where an
+    // unbounded parameter is **`res`** and a `[T: val]` one is `val`
+    // (`docs/mode-polymorphism.md` §3.1), and then again per
+    // instantiation, where it is whatever it was instantiated at.
+    //
+    // Assuming `res` for the unbounded case is what moves the error to the
+    // definition: `res` is the stronger obligation, so a body that passes
+    // the rigid check is safe at every instantiation, and one that does
+    // not is wrong where it is written rather than wherever somebody
+    // first used a resource type. §4 is the trade in full. An
+    // instantiation error is still possible -- a type mismatch, say -- so
+    // it is still named.
+    if let Err(error) = linear::check(defs, unifier, &bounds, &slots, &trace) {
+        // Pass 1 checks a generic body with its own parameters standing in
+        // for themselves, so "instantiated at `T`" would be a confusing
+        // way to describe the definition being checked as written. Only a
+        // real instantiation -- one with a concrete argument -- is named.
+        let rigid = args.iter().all(|a| matches!(a, Type::Param(_)));
+        if args.is_empty() || rigid {
             return Err(error);
         }
         let at: Vec<String> = args.iter().map(|a| unifier.display(a)).collect();
@@ -2419,28 +2510,38 @@ fn check_generic_names(ast: &Ast, generics: &[Symbol], span: Span) -> Result<(),
 /// matching one of them is that parameter rather than a lookup. Parameters
 /// shadow nothing else, because a declaration that named one `int` was already
 /// refused.
-fn resolve_type(
-    ast: &Ast,
-    defs: &[TypeDef],
+/// What resolving a written type needs to know, besides the type itself.
+///
+/// These four always travel together -- the program, its declarations,
+/// the unifier that renders them, and the module a name is looked up in
+/// (`docs/modules.md` §4) -- so they travel as one thing.
+#[derive(Clone, Copy)]
+struct Resolving<'a> {
+    ast: &'a Ast,
+    defs: &'a [TypeDef],
+    unifier: &'a Unifier,
     module: u32,
+}
+
+fn resolve_type(
+    cx: Resolving<'_>,
     generics: &[Symbol],
     regions: &[(Symbol, Region)],
     id: TypeId,
 ) -> Result<Type, Diagnostic> {
     // Sized by default: `[T]` is a referent, and the one caller that may
     // have one is the reference that points at it.
-    resolve_type_at(ast, defs, module, generics, regions, id, false)
+    resolve_type_at(cx, generics, regions, id, false)
 }
 
 fn resolve_type_at(
-    ast: &Ast,
-    defs: &[TypeDef],
-    module: u32,
+    cx: Resolving<'_>,
     generics: &[Symbol],
     regions: &[(Symbol, Region)],
     id: TypeId,
     unsized_ok: bool,
 ) -> Result<Type, Diagnostic> {
+    let Resolving { ast, defs, unifier, module } = cx;
     let span = ast.type_span(id);
 
     // `&r T`: the region must already be in scope. A name that is not a
@@ -2465,9 +2566,7 @@ fn resolve_type_at(
             return Ok(Type::Ref {
                 unique: false,
                 region: Region::Static,
-                inner: Box::new(resolve_type_at(
-                    ast, defs, module, generics, regions, *inner, true,
-                )?),
+                inner: Box::new(resolve_type_at(cx, generics, regions, *inner, true)?),
             });
         }
         let Some((_, found)) = regions.iter().rev().find(|(name, _)| name == region) else {
@@ -2483,7 +2582,7 @@ fn resolve_type_at(
             region: *found,
             // The one place an unsized referent is allowed: `&r [T]` is how
             // a slice is written, and the reference is what gives it a size.
-            inner: Box::new(resolve_type_at(ast, defs, module, generics, regions, *inner, true)?),
+            inner: Box::new(resolve_type_at(cx, generics, regions, *inner, true)?),
         });
     }
 
@@ -2507,7 +2606,7 @@ fn resolve_type_at(
                 span,
             ));
         }
-        let element = resolve_type(ast, defs, module, generics, regions, *inner)?;
+        let element = resolve_type(cx, generics, regions, *inner)?;
         return Ok(Type::Slice(Box::new(element)));
     }
 
@@ -2526,7 +2625,7 @@ fn resolve_type_at(
         }
         let components = parts
             .iter()
-            .map(|part| resolve_type(ast, defs, module, generics, regions, *part))
+            .map(|part| resolve_type(cx, generics, regions, *part))
             .collect::<Result<Vec<_>, _>>()?;
         return Ok(Type::Tuple(components));
     }
@@ -2564,7 +2663,7 @@ fn resolve_type_at(
     let boxed = lookup(defs).is_some_and(|i| defs[i].def.0 as usize == PRELUDE_BOX);
     let args = written_args
         .iter()
-        .map(|arg| resolve_type_at(ast, defs, module, generics, regions, *arg, boxed))
+        .map(|arg| resolve_type_at(cx, generics, regions, *arg, boxed))
         .collect::<Result<Vec<_>, _>>()?;
 
     if let Some(index) = generics.iter().position(|g| *g == written_name) {
@@ -2593,6 +2692,41 @@ fn resolve_type_at(
                         ),
                         span,
                     ));
+                }
+                // `docs/mode-polymorphism.md` §2, the soundness fix.
+                //
+                // Declaring an aggregate `val` is a promise about *every*
+                // instantiation, and it was believed rather than checked:
+                // `mode_of` returned the declared mode without substituting,
+                // so `Wrap[Box[int]]` was `val` by assertion. That is a leak
+                // (the box need never be unboxed) and, because `val` means
+                // copyable, a double free.
+                //
+                // The promise is a bound on the declaration's own parameters
+                // (§3), so it is kept here, where the arguments are known.
+                if def.declared_mode == Some(Mode::Val) {
+                    let unbounded: [Option<Mode>; 0] = [];
+                    if let Some(argument) =
+                        args.iter().find(|a| mode_of(defs, unifier, &unbounded, a) == Mode::Res)
+                    {
+                        // Named as the source wrote it: a type parameter
+                        // renders as `T`, not as the `T0` the unifier
+                        // falls back to when no declaration has set its
+                        // parameter names.
+                        let written = match argument {
+                            Type::Param(i) => generics
+                                .get(*i as usize)
+                                .map(|g| ast.name_of(*g).to_owned())
+                                .unwrap_or_else(|| unifier.display(argument)),
+                            other => unifier.display(other),
+                        };
+                        return Err(Diagnostic::new(
+                            format!(
+                                "`{other}` is declared `val`, so its type arguments are `val` too, and `{written}` is `res`"
+                            ),
+                            span,
+                        ));
+                    }
                 }
                 (Type::Named(def.def, args.clone()), def.generics.len())
             }
@@ -2685,6 +2819,10 @@ struct FnLowering<'a> {
     /// The module this function is in, which is where an unqualified name
     /// resolves (`docs/modules.md` §4).
     module: u32,
+    /// This declaration's `val` bounds, for `mode_of` on a `Type::Param`
+    /// (`docs/mode-polymorphism.md` §3.1). Empty for a monomorphised
+    /// copy, which has no `Param` left to ask about.
+    bounds: Vec<Option<Mode>>,
 }
 
 impl<'a> FnLowering<'a> {
@@ -2813,8 +2951,17 @@ impl<'a> FnLowering<'a> {
         for id in &self.open_blocks {
             regions.push((self.blocks[*id as usize].name, Region::Block(*id)));
         }
-        let resolved =
-            resolve_type(self.ast, self.defs, self.module, &self.generic_names, &regions, id)?;
+        let resolved = resolve_type(
+            Resolving {
+                ast: self.ast,
+                defs: self.defs,
+                unifier: self.unifier,
+                module: self.module,
+            },
+            &self.generic_names,
+            &regions,
+            id,
+        )?;
         Ok(resolved.substitute(&self.generics, &[]))
     }
 
@@ -3554,7 +3701,7 @@ impl<'a> FnLowering<'a> {
                 let referent = self.unifier.resolve(inner);
                 // Overwriting a `res` ends it without naming a consumer,
                 // which is the silent drop §4 refuses however it is spelled.
-                if mode_of(self.defs, self.unifier, &referent) == Mode::Res {
+                if mode_of(self.defs, self.unifier, &self.bounds, &referent) == Mode::Res {
                     return Err(Diagnostic::new(
                         format!(
                             "`{}` is `res`, so this would discard a live resource without naming what ends it",
@@ -3753,7 +3900,7 @@ impl<'a> FnLowering<'a> {
         // capabilities or run anything -- so a `res` value put in one would
         // have its memory reclaimed with its obligation undischarged, which
         // is a leak with a static blessing.
-        if mode_of(self.defs, self.unifier, &resolved) == Mode::Res {
+        if mode_of(self.defs, self.unifier, &self.bounds, &resolved) == Mode::Res {
             return Err(Diagnostic::new(
                 format!(
                     "`{}` is `res`, and an arena holds `val` data only: releasing one reclaims memory and runs nothing, so a linear obligation put inside would be dropped rather than discharged",
@@ -3975,7 +4122,7 @@ impl<'a> FnLowering<'a> {
             ));
         };
         let referent = self.unifier.resolve(referent);
-        if mode_of(self.defs, self.unifier, &referent) == Mode::Res {
+        if mode_of(self.defs, self.unifier, &self.bounds, &referent) == Mode::Res {
             return Err(Diagnostic::new(
                 format!(
                     "`{}` is `res`, so `*` would copy it and leave two values where one obligation is owed; borrow it further or name a field instead",
@@ -4012,7 +4159,7 @@ impl<'a> FnLowering<'a> {
         // boxed slice frees memory and runs nothing, so a linear obligation
         // inside would be dropped rather than discharged -- and the fill is
         // copied into every element, which a linear value cannot be at all.
-        if mode_of(self.defs, self.unifier, &element) == Mode::Res {
+        if mode_of(self.defs, self.unifier, &self.bounds, &element) == Mode::Res {
             return Err(Diagnostic::new(
                 format!(
                     "`{}` is `res`, and a boxed slice holds `val` data only: the fill is copied into every element, and a linear value cannot be copied at all",
@@ -4123,7 +4270,7 @@ impl<'a> FnLowering<'a> {
         // runs nothing, so a linear obligation inside would be dropped
         // rather than discharged. A slice makes it worse -- there would be
         // `count` of them -- but the rule is the one rule, not a new one.
-        if mode_of(self.defs, self.unifier, &element) == Mode::Res {
+        if mode_of(self.defs, self.unifier, &self.bounds, &element) == Mode::Res {
             return Err(Diagnostic::new(
                 format!(
                     "`{}` is `res`, and an arena holds `val` data only: the fill is copied into every element, and a linear value cannot be copied at all",
@@ -4649,7 +4796,7 @@ impl<'a> FnLowering<'a> {
                     // reading it here would leave two owners of one value.
                     // Enforced from the start this time -- the last place
                     // this rule was missing cost a double free to find.
-                    if mode_of(self.defs, self.unifier, &ty) == Mode::Res {
+                    if mode_of(self.defs, self.unifier, &self.bounds, &ty) == Mode::Res {
                         return Err(Diagnostic::new(
                             format!(
                                 "`{}` is `res`, and nothing moves out of a reference: reading it here would leave two owners of one value. Take the whole value apart instead, or reach the component on an owner",
@@ -4722,7 +4869,7 @@ impl<'a> FnLowering<'a> {
                     // double free at the end of it. That was reachable from
                     // ordinary code with no `unsafe` anywhere, which this
                     // language does not have.
-                    if mode_of(self.defs, self.unifier, &ty) == Mode::Res {
+                    if mode_of(self.defs, self.unifier, &self.bounds, &ty) == Mode::Res {
                         return Err(Diagnostic::new(
                             format!(
                                 "`{}` is `res`, and nothing moves out of a reference: reading it here would leave two owners of one value. Take the whole value apart instead, or reach the field on an owner",
@@ -4911,22 +5058,24 @@ impl<'a> FnLowering<'a> {
                 let mut instantiate: Option<(usize, Vec<Type>)> = None;
                 let mut region_args: Vec<Region> = Vec::new();
                 let mut foreign: Option<u32> = None;
-                // §7.2: a body's row is a union over its calls. Taken here,
-                // at the one place a call is resolved, so there is no second
-                // walk that could disagree about what the body does.
-                let performed = match Builtin::from_name(text) {
-                    Some(builtin) => builtin.effects(),
-                    None => self
-                        .signatures
-                        .iter()
-                        .find(|sig| sig.name == *callee)
-                        .map(|sig| sig.effects.clone())
-                        .or_else(|| {
-                            self.externs.iter().find(|e| e.name == text).map(|e| e.effects.clone())
-                        })
-                        .unwrap_or_default(),
-                };
-                self.performed.union(&performed);
+                // §7.2: a body's row is a union over its calls, taken from
+                // **the callee this call actually resolves to**.
+                //
+                // This used to be its own lookup: module-blind, and
+                // consulting `signatures` before `externs` where the type
+                // resolution below does the opposite. Two walks that could
+                // disagree, which the comment here claimed there was not
+                // one of -- and once `docs/modules.md` let two modules hold
+                // one name, they did. A root `extern fn puts` called from
+                // the root took its *types* from the extern and its
+                // *effects* from an unrelated `puts` in another module: a
+                // function calling into C, declaring `[]`, and compiling.
+                //
+                // So it resolves once, here, and everything below reads the
+                // answer.
+                let target = self.target_module(*qualifier, span)?;
+                let resolved = Resolved::find(self, text, *callee, target);
+                self.performed.union(&resolved.effects(self));
                 // §7.4: narrowing is checked here because both its argument
                 // and its result depend on the literal that was written.
                 if Builtin::from_name(text) == Some(Builtin::Narrow) {
@@ -4958,7 +5107,7 @@ impl<'a> FnLowering<'a> {
                 if Builtin::from_name(text) == Some(Builtin::UnboxSlice) {
                     return self.unboxed_slice(args, span);
                 }
-                let (params, ret) = if let Some(builtin) = Builtin::from_name(text) {
+                let (params, ret) = if let Resolved::Builtin(builtin) = resolved {
                     // A builtin's region parameters are instantiated exactly
                     // like a written function's (§5.1): one fresh region per
                     // parameter, solved by the arguments.
@@ -4970,7 +5119,7 @@ impl<'a> FnLowering<'a> {
                         params.iter().map(|t| t.substitute(&[], &fresh)).collect::<Vec<_>>(),
                         ret.substitute(&[], &fresh),
                     )
-                } else if let Some(index) = self.externs.iter().position(|e| e.name == text) {
+                } else if let Resolved::Extern(index) = resolved {
                     // A foreign call is checked against its declaration and
                     // nothing else, exactly like a written function's (§8.4).
                     // Its region parameters are instantiated here too, since
@@ -4993,17 +5142,12 @@ impl<'a> FnLowering<'a> {
                         ret.substitute(&[], &fresh),
                     )
                 } else {
-                    let target = self.target_module(*qualifier, span)?;
-                    let index = self
-                        .signatures
-                        .iter()
-                        .position(|s| s.name == *callee && s.module == target)
-                        .ok_or_else(|| {
-                            Diagnostic::new(
-                                format!("`{text}` is not a function in this program"),
-                                span,
-                            )
-                        })?;
+                    let Resolved::Fn(index) = resolved else {
+                        return Err(Diagnostic::new(
+                            format!("`{text}` is not a function in this program"),
+                            span,
+                        ));
+                    };
                     self.check_visible(
                         target,
                         self.signatures[index].public,
@@ -5099,6 +5243,28 @@ impl<'a> FnLowering<'a> {
                                     span,
                                 ));
                             }
+                            // `docs/mode-polymorphism.md` §3.1: a `[T: val]`
+                            // parameter promises the callee only works for
+                            // copyable types, and this is where the promise
+                            // is kept -- at the **call site**, which is the
+                            // half of §12 that was missing. Without it the
+                            // callee's body would be refused instead, inside
+                            // a library the caller cannot change.
+                            if self.signatures[index].bounds.get(position).copied().flatten()
+                                == Some(Mode::Val)
+                                && mode_of(self.defs, self.unifier, &self.bounds, &resolved)
+                                    == Mode::Res
+                            {
+                                let parameter =
+                                    self.ast.name_of(self.signatures[index].generics[position]);
+                                return Err(Diagnostic::new(
+                                    format!(
+                                        "`{text}` needs `{parameter}` to be `val`, and `{}` is `res`",
+                                        self.unifier.display(&resolved)
+                                    ),
+                                    span,
+                                ));
+                            }
                             settled.push(resolved);
                         }
                         Callee::Fn(self.mono.request(index, settled))
@@ -5107,6 +5273,52 @@ impl<'a> FnLowering<'a> {
                 (Expr::Call { callee: callee_ref, args: lowered }, ret)
             }
         })
+    }
+}
+
+/// What a call's name resolves to — **once**.
+///
+/// A call used to be resolved twice: once for its effect row and once for
+/// its types, with different precedence and neither scoped to a module.
+/// Once `docs/modules.md` let two modules hold one name the two answers
+/// could differ, and a function calling into C could declare `[]`. One
+/// resolution, one answer, and everything reads it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Resolved {
+    Builtin(Builtin),
+    /// An index into `externs`.
+    Extern(usize),
+    /// An index into `signatures`.
+    Fn(usize),
+    None,
+}
+
+impl Resolved {
+    /// Builtin, then foreign, then written — and the last two only in the
+    /// module the call reaches into (`docs/modules.md` §4).
+    ///
+    /// A builtin is not module-scoped because it is the language rather
+    /// than a declaration, exactly as the prelude's types are.
+    fn find(f: &FnLowering<'_>, text: &str, callee: Symbol, target: u32) -> Self {
+        if let Some(builtin) = Builtin::from_name(text) {
+            return Resolved::Builtin(builtin);
+        }
+        if let Some(index) = f.externs.iter().position(|e| e.name == text && e.module == target) {
+            return Resolved::Extern(index);
+        }
+        match f.signatures.iter().position(|s| s.name == callee && s.module == target) {
+            Some(index) => Resolved::Fn(index),
+            None => Resolved::None,
+        }
+    }
+
+    fn effects(self, f: &FnLowering<'_>) -> Effects {
+        match self {
+            Resolved::Builtin(builtin) => builtin.effects(),
+            Resolved::Extern(index) => f.externs[index].effects.clone(),
+            Resolved::Fn(index) => f.signatures[index].effects.clone(),
+            Resolved::None => Effects::default(),
+        }
     }
 }
 
@@ -5703,7 +5915,11 @@ mod tests {
         );
         assert!(
             error(
-                "fn same[T](a: T, b: T) -> [] T { return a; }                  fn main() -> [] int { return same(1, true); }"
+                // `[T: val]` because it drops `b`, which is only legal
+                // for a copyable type (`docs/mode-polymorphism.md` §3.1);
+                // without the bound this would be refused for *that*
+                // rather than for the mismatch it is testing.
+                "fn same[T: val](a: T, b: T) -> [] T { return a; }                  fn main() -> [] int { return same(1, true); }"
             )
             .contains("expected `int`, found `bool`")
         );
@@ -6934,18 +7150,39 @@ mod linearity_tests {
         assert!(message.contains("consumed on every path"), "{message}");
     }
 
+    /// `docs/mode-polymorphism.md` §3.1 and §4: where the error goes.
+    ///
+    /// An unbounded parameter is checked as `res` — the stronger
+    /// obligation — so a body that drops it is refused **at the
+    /// definition**, which is where it is wrong. This used to be accepted
+    /// where it was written and refused at the copy, as
+    /// "(instantiated at `File`)".
+    ///
+    /// A function that meant only copyable types says `[T: val]`, and
+    /// then the refusal moves to the call site, where the choice of type
+    /// was actually made.
     #[test]
-    fn a_generic_function_is_checked_at_each_instantiation() {
-        // The body is accepted where it is written, because a type parameter
-        // is `val` (§3). The copy at `File` is where it fails, and the
-        // message says which copy.
-        let message = refused(
-            "fn sink[T](x: T) -> [] int { return 0; } fn main() -> [] int { return sink(open(1)); }",
-        );
-        assert!(message.contains("instantiated at `File`"), "{message}");
-        accepted(
+    fn where_a_generic_that_drops_its_parameter_is_refused() {
+        let definition = refused(
             "fn sink[T](x: T) -> [] int { return 0; } fn main() -> [] int { return sink(1); }",
         );
+        assert!(definition.contains("is still live"), "{definition}");
+        assert!(
+            !definition.contains("instantiated at"),
+            "the rigid check is the definition, not an instantiation: {definition}"
+        );
+
+        // With the bound, the definition is fine and the *caller* is not.
+        accepted(
+            "fn sink[T: val](x: T) -> [] int { return 0; } \
+             fn main() -> [] int { return sink(1); }",
+        );
+        let call_site = refused(
+            "fn sink[T: val](x: T) -> [] int { return 0; } \
+             fn main() -> [] int { return sink(open(1)); }",
+        );
+        assert!(call_site.contains("needs `T` to be `val`"), "{call_site}");
+        assert!(call_site.contains("`File` is `res`"), "{call_site}");
     }
 
     #[test]
@@ -8069,6 +8306,88 @@ mod linearity_tests {
         .expect("parses");
         let message = crate::lower(&ast).expect_err("the root is not reachable").message;
         assert!(message.contains("`helper` is not a function"), "{message}");
+    }
+
+    // ---- mode polymorphism (`docs/mode-polymorphism.md`) ---------------
+
+    /// §2: a declared `val` on a generic was believed rather than checked.
+    ///
+    /// `Wrap[Box[int]]` came out `val` by assertion, which is a leak (the
+    /// box need never be unboxed) and, because `val` means copyable, a
+    /// double free. Both compiled; valgrind reported *8 bytes definitely
+    /// lost* and *Invalid free()* respectively.
+    ///
+    /// The declaration-time check could not catch it, because it runs
+    /// against the members **as written**, where `T` is a parameter
+    /// rather than `Box[int]`.
+    #[test]
+    fn a_val_generic_at_a_res_argument_is_not_val() {
+        const PRE: &str = "val struct Wrap[T] { held: T } \
+             fn main(world: World) -> [] int { \
+             let Split { io, ffi, fs, heap, args } = split(world); \
+             release(args); release(ffi); release(fs); release(io); var n = 0; \
+             borrow mut heap as &!h in { ";
+        const POST: &str = " } release(heap); return n; }";
+
+        // The leak: nothing consumes it, and nothing had to.
+        let leak = refused(&format!("{PRE} let w = Wrap {{ held: box(h, 1) }}; n = 0;{POST}"));
+        assert!(leak.contains("still live"), "{leak}");
+
+        // The double free: `val` copies, so two owners of one allocation.
+        let copied = refused(&format!(
+            "{PRE} let w = Wrap {{ held: box(h, 1) }}; let a = w; let b = w; \
+             let Wrap {{ held }} = a; let Wrap {{ held }} = b; n = 0;{POST}"
+        ));
+        assert!(copied.contains("already been consumed"), "{copied}");
+
+        // And a written instantiation says so at the type, which is the
+        // clearer place when there is one (§3).
+        let written = refused(
+            "val struct Wrap[T] { held: T } \
+             fn f(w: Wrap[Box[int]]) -> [] int { return 0; } \
+             fn main() -> [] int { return 0; }",
+        );
+        assert!(written.contains("is declared `val`, so its type arguments"), "{written}");
+
+        // A `val` generic at a `val` argument is still fine, which is the
+        // whole point of being able to declare one.
+        accepted(
+            "val struct Wrap[T] { held: T } fn main() -> [] int { \
+                  let w = Wrap { held: 1 }; return w.held - 1; }",
+        );
+    }
+
+    /// A call resolved **once**.
+    ///
+    /// Its effect row and its types came from two independent lookups
+    /// with different precedence, neither scoped to a module. Once
+    /// `docs/modules.md` let two modules hold one name they could
+    /// disagree: a root `extern fn puts` called from the root took its
+    /// types from the extern and its effects from an unrelated `puts`
+    /// somewhere else — so a function calling into C declared `[]` and
+    /// compiled.
+    ///
+    /// The effect system is the whole point of the language, so this is
+    /// the most serious kind of bug it can have: not a crash, a *lie*.
+    #[test]
+    fn a_call_takes_its_effects_from_the_callee_it_resolves_to() {
+        let mut ast = lex_sys_syntax::ast::Ast::new();
+        lex_sys_syntax::parse_into(
+            &mut ast,
+            "module quiet; pub fn puts(text: int) -> [] int { return text; }",
+            0,
+        )
+        .expect("parses");
+        lex_sys_syntax::parse_into(
+            &mut ast,
+            "extern fn puts[&f](ffi: &f Ffi(\"libc\"), s: &static [byte]) -> [ffi(\"libc\")] int; \
+             fn sneak[&f](libc: &f Ffi(\"libc\")) -> [] int { return puts(libc, \"x\"); } \
+             fn main() -> [] int { return 0; }",
+            2000,
+        )
+        .expect("parses");
+        let message = crate::lower(&ast).expect_err("the row is a lie").message;
+        assert!(message.contains("performs `ffi(\"libc\")`"), "{message}");
     }
 
     #[test]

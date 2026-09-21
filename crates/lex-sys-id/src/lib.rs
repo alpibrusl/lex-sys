@@ -19,8 +19,8 @@
 use std::collections::HashMap;
 
 use lex_sys_syntax::ast::{
-    Ast, BinOp, Block, EffectLabel, EnumDecl, Expr, ExprId, ExternDecl, FnDecl, Item, ItemId, Stmt,
-    StmtId, StructDecl, Symbol, TypeExpr, TypeId, UnOp,
+    Ast, BinOp, Block, EffectLabel, EnumDecl, Expr, ExprId, ExternDecl, FnDecl, Item, ItemId, Mode,
+    Stmt, StmtId, StructDecl, Symbol, TypeExpr, TypeId, UnOp,
 };
 
 /// A 32-byte content hash.
@@ -462,8 +462,25 @@ fn encode_type(
 fn hash_signature(ast: &Ast, decl: &FnDecl, module: u32, type_ids: &Names) -> Hash {
     let mut encoder = Encoder::default();
     encoder.str(ast.name_of(decl.name));
-    // The *count* of generics, not their names.
+    // The *count* of generics, not their names -- and each one's `val`
+    // bound, which is not a name but a **contract**
+    // (`docs/mode-polymorphism.md` §3.1). A caller is checked against it,
+    // so a caller depends on it: adding `[T: val]` to a published
+    // signature narrows what may call it, and that has to change the
+    // hash exactly as narrowing a parameter type would.
     encoder.len(decl.generics.len());
+    //
+    // Not `mode_tag`: that helper reads an *absent* mode as `val`, which
+    // is right for a declaration (`val struct` and `struct` promise the
+    // same thing) and wrong here. An unbounded parameter is checked as
+    // `res`, so `[T]` and `[T: val]` are two different contracts and must
+    // be two different hashes.
+    for position in 0..decl.generics.len() {
+        match decl.bounds.get(position).copied().flatten() {
+            Some(Mode::Val) => encoder.tag(tag::MODE_VAL),
+            _ => encoder.tag(tag::NONE),
+        };
+    }
     // The *count* of region parameters, and the `where` clauses as pairs of
     // positions: both are part of the contract, and neither depends on the
     // names chosen.
@@ -1081,6 +1098,27 @@ mod tests {
         assert_eq!(both.len(), 2, "two declarations");
         assert_eq!(both[0].sig, both[1].sig);
         assert_eq!(both[0].body, both[1].body);
+    }
+
+    /// `docs/mode-polymorphism.md` §3.1: a `val` bound is a **contract**,
+    /// so it reaches the signature hash.
+    ///
+    /// Adding `[T: val]` narrows what may call a function, exactly as
+    /// narrowing a parameter type would. And unbounded is not the same as
+    /// `val` — it is the *stronger* check — so the two must not collide,
+    /// which the obvious `mode_tag` helper would have made them do.
+    #[test]
+    fn a_val_bound_reaches_the_signature_hash() {
+        let unbounded = "fn f[T](x: T) -> [] T { return x; }";
+        let bounded = "fn f[T: val](x: T) -> [] T { return x; }";
+        assert_ne!(sig(unbounded, "f"), sig(bounded, "f"), "a bound is part of the contract");
+
+        // The bound is in the *signature*, not the body: the body does not
+        // mention it, so rewriting one does not depend on the other.
+        assert_eq!(body(unbounded, "f"), body(bounded, "f"));
+
+        // And renaming the parameter still changes nothing, bound or not.
+        assert_eq!(sig(bounded, "f"), sig("fn f[U: val](x: U) -> [] U { return x; }", "f"));
     }
 
     #[test]

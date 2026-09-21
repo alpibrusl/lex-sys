@@ -156,7 +156,7 @@ enum Opt[T] {
     Some(T),
 }
 
-fn unwrap_or[T](o: Opt[T], fallback: T) -> [] T {
+fn unwrap_or[T: val](o: Opt[T], fallback: T) -> [] T {
     match o {
         Opt::None => { return fallback; }
         Opt::Some(value) => { return value; }

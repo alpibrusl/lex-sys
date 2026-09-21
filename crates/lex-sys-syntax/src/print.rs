@@ -132,7 +132,7 @@ impl Printer<'_> {
             "{}fn {}{}({}) -> {} {} {{",
             visibility(decl.public),
             self.name(decl.name),
-            self.declaration_params(&decl.generics, &decl.regions, &decl.outlives),
+            self.declaration_params(&decl.generics, &decl.bounds, &decl.regions, &decl.outlives),
             self.params(&decl.params),
             self.effect_row(&decl.effects),
             self.ty(decl.ret),
@@ -148,7 +148,7 @@ impl Printer<'_> {
         let text = format!(
             "extern fn {}{}({}) -> {} {};",
             self.name(decl.name),
-            self.declaration_params(&[], &decl.regions, &[]),
+            self.declaration_params(&[], &[], &decl.regions, &[]),
             self.params(&decl.params),
             self.effect_row(&decl.effects),
             self.ty(decl.ret),
@@ -203,13 +203,24 @@ impl Printer<'_> {
     fn declaration_params(
         &self,
         generics: &[Symbol],
+        bounds: &[Option<Mode>],
         regions: &[Symbol],
         outlives: &[(Symbol, Symbol)],
     ) -> String {
         if generics.is_empty() && regions.is_empty() {
             return String::new();
         }
-        let mut parts: Vec<String> = generics.iter().map(|g| self.name(*g).to_owned()).collect();
+        // `T`, or `T: val` (`docs/mode-polymorphism.md` §3.1). An unbounded
+        // parameter prints bare, because that is what it is -- not `T: res`,
+        // which does not exist (§3.2).
+        let mut parts: Vec<String> = generics
+            .iter()
+            .enumerate()
+            .map(|(i, g)| match bounds.get(i).copied().flatten() {
+                Some(Mode::Val) => format!("{}: val", self.name(*g)),
+                _ => self.name(*g).to_owned(),
+            })
+            .collect();
         parts.extend(regions.iter().map(|r| format!("&{}", self.name(*r))));
         let mut text = format!("[{}", parts.join(", "));
         if !outlives.is_empty() {

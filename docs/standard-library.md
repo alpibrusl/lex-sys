@@ -124,14 +124,21 @@ still in a library, still not in the compiler.
   §3 is explicit that a generational handle is an escape hatch and
   "neither is reached for by default" — putting it in `std` would say
   the opposite.
-* **No `Option` or `Result`.** They want generics over a *mode*
-  (§12 of `linearity-and-effects.md` does not have them yet), so a
-  `Result[T]` that works for `int` and for a `res` type is not
-  expressible. `examples/rational.ls` has one that works for `val`
-  types; promoting it would promise more than it delivers.
-* **No collections beyond a byte buffer.** A `Vec[T]` needs the same
-  mode polymorphism. A byte buffer does not, which is why it is the one
-  that exists.
+* **No `Option` or `Result`** — *and the reason given here was wrong.*
+  This said they "want generics over a mode", which the language does
+  not have. It does: `docs/mode-polymorphism.md` §1 shows a generic
+  container used at a resource type and a copyable one in the same
+  program, and it has worked since M2. The claim was taken from §12's
+  open list rather than from a test.
+
+  What they actually want is a place to put the value that is **not**
+  returned: `unwrap_or` needs `T: val`, and a resource version needs a
+  different signature. That is a library design question, and now that a
+  bound can say which version is which, an ordinary one.
+* **No collections beyond a byte buffer.** Same correction: a `Vec[T]`
+  over a resource type is expressible. What a byte buffer does not need
+  is a decision about what its emptying and copying operations mean for
+  a linear element, which is the design that has not been done.
 * **No allocation-free string formatting.** `print_*` writes to the
   console. Formatting *into* a buffer is a second surface and wants
   §6's open question about writers answered first.

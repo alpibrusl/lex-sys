@@ -34,22 +34,46 @@ use crate::{Slot, TypeDef};
 
 /// The mode of a type, computed structurally.
 ///
-/// A type parameter is `val`: there is no mode polymorphism in M2 (§12), and
-/// a generic function instantiated at a `res` type is refused at the call
-/// site instead. A generic *type* is another matter — `Pair[File]` is `res`
-/// and `Pair[int]` is `val`, because the arguments are substituted in first.
-pub(crate) fn mode_of(defs: &[TypeDef], unifier: &Unifier, ty: &Type) -> Mode {
+/// `bounds` is the enclosing declaration's `val` bounds, one per type
+/// parameter (`docs/mode-polymorphism.md` §3.1). An **unbounded**
+/// parameter is `res`: the stronger obligation, so a body that satisfies
+/// linearity for it satisfies linearity at every instantiation, and the
+/// error for a generic that drops its parameter lands on the definition
+/// rather than on whichever call site happened to use a resource type.
+///
+/// A monomorphised copy has no `Param` left at all, so `bounds` is empty
+/// there and never consulted.
+///
+/// A generic *type* is another matter — `Pair[File]` is `res` and
+/// `Pair[int]` is `val`, because the arguments are substituted in first.
+pub(crate) fn mode_of(
+    defs: &[TypeDef],
+    unifier: &Unifier,
+    bounds: &[Option<Mode>],
+    ty: &Type,
+) -> Mode {
     match unifier.resolve(ty) {
         Type::Named(def, args) => {
             let index = def.0 as usize;
-            if let Some(declared) = defs[index].declared_mode {
-                return declared;
+            // A declared `res` is `res`, whatever it holds: the declaration
+            // is asking for the stronger obligation and may have it.
+            if defs[index].declared_mode == Some(Mode::Res) {
+                return Mode::Res;
             }
+            // A declared `val` is **not** believed here
+            // (`docs/mode-polymorphism.md` §2). It was, and
+            // `Wrap[Box[int]]` came out `val` by assertion -- a leak, and a
+            // double free once copied. The members are walked either way,
+            // and a `val` that computes `res` is a contradiction caught
+            // where the promise was made: at the declaration for a
+            // non-generic, and at the instantiation for a written generic
+            // type. An *inferred* instantiation reaches neither, which is
+            // why this has to be honest rather than trusting.
             // The type graph is acyclic — `collect_types` refused anything
             // else — so this recursion terminates without a seen set.
             let members: Vec<Type> = defs[index].members().cloned().collect();
             for member in members {
-                if mode_of(defs, unifier, &member.substitute(&args, &[])) == Mode::Res {
+                if mode_of(defs, unifier, bounds, &member.substitute(&args, &[])) == Mode::Res {
                     return Mode::Res;
                 }
             }
@@ -65,12 +89,17 @@ pub(crate) fn mode_of(defs: &[TypeDef], unifier: &Unifier, ty: &Type) -> Mode {
         // has always been decided.
         Type::Tuple(parts) => {
             for part in &parts {
-                if mode_of(defs, unifier, part) == Mode::Res {
+                if mode_of(defs, unifier, bounds, part) == Mode::Res {
                     return Mode::Res;
                 }
             }
             Mode::Val
         }
+        // `docs/mode-polymorphism.md` §3.1. `val` where the declaration
+        // said so, `res` otherwise -- including for a parameter index the
+        // caller did not supply a bound for, because assuming `res` is the
+        // answer that is never unsound.
+        Type::Param(i) => bounds.get(i as usize).copied().flatten().unwrap_or(Mode::Res),
         // §5 rule 3: `&r T` and `&!r T` are `val` whatever `T` is. Copyable
         // and discardable, which is sound precisely because the referent is
         // frozen or locked for the whole region and the region is a block.
@@ -179,6 +208,9 @@ enum State {
 struct Check<'a> {
     defs: &'a [TypeDef],
     unifier: &'a Unifier,
+    /// The enclosing declaration's `val` bounds, for `Type::Param`
+    /// (`docs/mode-polymorphism.md` §3.1).
+    bounds: &'a [Option<Mode>],
     slots: &'a [Type],
     /// Filled in by `Declare`, so an error can name the binding it is about.
     names: Vec<Option<(String, Span)>>,
@@ -202,12 +234,14 @@ enum Borrow {
 pub(crate) fn check(
     defs: &[TypeDef],
     unifier: &Unifier,
+    bounds: &[Option<Mode>],
     slots: &[Type],
     events: &[Event],
 ) -> Result<(), Diagnostic> {
     let mut check = Check {
         defs,
         unifier,
+        bounds,
         slots,
         names: vec![None; slots.len()],
         state: vec![State::Untracked; slots.len()],
@@ -219,7 +253,7 @@ pub(crate) fn check(
 
 impl Check<'_> {
     fn is_res(&self, slot: Slot) -> bool {
-        mode_of(self.defs, self.unifier, &self.slots[slot.0 as usize]) == Mode::Res
+        mode_of(self.defs, self.unifier, self.bounds, &self.slots[slot.0 as usize]) == Mode::Res
     }
 
     fn name(&self, slot: Slot) -> String {
@@ -368,7 +402,7 @@ impl Check<'_> {
                     }
                 }
                 Event::Discard { ty, what, span } => {
-                    if mode_of(self.defs, self.unifier, ty) == Mode::Res {
+                    if mode_of(self.defs, self.unifier, self.bounds, ty) == Mode::Res {
                         return Err(Diagnostic::new(
                             format!(
                                 "{what} is `res` (`{}`), so it cannot be discarded; name the function that consumes it",
@@ -379,7 +413,7 @@ impl Check<'_> {
                     }
                 }
                 Event::Read { ty, span } => {
-                    if mode_of(self.defs, self.unifier, ty) == Mode::Res {
+                    if mode_of(self.defs, self.unifier, self.bounds, ty) == Mode::Res {
                         let resolved = self.unifier.resolve(ty);
                         // A tuple has components, not fields
                         // (`docs/tuples.md` §3.1). One rule, and it should

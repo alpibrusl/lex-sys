@@ -408,6 +408,14 @@ pub struct Param {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct FnDecl {
     pub name: Symbol,
+    /// A `val` bound per type parameter, parallel to `generics`
+    /// (`docs/mode-polymorphism.md` §3.1).
+    ///
+    /// `None` is unbounded, which is checked as though the parameter were
+    /// **`res`** -- the stronger obligation, so a body that passes is safe
+    /// at every instantiation. There is no `res` bound: it would mean what
+    /// unbounded already means (§3.2).
+    pub bounds: Vec<Option<Mode>>,
     /// `pub` — reachable from another module (`docs/modules.md` §5).
     /// Never *safe*: §6 says a module is not a trust boundary.
     pub public: bool,

@@ -101,8 +101,18 @@ fn accepted_programs_build_and_run() {
         let dir = scratch(&name);
         let exe = dir.join(&name);
 
+        // `--std` for every accept fixture, for the same reason the
+        // example walker passes it: a declaration nobody calls emits
+        // nothing (`docs/standard-library.md` §5.2), so it costs the
+        // fixtures that ignore it exactly nothing.
         let build = Command::new(BIN)
-            .args(["build".as_ref(), path.as_os_str(), "-o".as_ref(), exe.as_os_str()])
+            .args([
+                "build".as_ref(),
+                path.as_os_str(),
+                "--std".as_ref(),
+                "-o".as_ref(),
+                exe.as_os_str(),
+            ])
             .output()
             .expect("the compiler runs");
         assert!(

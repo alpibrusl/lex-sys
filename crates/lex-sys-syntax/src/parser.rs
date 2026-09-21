@@ -224,7 +224,7 @@ impl<'a> Parser<'a> {
     fn fn_decl(&mut self, public: bool) -> Result<ItemId, Diagnostic> {
         let start = self.expect(TokenKind::Fn)?.span;
         let name = self.ident()?;
-        let (generics, regions, outlives) = self.declaration_params()?;
+        let (generics, bounds, regions, outlives) = self.declaration_params()?;
 
         self.expect(TokenKind::LParen)?;
         let mut params = Vec::new();
@@ -252,6 +252,7 @@ impl<'a> Parser<'a> {
                 name,
                 public,
                 generics,
+                bounds,
                 regions,
                 outlives,
                 params,
@@ -278,7 +279,7 @@ impl<'a> Parser<'a> {
         // A foreign function is not generic over types -- C has no such
         // thing -- but it is region-polymorphic, because it takes borrowed
         // capabilities like any other function.
-        let (generics, regions, _) = self.declaration_params()?;
+        let (generics, _, regions, _) = self.declaration_params()?;
         if let Some(first) = generics.first() {
             let _ = first;
             return Err(
@@ -377,11 +378,20 @@ impl<'a> Parser<'a> {
 
     /// `[A, B]` after a declaration's name, or nothing.
     fn generic_params(&mut self) -> Result<Vec<Symbol>, Diagnostic> {
-        let (generics, regions, _) = self.declaration_params()?;
+        let (generics, bounds, regions, _) = self.declaration_params()?;
         if let Some(region) = regions.first() {
             let _ = region;
             return Err(self
                 .err("a type declaration has no region parameters; only a function can take one"));
+        }
+        // `docs/mode-polymorphism.md` §3: a generic *type*'s parameters are
+        // bounded by its own declared mode -- `val struct Wrap[T]` is
+        // `val struct Wrap[T: val]` -- so writing the bound as well would be
+        // a second way to say one thing. §6 keeps writing it open.
+        if bounds.iter().any(Option::is_some) {
+            return Err(self.err(
+                "a generic type's parameters are bounded by its own mode: `val struct X[T]` already means `T` is `val`",
+            ));
         }
         Ok(generics)
     }
@@ -453,8 +463,10 @@ impl<'a> Parser<'a> {
     #[allow(clippy::type_complexity)]
     fn declaration_params(
         &mut self,
-    ) -> Result<(Vec<Symbol>, Vec<Symbol>, Vec<(Symbol, Symbol)>), Diagnostic> {
+    ) -> Result<(Vec<Symbol>, Vec<Option<Mode>>, Vec<Symbol>, Vec<(Symbol, Symbol)>), Diagnostic>
+    {
         let mut generics = Vec::new();
+        let mut bounds = Vec::new();
         let mut regions = Vec::new();
         let mut outlives = Vec::new();
         if self.eat(TokenKind::LBracket) {
@@ -463,6 +475,31 @@ impl<'a> Parser<'a> {
                     regions.push(self.ident()?);
                 } else {
                     generics.push(self.ident()?);
+                    // `[T: val]` — this parameter is copyable
+                    // (`docs/mode-polymorphism.md` §3.1). There is no
+                    // `[T: res]`: unbounded already means "checked as
+                    // `res`", so a `res` bound would change nothing (§3.2).
+                    bounds.push(if self.eat(TokenKind::Colon) {
+                        match self.peek().kind {
+                            TokenKind::Val => {
+                                self.bump();
+                                Some(Mode::Val)
+                            }
+                            TokenKind::Res => {
+                                return Err(self.err(
+                                    "there is no `res` bound: an unbounded parameter is already checked as `res`, which is the stronger obligation",
+                                ));
+                            }
+                            other => {
+                                return Err(self.err(format!(
+                                    "expected `val` after `:`, found {}",
+                                    other.describe()
+                                )));
+                            }
+                        }
+                    } else {
+                        None
+                    });
                 }
                 if !self.eat(TokenKind::Comma) {
                     break;
@@ -483,7 +520,7 @@ impl<'a> Parser<'a> {
             }
             self.expect(TokenKind::RBracket)?;
         }
-        Ok((generics, regions, outlives))
+        Ok((generics, bounds, regions, outlives))
     }
 
     fn ident(&mut self) -> Result<Symbol, Diagnostic> {
