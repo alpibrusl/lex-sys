@@ -158,17 +158,170 @@ reference implementation to be wrong against, and it is **small**.
 
 What a larger port would test that this one did not:
 
-| Untested | Why it matters |
-|---|---|
-| Linearity at scale | `base64` owns almost nothing. A program with resources flowing through twenty functions is where "exactly once" either stays readable or does not |
-| Effect-row plumbing at depth | The deepest call chain here is three. `reach.md`'s worry — every helper that transitively prints needs the row — needs a program with a real call graph |
-| `borrow mut`'s strictness | It appears once, around the whole body. The friction people report is in code that wants to read a field while writing another, and this program has no such code |
-| The heap | Untouched. A port that needs one is the port that exercises `heap.md` in anger |
+| Untested by `base64` | Why it matters | Answered in |
+|---|---|---|
+| Linearity at scale | `base64` owns almost nothing. A program with resources flowing through a call graph is where "exactly once" either stays readable or does not | §9.2 |
+| Effect-row plumbing at depth | The deepest call chain here is three. `reach.md`'s worry — every helper that transitively prints needs the row — needs a program with a real call graph | §9.3 |
+| `borrow mut`'s strictness | It appears once, around the whole body. The friction people report is in code that wants to read one thing while writing another | §9.4 |
+| The heap | Untouched. A port that needs one is the port that exercises `heap.md` in anger | §9.1 |
 
 So this is one data point and it is a good one: a real program, ported
 faithfully, verified against the original, needing one missing feature
 that was missing for no reason. It is not the claim that everything
-ports.
+ports — which is why there is a §9.
+
+---
+
+## 9. The second port: `sort`
+
+`examples/sort/` is `LC_ALL=C sort` with no flags: read the files named
+on the command line, or standard input when none are, sort the lines by
+byte order, write them out. Checked against GNU `sort` the same way —
+seven input shapes, named files, several at once, a missing file, and a
+1.2 MB file, all compared byte-for-byte (`sort_agrees_with_gnu_sort`).
+
+It was chosen because it needs every one of §6's four.
+
+**It needed four library functions that did not exist**, and every one of
+them was absent for the same reason: nothing had asked.
+
+| Missing | Why nobody had noticed |
+|---|---|
+| `vec.set` | A vector could be `push`ed and `get` but never **written**. `push` and `get` were what the first caller wanted; a sort is the first caller that wanted the third |
+| `vec.swap` | Expressible with the other two, and every sort writes it |
+| `buffer.room` | `fs_read` writes *into* a slice you hand it, and every `std.buffer` operation took the bytes as an argument — the wrong direction when the filesystem is producing them |
+| `buffer.filled` | The other half: a buffer cannot see a write it did not make, so the caller commits the count |
+
+None is a design question. `vec.set` is three lines and `buffer.room` is
+two. What is worth noticing is the *shape* of the gap: the library had
+grown exactly the operations its existing callers needed, and the first
+program with a different shape found four holes in an afternoon. That is
+an argument for more ports rather than for more library review.
+
+### 9.1 The heap, and what `fs_read` cannot tell you
+
+Five owned resources, all on the heap: the text, two parallel runs saying
+where each line is, and the permutation being sorted with its scratch.
+`main` creates all five, lends them down, and destroys all five.
+
+Under valgrind, sorting two files:
+
+```
+total heap usage: 8 allocs, 8 frees, 217,248 bytes allocated
+in use at exit: 0 bytes in 0 blocks
+ERROR SUMMARY: 0 errors from 0 contexts
+```
+
+Eight and eight — the five, plus the reallocation each growable one did
+on the way. Nothing here is a runtime checking that; the balance is what
+the type checker refused to compile without.
+
+The awkward part is not ownership, it is that **`fs_read` cannot report
+truncation**. It "fills as much of `into` as the file has and returns the
+byte count" (`filesystem.md` §3), so a file that exactly fills the buffer
+is indistinguishable from one that was cut short. There are no handles
+and no way to ask a file's size, so `read_file` reads into 64 KiB, and if
+the answer came back *equal* to the buffer it doubles and reads the whole
+file again. A 1.2 MB file is therefore read six times.
+
+That is not a bug and it is the cost of `filesystem.md` §3's own
+position: *"a file handle is a linear resource — it is precisely the
+thing this language exists to track — and giving it a type means deciding
+what `close` consumes... That is a milestone, not a paragraph."* The
+milestone now has a program waiting for it.
+
+### 9.2 Linearity at scale: the move loop
+
+The shape that repeats everywhere:
+
+```
+out = buffer.push(heap, out, byte_of(c));
+```
+
+`std.buffer` and `std.vec` are move-based — every operation takes the
+resource by value and hands it back — so a loop that fills a buffer
+**moves it round and round**. Six sites in this program do it.
+
+The honest verdict: it reads fine and it is noisy. `out = f(h, out, x)`
+says exactly what happens and never lets you forget which value you have,
+and it is three tokens longer than `f(&mut out, x)` every single time.
+Nothing about it was hard. Nothing about it was pleasant either, and a
+reader looking for the ergonomic cost of linearity should look here
+rather than at the type signatures.
+
+One thing it did make easy: the failure path. `read_file` returns
+`(Buffer, int)` so the buffer comes back even when the read failed,
+because a function that owns a resource and takes an error exit has to
+say what happened to it. The tuple is not elegant; it is also not
+something you can forget to write.
+
+### 9.3 Rows at depth
+
+`merge` takes five references and its row is `[]`. `read_file`'s is
+`[heap, fs_read("")]`. `main`'s is `[]`, because it owns.
+
+`reach.md`'s worry — that every helper which transitively does something
+needs the plumbing — did not materialise here, and the reason is
+specific rather than lucky: **this program's effects are concentrated at
+its edges.** Reading and writing happen in four of the eight functions;
+the sort itself touches nothing, so the other four declare `[]`:
+
+```
+read_stdin    [heap, io_read]
+read_file     [heap, fs_read("")]
+find_lines    [heap]
+write_lines   [io_write]
+before        []
+merge         []
+msort         []
+main          []
+```
+
+Half and half, and the half that declares nothing is the half doing the
+work the program is named after.
+
+That is probably typical of programs shaped like this one and probably
+not typical of everything. A program that logged inside its inner loop
+would thread `io_write` through all eight, and the row would be right to
+make that visible — but it would be eight annotations rather than four.
+
+### 9.4 `borrow mut` in a program that needed it
+
+This is the one that surprised me. The sort holds five things at once —
+text, starts, lengths shared; order and scratch unique — and the checker
+took it without complaint, because they are five *different* values and
+`borrow mut` freezes only what it borrows.
+
+The friction people report with lexical regions is about wanting to read
+one field while writing another *of the same value*, and this program
+never needed to. What it needed instead was five nested `borrow` blocks
+in `main`, indented five deep, to hand those references to one call. That
+is the real cost here and it is syntactic: the rule was never in the way,
+the indentation was.
+
+### 9.5 And the authority report
+
+```
+performs
+    args
+    fs_read("")
+    heap
+    io_read
+    io_write
+never touches
+    foreign code
+```
+
+`fs_read("")` is **unnarrowed**, and that is correct rather than sloppy:
+this program reads paths its user supplies, so there is no prefix it
+could commit to. Compare `examples/lines.ls`, which narrows to `/tmp`
+because it chooses its own paths.
+
+So the report distinguishes *a tool that reads what you tell it to* from
+*a tool that reads somewhere specific*, and the difference is legible
+without reading either program. That is the narrowing story doing the job
+it was built for, on a program written to a specification that had never
+heard of it.
 
 ---
 
@@ -176,7 +329,9 @@ ports.
 
 | Question | Why it waits |
 |---|---|
-| A port with resources and depth | §6's table. The honest next one is something with a file, a heap allocation and a call graph — which is a bigger slice than this was, and the reason to do it is exactly §6 |
+| ~~A port with resources and depth~~ | **Done — §9**, and it found four missing library functions, confirmed the move loop's cost is noise rather than difficulty, and left `fs_read`'s truncation problem with a program waiting on it |
+| File handles | §9.1. Reading a file of unknown size means reading it repeatedly, and `filesystem.md` §3 already says the fix is a milestone rather than a paragraph. There is now a program that pays for its absence |
+| A `borrow` that takes several values | §9.4. Five nested blocks to hand five references to one call. The rule was never in the way; the indentation was |
 | `base64 --wrap=N`, `-i` | Deliberately not ported. They are flag parsing, which is `ROADMAP`'s ordinary work, and adding them would have tested the flag parser rather than the language |
 | An unsigned width | Not needed here, because base64 never sets the sign bit of an `int`. A port that hashes or checksums would need one within five lines (`defined-behaviour.md` §8) |
 
@@ -189,6 +344,9 @@ ports.
 | `base64_agrees_with_coreutils` | §1: the same bytes as `/usr/bin/base64`, both directions, twelve sizes, three malformed inputs, and a megabyte through a 64 KiB arena |
 | `an_http_server_written_in_lex_sys_answers_a_real_request` | §5's bug, after the fix — it is the test that found it |
 
+| `sort_agrees_with_gnu_sort` | §9: seven input shapes, named files, several at once, a missing file, and 1.2 MB past the first read — and, with no reference present, that the output is still a sorted permutation of the input |
+
 | Program | Shows |
 |---|---|
-| `examples/base64/base64.ls` | The port |
+| `examples/base64/base64.ls` | The first port: bits, and a program that owns nothing |
+| `examples/sort/sort.ls` | The second: five owned resources, the heap, and rows at depth |

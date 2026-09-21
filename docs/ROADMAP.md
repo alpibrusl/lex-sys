@@ -52,10 +52,11 @@ reasoning — this table is the index, not the argument.
 | [#41](https://github.com/alpibrusl/lex-sys/pull/41) | [What a program can reach](reach.md) | Answered by building it: a **REST endpoint over a real TCP socket**, with no socket type, no `Net` capability and no library — because sockets are libc and libc has a name. The no's are one sentence: a foreign *result* is a scalar, so every opaque handle (TLS, libpq, `FILE *`) is out. And the row cannot say `net`, because a library is not an authority domain |
 | [#42](https://github.com/alpibrusl/lex-sys/pull/42) | [What the overflow trap costs](overflow-cost.md) | The README's *"low single-digit percent"* had never been measured. Measured: +2.8% call-bound, +3.6% memory-bound, **−9.1%** branch-bound, **+40.5%** arithmetic-bound — so not a percentage but a rule. And the stated reason was wrong: not the never-taken branch, but that **a trap is observable, so the loop cannot vectorise** — clang pays 46% and gcc 74% for the same guarantee. Both documents corrected in place |
 | [#43](https://github.com/alpibrusl/lex-sys/pull/43) | [Bits](bitwise.md), and [a port](porting.md) | The first program here that **already existed**: coreutils `base64`, byte-for-byte on both directions. It needed the bit operators and hex literals and *nothing else* — no capability, no library, no change to linearity or rows. And running the suite under load for an unrelated reason found a real bug in `examples/serve/`: one `read` returns what arrived, not what was sent |
+| [#44](https://github.com/alpibrusl/lex-sys/pull/44) | [A port with resources](porting.md#9-the-second-port-sort) | `LC_ALL=C sort`, five owned resources on the heap, checked against GNU. Answered §6's four untested things: the move loop costs three tokens rather than difficulty, effects concentrate at the edges (four of eight rows are `[]`), and `borrow mut` never got in the way — five nested blocks did. Found **four** missing library functions, every one absent because nothing had asked |
 
 ### The pattern, if there is one
 
-Thirteen of these twenty-one slices found a bug, falsified a claim the
+Fourteen of these twenty-two slices found a bug, falsified a claim the
 project had already written down, or both — and three of those were
 soundness bugs reachable from ordinary code. That is not an accident of luck: each
 slice is built by writing the thing the previous document said was
@@ -84,7 +85,7 @@ caught before the project did.
 
 | Next | Why it is next |
 |---|---|
-| A **second** port, with resources and depth | `porting.md` §6. `base64` was real but small: it owns almost nothing, its deepest call chain is three, and it never touches the heap. The three things a port was supposed to stress — linearity at scale, row plumbing at depth, `borrow mut`'s strictness — are still untested |
+| File handles | `porting.md` §9.1 put a program behind `filesystem.md` §3's own deferral. Reading a file of unknown size currently means reading it repeatedly — 1.2 MB is read six times — because `fs_read` cannot report truncation and there is nothing to hold open. §3 says a handle is "a milestone, not a paragraph", and it is the milestone a real program is now waiting on |
 | Effect polymorphism | A function generic over the *row* it performs. Named nowhere yet, and much larger than anything above |
 
 Ordinary work, blocked by nothing: `jo` instead of `seto`/`test`/`jne`

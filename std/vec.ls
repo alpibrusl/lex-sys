@@ -128,3 +128,32 @@ pub fn get[T: val, &v](v: &v Vec[T], i: int) -> [] T {
     let s = contents(v.held);
     return s[i];
 }
+
+// Write one element.
+//
+// A vector could be read and appended to but never *written* until a
+// program needed to sort one (`docs/porting.md` §9). The asymmetry was
+// not a decision: `push` and `get` were what the first caller wanted,
+// and nothing had asked for the third.
+//
+// The reference is unique because this writes through it, which is the
+// same rule `fs_read`'s `into` follows (`docs/filesystem.md` §3). The
+// index is bounds-checked like every other one.
+pub fn set[T: val, &v](v: &!v Vec[T], i: int, value: T) -> [] int {
+    let s = contents(v.held);
+    s[i] = value;
+    return i;
+}
+
+// Exchange two elements.
+//
+// Expressible with `get` and `set`, and here anyway because every sort
+// writes it and because `T` is `val`: the reads are copies, so there is
+// no moment where an element exists twice as an obligation.
+pub fn swap[T: val, &v](v: &!v Vec[T], i: int, j: int) -> [] int {
+    let s = contents(v.held);
+    let held = s[i];
+    s[i] = s[j];
+    s[j] = held;
+    return i;
+}

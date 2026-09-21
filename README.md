@@ -233,6 +233,12 @@ filesystem, the heap or foreign code.
 [`docs/porting.md`](docs/porting.md), including §6 on what one small port
 does not establish.
 
+`examples/sort/` is the answer to that §6: `LC_ALL=C sort`, five owned
+resources on the heap, checked against GNU `sort`. It found four missing
+library functions — a vector could be read and appended to but never
+written — and left `fs_read`'s inability to report truncation with a
+program waiting on it.
+
 ---
 
 ## Design commitments
