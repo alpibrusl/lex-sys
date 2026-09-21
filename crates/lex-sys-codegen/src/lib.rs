@@ -1776,6 +1776,13 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
                 let v = self.scalar(inner);
                 vec![self.builder.ins().bxor_imm(v, 1)]
             }
+            Expr::BitNot(inner) => {
+                // Every bit, which is the whole difference from `Not` above:
+                // that one knows its operand is 0 or 1 and this one does not
+                // (`docs/bitwise.md` §1).
+                let v = self.scalar(inner);
+                vec![self.builder.ins().bnot(v)]
+            }
             Expr::Bin { op, lhs, rhs } if op.is_short_circuit() => {
                 vec![self.short_circuit(*op, lhs, rhs)]
             }
@@ -2032,6 +2039,26 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
             // not, which is the difference the language exists to make (#1).
             BinOp::Div => return self.builder.ins().sdiv(a, b),
             BinOp::Rem => return self.builder.ins().srem(a, b),
+            // `docs/bitwise.md` §4: these cannot overflow, so unlike `+`
+            // above there is nothing to check.
+            BinOp::BitAnd => return self.builder.ins().band(a, b),
+            BinOp::BitOr => return self.builder.ins().bor(a, b),
+            BinOp::BitXor => return self.builder.ins().bxor(a, b),
+            // A shift amount outside `0..64` traps (§3). Cranelift's
+            // `ishl`/`sshr` *mask* the amount, which is the silently wrong
+            // answer §2.1 refuses -- so the check is explicit here, and it
+            // is one unsigned comparison because a negative amount is a
+            // huge unsigned one.
+            BinOp::Shl | BinOp::Shr => {
+                let out_of_range =
+                    self.builder.ins().icmp_imm(IntCC::UnsignedGreaterThanOrEqual, b, 64);
+                self.builder.ins().trapnz(out_of_range, TrapCode::INTEGER_OVERFLOW);
+                return match op {
+                    BinOp::Shl => self.builder.ins().ishl(a, b),
+                    // Arithmetic, because `int` is signed (§2).
+                    _ => self.builder.ins().sshr(a, b),
+                };
+            }
             BinOp::Eq => IntCC::Equal,
             BinOp::Ne => IntCC::NotEqual,
             BinOp::Lt => IntCC::SignedLessThan,

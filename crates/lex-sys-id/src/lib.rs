@@ -162,6 +162,7 @@ fn unary_tag(op: UnOp) -> u8 {
         // Appended, never inserted: a new tag takes the next number so that
         // every hash containing `-` or `!` stays where it was.
         UnOp::Deref => 0x03,
+        UnOp::BitNot => 0x04,
     }
 }
 
@@ -180,6 +181,13 @@ fn binary_tag(op: BinOp) -> u8 {
         BinOp::Ge => 0x0b,
         BinOp::And => 0x0c,
         BinOp::Or => 0x0d,
+        // `docs/bitwise.md` §6: appended, so no hash in the repository
+        // moved when the operator set grew.
+        BinOp::BitAnd => 0x0e,
+        BinOp::BitOr => 0x0f,
+        BinOp::BitXor => 0x10,
+        BinOp::Shl => 0x11,
+        BinOp::Shr => 0x12,
     }
 }
 

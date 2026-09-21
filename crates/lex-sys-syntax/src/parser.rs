@@ -926,6 +926,14 @@ impl<'a> Parser<'a> {
                 (TokenKind::Gt, BinOp::Gt),
                 (TokenKind::GtEq, BinOp::Ge),
             ],
+            // The bit operators bind *tighter* than comparison, which is
+            // Rust's ordering rather than C's: `flags & mask == 0` means
+            // `(flags & mask) == 0` here, and in C it does not
+            // (`docs/bitwise.md` §5).
+            &[(TokenKind::Pipe, BinOp::BitOr)],
+            &[(TokenKind::Caret, BinOp::BitXor)],
+            &[(TokenKind::Amp, BinOp::BitAnd)],
+            &[(TokenKind::LtLt, BinOp::Shl), (TokenKind::GtGt, BinOp::Shr)],
             &[(TokenKind::Plus, BinOp::Add), (TokenKind::Minus, BinOp::Sub)],
             &[
                 (TokenKind::Star, BinOp::Mul),
@@ -962,6 +970,12 @@ impl<'a> Parser<'a> {
             let operand = self.unary()?;
             let span = star.span.to(self.ast.expr_span(operand));
             return Ok(self.ast.push_expr(Expr::Unary { op: UnOp::Deref, operand }, span));
+        }
+        if self.peek().kind == TokenKind::Tilde {
+            let tilde = self.bump();
+            let operand = self.unary()?;
+            let span = tilde.span.to(self.ast.expr_span(operand));
+            return Ok(self.ast.push_expr(Expr::Unary { op: UnOp::BitNot, operand }, span));
         }
         if self.peek().kind == TokenKind::Minus {
             let minus = self.bump();
@@ -1226,7 +1240,14 @@ impl<'a> Parser<'a> {
 
     fn int_value(&self, tok: Token, negated: bool) -> Result<i64, Diagnostic> {
         let digits: String = self.text(tok).chars().filter(|c| *c != '_').collect();
-        let magnitude: u64 = digits.parse().map_err(|_| {
+        // A hexadecimal literal is a *spelling*, not a type: `0xff` and
+        // `255` are the same node, so `canonical-ast.md` §3 keeps the value
+        // and the two hash identically (`docs/bitwise.md` §1.1).
+        let magnitude: u64 = match digits.strip_prefix("0x") {
+            Some(hex) => u64::from_str_radix(hex, 16),
+            None => digits.parse(),
+        }
+        .map_err(|_| {
             Diagnostic::new("integer literal does not fit in `int` (64-bit signed)", tok.span)
         })?;
         let limit = if negated { 1u64 << 63 } else { i64::MAX as u64 };

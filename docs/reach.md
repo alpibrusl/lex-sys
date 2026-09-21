@@ -35,6 +35,15 @@ status line, the body and the declared length
 (`an_http_server_written_in_lex_sys_answers_a_real_request`), because a
 claim of this shape is worth exactly what it is tested with.
 
+> **And it was worth it.** The first version read the request with a
+> single `read` and routed whatever arrived — which is wrong, because one
+> `read` returns what has *arrived* rather than what was sent. On an idle
+> machine it passed thirty runs in a row; under load it answered 404 to a
+> request for `/health` about one run in six. Found while running the
+> suite under load for an unrelated reason, and fixed with `read_request`
+> (`docs/porting.md` §5). The socket is real, and so are the mistakes a
+> real socket lets you make.
+
 **Nothing was added to the language for it.** There is no socket type, no
 `Net` capability, no async runtime, no HTTP module in `std`. The program
 is 129 lines of code, of which eight are `extern fn` declarations against
@@ -305,6 +314,7 @@ checked.
 
 | Question | Why it waits |
 |---|---|
+| A port with resources and depth | `porting.md` §6. `base64` was the first program here that already existed, and it answered this document's §1 from the other side — but it exercised no linearity, no heap and a call graph three deep, so what it shows about *reach* is narrower than it looks |
 | Sockets as builtins under `Net(host)` | §5.1. The right shape and a large one: it means taking a domain out of libc and mediating it here, the way `filesystem.md` §2 did for files. The argument turns on whether a host is worth narrowing to, not on the row being finer |
 | A checked foreign signature | §3.2. A declaration is trusted against the C header. A generator reading real headers would check it; writing one by hand would not |
 | `float` | §2's last row. No design question that is known — it is arithmetic, a Cranelift type and a literal syntax — and it would let `std.math` mean what the name suggests |

@@ -78,6 +78,15 @@ pub enum TokenKind {
     AmpAmp,
     Amp,
     PipePipe,
+    /// `|`, `^`, `~`, `<<` and `>>` — the bit operators (`docs/bitwise.md`).
+    ///
+    /// `&` needs no token of its own: `Amp` above already exists for the
+    /// reference constructor, and §5.1 is why the two cannot be confused.
+    Pipe,
+    Caret,
+    Tilde,
+    LtLt,
+    GtGt,
     Eof,
 }
 
@@ -144,6 +153,11 @@ impl TokenKind {
             TokenKind::Amp => "`&`",
             TokenKind::Str => "a string literal",
             TokenKind::PipePipe => "`||`",
+            TokenKind::Pipe => "`|`",
+            TokenKind::Caret => "`^`",
+            TokenKind::Tilde => "`~`",
+            TokenKind::LtLt => "`<<`",
+            TokenKind::GtGt => "`>>`",
             TokenKind::Eof => "end of file",
         }
     }
@@ -227,7 +241,24 @@ pub fn tokenize(text: &str) -> Result<Vec<Token>, Diagnostic> {
         }
 
         if b.is_ascii_digit() {
-            while i < bytes.len() && (bytes[i].is_ascii_digit() || bytes[i] == b'_') {
+            // `0x` is the one prefix. Base two and base eight were left out
+            // deliberately: a mask is written in hex by everyone who writes
+            // masks, and `0o`'s only customer is a Unix file mode, which
+            // this language cannot yet set (`docs/bitwise.md` §1.1).
+            let hex = b == b'0' && matches!(bytes.get(i + 1), Some(b'x'));
+            if hex {
+                i += 2;
+                if !bytes.get(i).is_some_and(|c| c.is_ascii_hexdigit()) {
+                    return Err(Diagnostic::new(
+                        "`0x` needs at least one hexadecimal digit",
+                        Span::new(start as u32, i as u32),
+                    ));
+                }
+            }
+            while i < bytes.len()
+                && ((if hex { bytes[i].is_ascii_hexdigit() } else { bytes[i].is_ascii_digit() })
+                    || bytes[i] == b'_')
+            {
                 i += 1;
             }
             // A literal may not run straight into a name: `1x` is a typo, not `1 x`.
@@ -264,6 +295,10 @@ pub fn tokenize(text: &str) -> Result<Vec<Token>, Diagnostic> {
             (b'!', Some(b'=')) => two(TokenKind::BangEq),
             (b'<', Some(b'=')) => two(TokenKind::LtEq),
             (b'>', Some(b'=')) => two(TokenKind::GtEq),
+            // Generic arguments are written in brackets, so `>>` is never
+            // the end of two type argument lists (`docs/bitwise.md` §5.1).
+            (b'<', Some(b'<')) => two(TokenKind::LtLt),
+            (b'>', Some(b'>')) => two(TokenKind::GtGt),
             (b'(', _) => one(TokenKind::LParen),
             (b')', _) => one(TokenKind::RParen),
             (b'{', _) => one(TokenKind::LBrace),
@@ -283,6 +318,9 @@ pub fn tokenize(text: &str) -> Result<Vec<Token>, Diagnostic> {
             (b'/', _) => one(TokenKind::Slash),
             (b'%', _) => one(TokenKind::Percent),
             (b'!', _) => one(TokenKind::Bang),
+            (b'|', _) => one(TokenKind::Pipe),
+            (b'^', _) => one(TokenKind::Caret),
+            (b'~', _) => one(TokenKind::Tilde),
             // A lone `&` is a reference (§5); `&&` was already taken above,
             // so `&!r` lexes as three tokens and needs no special case.
             (b'&', _) => one(TokenKind::Amp),
@@ -416,8 +454,13 @@ mod tests {
 
     #[test]
     fn unknown_characters_are_refused() {
-        let err = tokenize("a ^ b").unwrap_err();
-        assert!(err.message.contains('^'), "{}", err.message);
+        // `@` rather than `^`: this test used `^` until `docs/bitwise.md`
+        // gave `^` a meaning, at which point it started testing nothing.
+        // A test whose subject is "this is not a token" has a shelf life,
+        // and `@` has no pending design that wants it
+        // (`docs/porting.md` §5).
+        let err = tokenize("a @ b").unwrap_err();
+        assert!(err.message.contains('@'), "{}", err.message);
     }
 
     #[test]

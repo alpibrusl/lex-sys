@@ -536,6 +536,7 @@ impl Printer<'_> {
                     UnOp::Neg => "-",
                     UnOp::Not => "!",
                     UnOp::Deref => "*",
+                    UnOp::BitNot => "~",
                 };
                 // `-` immediately before an integer *token* is one literal,
                 // not a negation of one -- that is how
@@ -577,8 +578,13 @@ fn binding_power(op: BinOp) -> u8 {
         BinOp::And => 2,
         BinOp::Eq | BinOp::Ne => 3,
         BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => 4,
-        BinOp::Add | BinOp::Sub => 5,
-        BinOp::Mul | BinOp::Div | BinOp::Rem => 6,
+        // `docs/bitwise.md` §5: tighter than comparison, looser than `+`.
+        BinOp::BitOr => 5,
+        BinOp::BitXor => 6,
+        BinOp::BitAnd => 7,
+        BinOp::Shl | BinOp::Shr => 8,
+        BinOp::Add | BinOp::Sub => 9,
+        BinOp::Mul | BinOp::Div | BinOp::Rem => 10,
     }
 }
 
@@ -597,6 +603,11 @@ fn operator(op: BinOp) -> &'static str {
         BinOp::Mul => "*",
         BinOp::Div => "/",
         BinOp::Rem => "%",
+        BinOp::BitAnd => "&",
+        BinOp::BitOr => "|",
+        BinOp::BitXor => "^",
+        BinOp::Shl => "<<",
+        BinOp::Shr => ">>",
     }
 }
 

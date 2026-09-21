@@ -51,12 +51,13 @@ reasoning — this table is the index, not the argument.
 | [#40](https://github.com/alpibrusl/lex-sys/pull/40) | [`[budget]`](budget.md) | Answered **no**, from the units: a budget is wall-clock seconds, commands and **cents**, none of which is a property of a program's text. `lex-os` already charges it, at the boundary that can stop you. What was wanted was legibility, so the authority report grew `--output json` |
 | [#41](https://github.com/alpibrusl/lex-sys/pull/41) | [What a program can reach](reach.md) | Answered by building it: a **REST endpoint over a real TCP socket**, with no socket type, no `Net` capability and no library — because sockets are libc and libc has a name. The no's are one sentence: a foreign *result* is a scalar, so every opaque handle (TLS, libpq, `FILE *`) is out. And the row cannot say `net`, because a library is not an authority domain |
 | [#42](https://github.com/alpibrusl/lex-sys/pull/42) | [What the overflow trap costs](overflow-cost.md) | The README's *"low single-digit percent"* had never been measured. Measured: +2.8% call-bound, +3.6% memory-bound, **−9.1%** branch-bound, **+40.5%** arithmetic-bound — so not a percentage but a rule. And the stated reason was wrong: not the never-taken branch, but that **a trap is observable, so the loop cannot vectorise** — clang pays 46% and gcc 74% for the same guarantee. Both documents corrected in place |
+| [#43](https://github.com/alpibrusl/lex-sys/pull/43) | [Bits](bitwise.md), and [a port](porting.md) | The first program here that **already existed**: coreutils `base64`, byte-for-byte on both directions. It needed the bit operators and hex literals and *nothing else* — no capability, no library, no change to linearity or rows. And running the suite under load for an unrelated reason found a real bug in `examples/serve/`: one `read` returns what arrived, not what was sent |
 
 ### The pattern, if there is one
 
-Twelve of these twenty slices found a bug, falsified a claim the project
-had already written down, or both — and three of those were soundness
-bugs reachable from ordinary code. That is not an accident of luck: each
+Thirteen of these twenty-one slices found a bug, falsified a claim the
+project had already written down, or both — and three of those were
+soundness bugs reachable from ordinary code. That is not an accident of luck: each
 slice is built by writing the thing the previous document said was
 possible, and the documents keep being wrong in the same direction —
 optimistic about what generality the type system already had.
@@ -83,7 +84,7 @@ caught before the project did.
 
 | Next | Why it is next |
 |---|---|
-| Port a real C program | `reach.md` §6 and `overflow-cost.md` §4 both want the same thing for different reasons: a program that already existed, with its own opinions, so the effect rows and the arithmetic cost are reported *in anger* rather than from code written to make a point |
+| A **second** port, with resources and depth | `porting.md` §6. `base64` was real but small: it owns almost nothing, its deepest call chain is three, and it never touches the heap. The three things a port was supposed to stress — linearity at scale, row plumbing at depth, `borrow mut`'s strictness — are still untested |
 | Effect polymorphism | A function generic over the *row* it performs. Named nowhere yet, and much larger than anything above |
 
 Ordinary work, blocked by nothing: `jo` instead of `seto`/`test`/`jne`
