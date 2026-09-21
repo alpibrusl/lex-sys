@@ -1,6 +1,7 @@
 # UTF-8
 
-> **Status: designed, not built.**
+> **Status: settled and built.** `std/utf8.ls` implements §3; the rules
+> below were written first and none of them moved on contact.
 >
 > `strings.md` §8 files UTF-8 decoding as *"library work over `[byte]`,
 > in lex-sys, once there is enough language to write it."* There is. Two
@@ -45,6 +46,12 @@ That compiles and runs. `Vec[T: val]` accepts a reference because a
 shared reference is `val`, and `&t` binds the substrings to the text
 they came from, so none of them can outlive it. No new machinery, and
 the escape check does the work it already did for slices.
+
+**And a non-ASCII literal needs no escape.** `strings.md` §8 declines
+`\x` and `\u` as claims the design will not make, which sounds like a
+cost until you write one: a string is bytes and a source file is
+already UTF-8, so `"café 日 😀"` is fourteen bytes and eight code points
+with nothing to escape. The fixture is written that way on purpose.
 
 So: **the rest of a string library — `split`, `trim`, `join`, ordering,
 case folding — is code, not design.** It needs writing, it does not need
@@ -158,6 +165,14 @@ fixtures — one error for `e2 82`, two for `c0 80`, three for
 `ed a0 80`, four for `f5 80 80 80`. That column is the target, and the
 rule hits it.
 
+And over inputs nobody chose. `utf8_decoding_agrees_with_an_oracle`
+runs 2,000 generated cases — well-formed text at every width, raw
+noise, valid text with bytes corrupted, valid text cut short — against
+**Rust's own** `from_utf8_lossy` and `str::from_utf8`, which implement
+exactly §3.2's rule and §3.1's validity. Both columns agree on every
+case. Widening one range so surrogates are accepted makes it fail and
+name the bytes, so the test is a falsifier rather than a formality.
+
 ---
 
 ## 4. What it does not do
@@ -182,4 +197,5 @@ a program asks. None has asked.
 | Encoding — code point back to bytes | The mirror of §3 and genuinely easier: there is no invalid code point once §3.1 has refused the ones that are not scalar values. Left out so the two are not designed together, for `bulk-io.md` §3.3's reason |
 | Grapheme clusters | §4. A real table and a real specification, and nothing in this repo has needed one |
 | Whether `wordcount.ls` grows a `-m` | It is the obvious first consumer and the obvious first mistake: §2 says it must not be checked against `wc -m`, so it would need the fixture and the oracle this document used instead |
+| The rest of the library | §1: `split`, `trim`, `join`, ordering, case. Code with nothing left to decide, and `std/bytes.ls` is 125 lines today |
 | Ordering beyond byte order | `sort.ls` is `LC_ALL=C` on purpose and locale is excluded (`ROADMAP.md`). Code-point order and byte order **agree** for UTF-8 — verified over 4,006 scalar values, the boundary ones and random — so `bytes.compare` sorts text correctly without decoding it at all, and the decoder is not on the path a sort takes. Worth a fixture when there is a comparison to put one on |
