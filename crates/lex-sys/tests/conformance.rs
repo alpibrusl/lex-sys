@@ -3591,3 +3591,79 @@ fn main(world: World) -> [] int {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `docs/benchmarks-game.md` §2 — every ported program prints the answer
+/// the Benchmarks Game publishes.
+///
+/// The published value is the point. Two programs I wrote agreeing with
+/// each other proves only that I made the same mistake twice; agreeing
+/// with a number someone else published is evidence. Each is run at the
+/// size the Game states an answer for, which is small enough to be a
+/// test rather than a benchmark — `scripts/game.py` runs the same
+/// binaries at the sizes that take seconds.
+#[test]
+fn benchmark_game_programs_print_the_published_answer() {
+    let root = repo_root().join("benches").join("game");
+    let cases: [(&str, &str, &str); 3] = [
+        ("fannkuch", "7", "228\nPfannkuchen(7) = 16\n"),
+        ("spectral", "100", "1.274219991\n"),
+        (
+            "binarytrees",
+            "10",
+            "stretch tree of depth 11\t check: 4095\n\
+             1024\t trees of depth 4\t check: 31744\n\
+             256\t trees of depth 6\t check: 32512\n\
+             64\t trees of depth 8\t check: 32704\n\
+             16\t trees of depth 10\t check: 32752\n\
+             long lived tree of depth 10\t check: 2047\n",
+        ),
+    ];
+
+    let dir = scratch("benchmark-game");
+    for (name, size, expected) in cases {
+        let exe = dir.join(name);
+        let build = Command::new(BIN)
+            .args([
+                "build".as_ref(),
+                "--std".as_ref(),
+                root.join(format!("{name}.ls")).as_os_str(),
+                "-o".as_ref(),
+                exe.as_os_str(),
+            ])
+            .output()
+            .expect("the compiler runs");
+        assert!(
+            build.status.success(),
+            "`{name}` should compile:\n{}",
+            String::from_utf8_lossy(&build.stderr)
+        );
+        let run = Command::new(&exe).arg(size).output().expect("the program runs");
+        assert_eq!(run.status.code(), Some(0), "`{name}` should exit 0");
+        assert_eq!(
+            String::from_utf8_lossy(&run.stdout),
+            expected,
+            "`{name}` at N={size} should print what the Benchmarks Game publishes"
+        );
+
+        // And the C counterpart, which is only a fair comparison if it
+        // computes the same thing (§2's rule).
+        let c_exe = dir.join(format!("{name}_c"));
+        let cc = Command::new("cc")
+            .args([
+                "-O2".as_ref(),
+                root.join(format!("{name}.c")).as_os_str(),
+                "-o".as_ref(),
+                c_exe.as_os_str(),
+            ])
+            .output()
+            .expect("a C compiler");
+        assert!(cc.status.success(), "{}", String::from_utf8_lossy(&cc.stderr));
+        let c_run = Command::new(&c_exe).arg(size).output().expect("the C program runs");
+        assert_eq!(
+            String::from_utf8_lossy(&c_run.stdout),
+            expected,
+            "`{name}.c` must compute the same thing, or the timing means nothing"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

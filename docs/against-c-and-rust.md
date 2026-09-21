@@ -1,6 +1,6 @@
 # Against C and Rust
 
-> **Status: measured, and the answer is 1.6×.**
+> **Status: measured. The answer was 1.6× and is now a range.**
 >
 > `docs/overflow-cost.md` §4 named this as a measurement the repository
 > owed and had not made: *"It does not say the language is 40% slower
@@ -10,6 +10,15 @@
 > It is made now. The headline is that **at equal semantics lex-sys is
 > about 1.6× C and Rust**, that Rust and C are within 4% of each other,
 > and that the gap is therefore a backend gap rather than a language one.
+>
+> **Corrected by breadth, not by error.** `benchmarks-game.md` added
+> three more programs and the gap ranges from **1.17× to 2.58×** across
+> five. The two kernels here are inside that range and neither number
+> below has changed; what was wrong was quoting their midpoint as though
+> it were a constant. The range tracks *how much of the run is in code
+> Cranelift generated* — 1.17× where the program is mostly inside
+> `malloc`, 2.58× in a tight float loop — which is the same conclusion
+> this document reaches, with a shape instead of a point.
 
 ---
 
@@ -71,7 +80,9 @@ All three compute 6057.
 
 ## 3. What the numbers say
 
-**1.6×, on both kernels, is the number to quote.** Not 1.0, and not the
+**1.6×, on both kernels, is the number to quote** — for these two
+kernels. `benchmarks-game.md` §4 is why that sentence needed the
+qualifier it did not have. Not 1.0, and not the
 40% figure from `overflow-cost.md` — that one measured trapping against
 wrapping *within* lex-sys, which is a different question and is why this
 document exists.
