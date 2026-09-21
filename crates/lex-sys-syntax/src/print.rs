@@ -25,7 +25,7 @@ use std::fmt::Write as _;
 
 use crate::ast::{
     Ast, BinOp, Block, EffectLabel, EnumDecl, Expr, ExprId, ExternDecl, FnDecl, Item, ItemId, Mode,
-    Module, Param, Pattern, Stmt, StmtId, StructDecl, Symbol, TypeExpr, TypeId, UnOp,
+    Module, Param, Pattern, StaticDecl, Stmt, StmtId, StructDecl, Symbol, TypeExpr, TypeId, UnOp,
 };
 
 /// Render a whole unit.
@@ -124,7 +124,27 @@ impl Printer<'_> {
             Item::Extern(decl) => self.extern_decl(decl),
             Item::Struct(decl) => self.struct_decl(decl),
             Item::Enum(decl) => self.enum_decl(decl),
+            Item::Static(decl) => self.static_decl(decl),
         }
+    }
+
+    /// `static name: [int] { .. }` (`docs/compile-time-data.md` §2).
+    ///
+    /// A body, printed exactly as a function's is, because that is what it
+    /// is — there is no effect row and no parameter list to print, which
+    /// is the whole of the difference.
+    fn static_decl(&mut self, decl: &StaticDecl) {
+        let header = format!(
+            "{}static {}: {} {{",
+            visibility(decl.public),
+            self.name(decl.name),
+            self.ty(decl.ty),
+        );
+        self.line(&header);
+        self.depth += 1;
+        self.block_body(&decl.body);
+        self.depth -= 1;
+        self.line("}");
     }
 
     fn fn_decl(&mut self, decl: &FnDecl) {

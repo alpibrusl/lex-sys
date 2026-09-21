@@ -20,7 +20,7 @@ use std::collections::HashMap;
 
 use lex_sys_syntax::ast::{
     Ast, BinOp, Block, EffectLabel, EnumDecl, Expr, ExprId, ExternDecl, FnDecl, Item, ItemId, Mode,
-    Stmt, StmtId, StructDecl, Symbol, TypeExpr, TypeId, UnOp,
+    StaticDecl, Stmt, StmtId, StructDecl, Symbol, TypeExpr, TypeId, UnOp,
 };
 
 /// A 32-byte content hash.
@@ -371,9 +371,46 @@ pub fn identify(ast: &Ast) -> Identities {
                 name: ast.name_of(decl.name).to_owned(),
                 id: type_ids[&(module, decl.name)],
             }),
+            // `docs/compile-time-data.md` §2. A `static` is a body with no
+            // parameters, so it hashes like one whose parameter list is
+            // empty: its two identities are its referent type and its
+            // body, and a program that changes the loop changes the second
+            // without changing the first.
+            Item::Static(decl) => identities.functions.push(FunctionId {
+                name: ast.name_of(decl.name).to_owned(),
+                sig: hash_static_type(ast, decl, module, &type_ids),
+                body: hash_static_body(ast, decl, module, &sig_ids, &type_ids),
+            }),
         }
     }
     identities
+}
+
+fn hash_static_type(ast: &Ast, decl: &StaticDecl, module: u32, type_ids: &Names) -> Hash {
+    let mut encoder = Encoder::default();
+    encode_type(ast, &mut encoder, decl.ty, module, type_ids, &[], &[]);
+    encoder.finish(DOMAIN_SIG)
+}
+
+fn hash_static_body(
+    ast: &Ast,
+    decl: &StaticDecl,
+    module: u32,
+    sig_ids: &Names,
+    type_ids: &Names,
+) -> Hash {
+    let mut hasher = BodyHasher {
+        ast,
+        module,
+        sig_ids,
+        type_ids,
+        generics: Vec::new(),
+        scope: Scope { binders: Vec::new() },
+        regions: Vec::new(),
+        encoder: Encoder::default(),
+    };
+    hasher.block(&decl.body);
+    hasher.encoder.finish(DOMAIN_BODY)
 }
 
 /// Declared names, keyed by the module that declares them

@@ -70,6 +70,14 @@ pub const FFI_ROOT: &str = "";
 /// than any frame.
 pub const STATIC_REGION: &str = "static";
 
+/// The arena number a `static` item's own allocations carry.
+///
+/// Not a block, because a `static` has no `region` statement and no
+/// backend ever sees one: the body is evaluated during compilation and
+/// its answer becomes data (`docs/compile-time-data.md` §3). The sentinel
+/// exists so `alloc_slice`'s one code path serves both.
+const STATIC_ARENA: u32 = u32::MAX;
+
 /// An effect row: a canonically ordered set of labels
 /// (`docs/linearity-and-effects.md` §7.1).
 ///
@@ -872,6 +880,14 @@ pub enum Expr {
         callee: Callee,
         args: Vec<Expr>,
     },
+    /// A `static`'s data, by index into [`Program::statics`]
+    /// (`docs/compile-time-data.md` §2).
+    ///
+    /// The same two leaves a string literal is — a pointer into read-only
+    /// data and a length — because that is what it is. The difference is
+    /// only in where the bytes came from: a literal's were written, and
+    /// these were computed.
+    Static(u32),
 }
 
 /// Where a value is written.
@@ -1059,9 +1075,29 @@ impl TypeInfo {
     }
 }
 
+/// A `static`'s evaluated contents (`docs/compile-time-data.md` §2).
+///
+/// Scalars rather than bytes, so the backend lays them out with the same
+/// `stride` it uses for every other slice of this element type — which is
+/// how a `[byte]` static comes out one byte per element and an `[int]`
+/// one comes out eight, without this crate knowing either number.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct StaticValue {
+    pub name: String,
+    pub element: Type,
+    /// One entry per element. A `float` is its bits, which is the same
+    /// thing `Expr::Float` holds and for the same reason (`f64` is not
+    /// `Eq`).
+    pub values: Vec<i64>,
+}
+
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct Program {
     pub funcs: Vec<Func>,
+    /// Every `static`, in declaration order. A `static` may read one
+    /// declared before it and not one declared after, which is the
+    /// cheapest rule that has no cycles in it.
+    pub statics: Vec<StaticValue>,
     /// How many calls were evaluated at compile time
     /// (`docs/compile-time.md` §3), across the whole program, and how
     /// many operators the call pass exposed on top of the ones lowering
@@ -1732,7 +1768,7 @@ fn collect_types(ast: &Ast, unifier: &mut Unifier) -> Result<Vec<TypeDef>, Diagn
                 decl.mode,
                 decl.public,
             ),
-            Item::Fn(_) | Item::Extern(_) => continue,
+            Item::Fn(_) | Item::Extern(_) | Item::Static(_) => continue,
         };
         let item_id = ast::ItemId(index as u32);
         let module = ast.module_of(item_id);
@@ -1856,7 +1892,7 @@ fn collect_types(ast: &Ast, unifier: &mut Unifier) -> Result<Vec<TypeDef>, Diagn
                 }
                 defs[position].kind = DefKind::Enum(variants);
             }
-            Item::Fn(_) | Item::Extern(_) => {}
+            Item::Fn(_) | Item::Extern(_) | Item::Static(_) => {}
         }
     }
 
@@ -2085,6 +2121,56 @@ pub fn lower(ast: &Ast) -> Result<Program, Diagnostic> {
         });
     }
 
+    // `docs/compile-time-data.md` §2. Collected before any body is
+    // lowered, because a function may read a `static` declared below it —
+    // the same reason signatures are collected before bodies.
+    let mut statics: Vec<StaticDef> = Vec::new();
+    let mut static_items: Vec<usize> = Vec::new();
+    for (index, item) in ast.items.iter().enumerate() {
+        let Item::Static(decl) = item else { continue };
+        let item_id = ast::ItemId(index as u32);
+        let module = ast.module_of(item_id);
+        let span = ast.item_span(item_id);
+        let name = ast.name_of(decl.name);
+        if statics.iter().any(|d| d.name == decl.name && d.module == module) {
+            return Err(Diagnostic::new(format!("`static {name}` is declared twice"), span));
+        }
+        // The *referent*, so a bare `[int]` is what is written: a
+        // `static` names what the data is, and the `&static` in front of
+        // it is what every reader gets rather than what the author types
+        // (`docs/compile-time-data.md` §2).
+        let referent = resolve_type_at(
+            Resolving { ast, defs: &defs, unifier: &unifier, module },
+            Params { names: &[], bounds: &[] },
+            &[],
+            decl.ty,
+            true,
+        )?;
+        // §2 and §6: the item is for *data*, and the evaluator's store
+        // holds a run of scalars. A scalar `static` is what §3 of
+        // `compile-time.md` already folds, so it would be a second way to
+        // say one thing.
+        let Type::Slice(element) = &referent else {
+            return Err(Diagnostic::new(
+                format!(
+                    "`static {name}` must be a slice — `[int]`, `[byte]`, `[bool]` or `[float]`; a `static` is for data, and a scalar constant is already folded where it is written (`docs/compile-time.md` §3)"
+                ),
+                span,
+            ));
+        };
+        if !matches!(**element, Type::Int | Type::Byte | Type::Bool | Type::Float) {
+            return Err(Diagnostic::new(
+                format!(
+                    "`static {name}` holds `{}`, and a `static` holds scalars: `int`, `byte`, `bool` or `float` (`docs/compile-time-data.md` §6)",
+                    unifier.display(element)
+                ),
+                span,
+            ));
+        }
+        static_items.push(index);
+        statics.push(StaticDef { name: decl.name, module, referent });
+    }
+
     let mut signatures: Vec<Signature> = Vec::new();
     for (index, item) in ast.items.iter().enumerate() {
         let Item::Fn(decl) = item else { continue };
@@ -2214,6 +2300,7 @@ pub fn lower(ast: &Ast) -> Result<Program, Diagnostic> {
             ast,
             &defs,
             &signatures,
+            &statics,
             &externs,
             &mut unifier,
             index,
@@ -2252,6 +2339,26 @@ pub fn lower(ast: &Ast) -> Result<Program, Diagnostic> {
         }
     }
 
+    // `docs/compile-time-data.md` §2. Lowered *before* the worklist is
+    // drained, because a `static` body calls functions and those calls
+    // request instances: a function only a `static` reaches is a root of
+    // the program exactly as `main`'s callees are, and draining first
+    // would leave it unlowered.
+    let mut static_bodies: Vec<Func> = Vec::new();
+    for (index, item) in static_items.iter().enumerate() {
+        static_bodies.push(lower_static(
+            ast,
+            &defs,
+            &signatures,
+            &statics,
+            &externs,
+            &mut unifier,
+            index as u32,
+            *item,
+            &mut mono,
+        )?);
+    }
+
     let mut funcs: Vec<Option<Func>> = Vec::new();
     while let Some(instance) = mono.pending.pop() {
         let (signature, args) =
@@ -2260,6 +2367,7 @@ pub fn lower(ast: &Ast) -> Result<Program, Diagnostic> {
             ast,
             &defs,
             &signatures,
+            &statics,
             &externs,
             &mut unifier,
             signature,
@@ -2274,9 +2382,10 @@ pub fn lower(ast: &Ast) -> Result<Program, Diagnostic> {
 
     let mut program = Program {
         funcs: funcs.into_iter().map(|f| f.expect("every requested instance is lowered")).collect(),
+        statics: Vec::new(),
         folded_calls: 0,
         folded_late: 0,
-        externs,
+        externs: externs.clone(),
         types: defs
             .iter()
             .map(|d| match &d.kind {
@@ -2305,6 +2414,31 @@ pub fn lower(ast: &Ast) -> Result<Program, Diagnostic> {
     let tally = fold::evaluate_calls(&mut program);
     program.folded_calls = tally.calls;
     program.folded_late = tally.operators;
+
+    // `docs/compile-time-data.md` §3. Last, because a `static` body may
+    // call any pure function in the program and those have to be lowered
+    // and folded first — and in declaration order, because a `static` may
+    // read one declared before it.
+    //
+    // The bodies themselves were lowered before the worklist was drained,
+    // above; this is only the running of them.
+    let mut evaluated: Vec<Vec<i64>> = Vec::new();
+    for (index, def) in statics.iter().enumerate() {
+        let item = static_items[index];
+        let body = &static_bodies[index];
+        let name = ast.name_of(def.name).to_owned();
+        let values = fold::evaluate_static(&program, body, &evaluated).map_err(|why| {
+            Diagnostic::new(
+                format!("`static {name}` cannot be evaluated: {why}"),
+                ast.item_span(ast::ItemId(item as u32)),
+            )
+        })?;
+        let Type::Slice(element) = &def.referent else {
+            unreachable!("a static's referent is checked to be a slice when it is collected");
+        };
+        evaluated.push(values.clone());
+        program.statics.push(StaticValue { name, element: (**element).clone(), values });
+    }
     Ok(program)
 }
 
@@ -2365,7 +2499,7 @@ fn settle_types(stmts: &mut [Stmt], unifier: &Unifier) {
 
 fn settle_expr(expr: &mut Expr, unifier: &Unifier) {
     match expr {
-        Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Load(_) => {}
+        Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Load(_) | Expr::Static(_) => {}
         Expr::Neg(inner) | Expr::Not(inner) | Expr::BitNot(inner) => settle_expr(inner, unifier),
         Expr::Bin { lhs, rhs, .. } => {
             settle_expr(lhs, unifier);
@@ -2462,12 +2596,123 @@ fn settle_expr(expr: &mut Expr, unifier: &Unifier) {
     }
 }
 
+/// Check and lower one `static` item's body (`docs/compile-time-data.md` §2).
+///
+/// A function with no parameters, no generics, no region parameters and a
+/// return type of `&static [T]` — so almost everything `lower_function`
+/// does has nothing to configure, and what is left is the same body
+/// checker, the same linearity trace and the same escape check. A
+/// `static` gets no special treatment from any of them, which is the
+/// point: `let`, `var`, `while` and `return` mean here what they mean
+/// everywhere.
+#[allow(clippy::too_many_arguments)]
+fn lower_static(
+    ast: &Ast,
+    defs: &[TypeDef],
+    signatures: &[Signature],
+    statics: &[StaticDef],
+    externs: &[ExternFn],
+    unifier: &mut Unifier,
+    index: u32,
+    item: usize,
+    mono: &mut Mono,
+) -> Result<Func, Diagnostic> {
+    let Item::Static(decl) = &ast.items[item] else {
+        unreachable!("a static def always names a static item");
+    };
+    let module = ast.module_of(ast::ItemId(item as u32));
+    let referent = statics[index as usize].referent.clone();
+    let ret = Type::Ref { unique: false, region: Region::Static, inner: Box::new(referent) };
+
+    unifier.set_param_names(Vec::new());
+    unifier.set_region_param_names(Vec::new());
+    unifier.set_region_block_names(Vec::new());
+
+    let mut f = FnLowering {
+        ast,
+        signatures,
+        statics,
+        lowering_static: Some(index),
+        externs,
+        defs,
+        unifier,
+        mono,
+        generic_names: Vec::new(),
+        generics: Vec::new(),
+        scopes: vec![Vec::new()],
+        slots: Vec::new(),
+        performed: Effects::pure(),
+        folded: 0,
+        region_params: Vec::new(),
+        region_outlives: Vec::new(),
+        blocks: Vec::new(),
+        open_blocks: Vec::new(),
+        defers: Vec::new(),
+        arenas: Vec::new(),
+        slot_scope: Vec::new(),
+        slot_origin: Vec::new(),
+        ret: ret.clone(),
+        trace: Trace::new(),
+        module,
+        bounds: Vec::new(),
+    };
+
+    let mut body = f.block(&decl.body)?;
+    let mut slots = f.slots.clone();
+    let escapes = f.escaped_slot();
+    let performed = f.performed.clone();
+    let folded = f.folded;
+    let trace = f.trace.finish();
+
+    if let Some((name, region, span)) = escapes {
+        return Err(Diagnostic::new(
+            format!(
+                "`{name}` would hold a reference into `{region}`, which is a `borrow` block it outlives"
+            ),
+            span,
+        ));
+    }
+
+    // A `static` has no capability to perform anything with — it has no
+    // parameters — so this can only fire if the language grows an effect
+    // that needs none. Checked rather than assumed, because that is what
+    // §7.3 of `linearity-and-effects.md` asks of every row.
+    if let Some(label) = performed.labels().first() {
+        return Err(Diagnostic::new(
+            format!(
+                "`static {}` performs `{}`, and a `static` runs during compilation where there is nothing to perform it on",
+                ast.name_of(decl.name),
+                label.name
+            ),
+            ast.item_span(ast::ItemId(item as u32)),
+        ));
+    }
+
+    settle_types(&mut body, unifier);
+    for slot in slots.iter_mut() {
+        *slot = unifier.resolve(slot);
+    }
+    linear::check(defs, unifier, &[], &slots, &trace)?;
+
+    Ok(Func {
+        name: ast.name_of(decl.name).to_owned(),
+        effects: Effects::pure(),
+        performs: Effects::pure(),
+        n_params: 0,
+        slots,
+        ret,
+        body,
+        folded,
+    })
+}
+
 /// Check and lower one function at one instantiation.
 #[allow(clippy::too_many_arguments)]
 fn lower_function(
     ast: &Ast,
     defs: &[TypeDef],
     signatures: &[Signature],
+    statics: &[StaticDef],
     externs: &[ExternFn],
     unifier: &mut Unifier,
     index: usize,
@@ -2501,6 +2746,8 @@ fn lower_function(
     let mut f = FnLowering {
         ast,
         signatures,
+        statics,
+        lowering_static: None,
         externs,
         defs,
         unifier,
@@ -3032,6 +3279,16 @@ fn resolve_type_at(
     Ok(ty)
 }
 
+/// A `static` as the checker knows it, before evaluation
+/// (`docs/compile-time-data.md` §2).
+#[derive(Clone)]
+struct StaticDef {
+    name: Symbol,
+    module: u32,
+    /// The referent: `[int]` in `static t: [int] { .. }`.
+    referent: Type,
+}
+
 /// One `borrow` block, and the block it sits inside.
 ///
 /// The parent link is all §5.2 needs: "`r_inner <= r_outer` holds exactly
@@ -3052,6 +3309,14 @@ struct Binding {
 struct FnLowering<'a> {
     ast: &'a Ast,
     signatures: &'a [Signature],
+    /// Every `static` in the program, in declaration order, so a name that
+    /// is not a local can resolve to one (`docs/compile-time-data.md` §2).
+    statics: &'a [StaticDef],
+    /// Which `static` this body *is*, if it is one. `alloc_slice[static]`
+    /// is legal exactly here and nowhere else (§2.1), and a `static` may
+    /// read one declared before it and not one declared after — which is
+    /// the cheapest rule with no cycles in it.
+    lowering_static: Option<u32>,
     externs: &'a [ExternFn],
     defs: &'a [TypeDef],
     unifier: &'a mut Unifier,
@@ -3179,6 +3444,14 @@ impl<'a> FnLowering<'a> {
             )),
             fold::Folded::Unknown => Ok(fallback),
         }
+    }
+
+    /// Which `static` a name refers to, if any. Scoped to the module that
+    /// declares it, like every other name (`docs/modules.md` §3).
+    fn static_index(&self, name: Symbol) -> Option<u32> {
+        let module = self.ast.module_of(ast::ItemId(0));
+        let _ = module;
+        self.statics.iter().position(|s| s.name == name).map(|i| i as u32)
     }
 
     fn target_module(&self, qualifier: Option<Symbol>, span: Span) -> Result<u32, Diagnostic> {
@@ -4692,14 +4965,22 @@ impl<'a> FnLowering<'a> {
         }
 
         let slice = Type::Slice(Box::new(element.clone()));
+        // The compile-time arena is not a block and has no number the
+        // backend will ever ask for: a `static` body is evaluated, never
+        // emitted (`docs/compile-time-data.md` §3).
+        let (arena, region) = if id == STATIC_ARENA {
+            (STATIC_ARENA, Region::Static)
+        } else {
+            (self.arena_of(id), Region::Block(id))
+        };
         Ok((
             Expr::AllocSlice {
-                arena: self.arena_of(id),
+                arena,
                 element,
                 count: Box::new(count_expr),
                 fill: Box::new(fill_expr),
             },
-            Type::Ref { unique: true, region: Region::Block(id), inner: Box::new(slice) },
+            Type::Ref { unique: true, region, inner: Box::new(slice) },
         ))
     }
 
@@ -4805,6 +5086,19 @@ impl<'a> FnLowering<'a> {
     /// The arena `region` names, if it is one open here.
     fn open_arena(&mut self, region: Symbol, span: Span) -> Result<u32, Diagnostic> {
         let text = self.ast.name_of(region);
+        // `docs/compile-time-data.md` §2.1: the one way to put something
+        // new in the static region, and it is lexical to a `static` item
+        // rather than a reachability analysis — a rule a reader can check
+        // by looking at one declaration.
+        if text == STATIC_REGION {
+            if self.lowering_static.is_some() {
+                return Ok(STATIC_ARENA);
+            }
+            return Err(Diagnostic::new(
+                "`alloc` in the `static` region is only legal inside a `static` item;                  elsewhere `static` is read-only data a program cannot add to",
+                span,
+            ));
+        }
         self.open_blocks
             .iter()
             .rev()
@@ -5105,6 +5399,30 @@ impl<'a> FnLowering<'a> {
                         // binding is a move. §5 adds the other kind.
                         self.trace.emit(Event::Use { slot, span });
                         (Expr::Load(slot), ty)
+                    }
+                    // `docs/compile-time-data.md` §2: the name reads as a
+                    // `&static [T]`, exactly as a string literal does.
+                    None if self.static_index(*name).is_some() => {
+                        let index = self.static_index(*name).expect("just checked");
+                        if let Some(current) = self.lowering_static {
+                            if index >= current {
+                                return Err(Diagnostic::new(
+                                    format!(
+                                        "`{text}` is a `static` declared later; a `static` may read one declared before it, so that there are no cycles to resolve"
+                                    ),
+                                    span,
+                                ));
+                            }
+                        }
+                        let referent = self.statics[index as usize].referent.clone();
+                        (
+                            Expr::Static(index),
+                            Type::Ref {
+                                unique: false,
+                                region: Region::Static,
+                                inner: Box::new(referent),
+                            },
+                        )
                     }
                     None if self.signatures.iter().any(|s| s.name == *name)
                         || Builtin::from_name(text).is_some() =>

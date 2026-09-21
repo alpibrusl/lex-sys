@@ -582,6 +582,31 @@ pub enum Item {
     Extern(ExternDecl),
     Struct(StructDecl),
     Enum(EnumDecl),
+    /// `static name: [int] { .. }` (`docs/compile-time-data.md` §2).
+    Static(StaticDecl),
+}
+
+/// A `static` item: a function body with no parameters, no effect row and
+/// no run time.
+///
+/// It is written as a body rather than as an expression because that is
+/// the shape the language already had — `let`, `var`, `while`, `return`
+/// and the linearity checker all apply unchanged, and there was no
+/// block-expression form to borrow. A `static` is a `fn` that cannot be
+/// called and does not need to be.
+///
+/// No effect row, and none may be written: a `static` performs nothing by
+/// construction, because every effect needs a capability and a capability
+/// is a parameter (§2).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct StaticDecl {
+    pub name: Symbol,
+    pub public: bool,
+    /// The **referent**: `[int]` in `static t: [int] { .. }`. The name
+    /// itself is a `&static [int]` wherever it is read, exactly like a
+    /// string literal.
+    pub ty: TypeId,
+    pub body: Block,
 }
 
 /// `import a.b;` / `import a.b as c;` (`docs/modules.md` §4).

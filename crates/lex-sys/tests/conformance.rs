@@ -3395,3 +3395,124 @@ fn main(world: World) -> [] int {
     assert_eq!(lines[2], lines[3], "`1.0 / 3.0` folded and unfolded must agree");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `docs/compile-time-data.md` §1.1 — the row that is a capability
+/// argument rather than a convenience.
+///
+/// An arena is one 64 KiB chunk and exhausting it traps, so a
+/// 65 536-entry `[int]` table — 512 KB, the shape a CRC or a 16-bit codec
+/// uses — cannot be built in a `region` at all. A program that released
+/// `heap` therefore cannot have one. A `static` has no such ceiling,
+/// because the data is in the file rather than in a chunk.
+///
+/// Both halves are checked here, because the claim is a comparison: the
+/// `region` version must trap and the `static` version must work.
+#[test]
+fn a_static_outgrows_what_an_arena_could_hold() {
+    let body = "\
+    var i = 0;\n\
+    while i < 65536 {\n\
+        table[i] = i * 3;\n\
+        i = i + 1;\n\
+    }\n";
+
+    let with_static = format!(
+        "fn main(world: World) -> [] int {{\n\
+         \x20   let Split {{ io, ffi, fs, heap, args }} = split(world);\n\
+         \x20   release(args); release(heap); release(fs); release(ffi); release(io);\n\
+         \x20   if len(big) != 65536 {{ return 1; }}\n\
+         \x20   return big[65535] - 196605;\n\
+         }}\n\
+         static big: [int] {{\n\
+         \x20   let table = alloc_slice[static](65536, 0);\n\
+         {body}\
+         \x20   return table;\n\
+         }}\n"
+    );
+    let with_region = format!(
+        "fn main(world: World) -> [] int {{\n\
+         \x20   let Split {{ io, ffi, fs, heap, args }} = split(world);\n\
+         \x20   release(args); release(heap); release(fs); release(ffi); release(io);\n\
+         \x20   region a {{\n\
+         \x20       let table = alloc_slice[a](65536, 0);\n\
+         {body}\
+         \x20       if table[65535] != 196605 {{ return 1; }}\n\
+         \x20   }}\n\
+         \x20   return 0;\n\
+         }}\n"
+    );
+
+    let dir = scratch("static-big");
+    for (name, source, should_run) in
+        [("static", with_static, true), ("region", with_region, false)]
+    {
+        let path = dir.join(format!("{name}.ls"));
+        std::fs::write(&path, &source).expect("a writable fixture");
+        let exe = dir.join(name);
+        let build = Command::new(BIN)
+            .args(["build".as_ref(), path.as_os_str(), "-o".as_ref(), exe.as_os_str()])
+            .output()
+            .expect("the compiler runs");
+        assert!(
+            build.status.success(),
+            "`{name}` should compile — the arena's limit is a run-time one:\n{}",
+            String::from_utf8_lossy(&build.stderr)
+        );
+        let run = Command::new(&exe).output().expect("the program runs");
+        if should_run {
+            assert_eq!(
+                run.status.code(),
+                Some(0),
+                "a 512 KB `static` is data in the binary, so there is no chunk to exhaust"
+            );
+        } else {
+            assert_eq!(
+                run.status.code(),
+                None,
+                "512 KB in a 64 KiB arena traps, which is the whole of §1.1's second row"
+            );
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// §2 — a `static` is read-only data, and the program never builds it.
+///
+/// Checked through the authority report rather than a disassembler, for
+/// the reason `compile-time.md` §9 gives: CI builds on two platforms and
+/// `objdump` is not among the things they share. A program whose only
+/// arithmetic is inside a `static` performs nothing and folds nothing at
+/// run time, which is what "the loop ran in the compiler" looks like from
+/// outside.
+#[test]
+fn a_static_needs_no_authority_and_no_heap() {
+    let source = "\
+static table: [int] {
+    let t = alloc_slice[static](8, 0);
+    var i = 0;
+    while i < 8 { t[i] = i * i; i = i + 1; }
+    return t;
+}
+fn main(world: World) -> [] int {
+    let Split { io, ffi, fs, heap, args } = split(world);
+    release(args); release(heap); release(fs); release(ffi); release(io);
+    return table[3] - 9;
+}
+";
+    let json = authority_json(source, "static-authority");
+    assert!(json.contains("\"effects\": []"), "a `static` performs nothing:\n{json}");
+    assert!(json.contains("\"foreign_symbols\": []"), "and reaches no foreign code:\n{json}");
+
+    let dir = scratch("static-runs");
+    let path = dir.join("static.ls");
+    std::fs::write(&path, source).expect("a writable fixture");
+    let exe = dir.join("static");
+    let build = Command::new(BIN)
+        .args(["build".as_ref(), path.as_os_str(), "-o".as_ref(), exe.as_os_str()])
+        .output()
+        .expect("the compiler runs");
+    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+    let run = Command::new(&exe).output().expect("the program runs");
+    assert_eq!(run.status.code(), Some(0), "`table[3]` is 9, computed during compilation");
+    let _ = std::fs::remove_dir_all(&dir);
+}
