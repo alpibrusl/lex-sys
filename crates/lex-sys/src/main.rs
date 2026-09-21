@@ -26,20 +26,28 @@ const USAGE: &str = "\
 lex-sys — the bootstrap compiler for the lex-sys systems dialect
 
 usage:
-    lex-sys build <file.ls>... [-o <output>] [--emit exe|obj]
-    lex-sys check <file.ls>...
-    lex-sys run   <file.ls>...
-    lex-sys ids   <file.ls>...
+    lex-sys build <file.ls>... [-o <output>] [--emit exe|obj] [--std]
+    lex-sys check <file.ls>... [--std]
+    lex-sys run   <file.ls>... [--std]
+    lex-sys ids   <file.ls>... [--std]
     lex-sys print <file.ls>
     lex-sys --version
 
 options:
     -o <output>     where to write the result (default: the first input's stem)
     --emit exe|obj  emit a linked executable (default) or a bare object file
+    --std           make the standard library's source available
 
-A program is the set of files named on the command line, in any order:
-they share one flat namespace, so a function in the first may call one in
-the last. See docs/many-files.md.
+A program is the set of files named on the command line, in any order.
+Each file is in a module -- the root, unless it says `module a.b;` -- and
+reaches another module's names through `import`. See docs/many-files.md
+and docs/modules.md.
+
+`--std` adds the standard library's source, which is compiled into this
+binary rather than looked up on disk: no search path, no manifest. It is
+not a prelude -- a program still writes `import std.io;` where it uses
+one -- and a declaration nothing calls emits nothing. See
+docs/standard-library.md.
 
 `ids` prints each declaration's content hash: a signature and a body for
 every function, one identity for every type. A unit hashes its content,
@@ -107,14 +115,14 @@ fn run(args: &[String]) -> Result<ExitCode, Failure> {
             Ok(ExitCode::SUCCESS)
         }
         "check" => {
-            let (inputs, _, _) = parse_args(&args[1..], false)?;
-            compile_to_ir(&inputs)?;
+            let (inputs, _, _, with_std) = parse_args(&args[1..], false)?;
+            compile_to_ir(&inputs, with_std)?;
             Ok(ExitCode::SUCCESS)
         }
         // `docs/many-files.md` §5: printing is about text, and text is
         // what a file is -- so this renders exactly one.
         "print" => {
-            let (inputs, _, _) = parse_args(&args[1..], false)?;
+            let (inputs, _, _, _) = parse_args(&args[1..], false)?;
             let [input] = &inputs[..] else {
                 return Err(usage("`print` renders one file at a time"));
             };
@@ -126,24 +134,24 @@ fn run(args: &[String]) -> Result<ExitCode, Failure> {
             Ok(ExitCode::SUCCESS)
         }
         "ids" => {
-            let (inputs, _, _) = parse_args(&args[1..], false)?;
-            print_ids(&inputs)?;
+            let (inputs, _, _, with_std) = parse_args(&args[1..], false)?;
+            print_ids(&inputs, with_std)?;
             Ok(ExitCode::SUCCESS)
         }
         "build" => {
-            let (inputs, output, emit) = parse_args(&args[1..], true)?;
+            let (inputs, output, emit, with_std) = parse_args(&args[1..], true)?;
             let output = output.unwrap_or_else(|| default_output(&inputs[0], emit));
-            build(&inputs, &output, emit)?;
+            build(&inputs, &output, emit, with_std)?;
             Ok(ExitCode::SUCCESS)
         }
         "run" => {
-            let (inputs, _, _) = parse_args(&args[1..], false)?;
+            let (inputs, _, _, with_std) = parse_args(&args[1..], false)?;
             let dir = std::env::temp_dir().join(format!("lex-sys-run-{}", std::process::id()));
             std::fs::create_dir_all(&dir)
                 .map_err(|e| environment(format!("cannot create `{}`: {e}", dir.display())))?;
             let exe =
                 dir.join(default_output(&inputs[0], Emit::Exe).file_name().unwrap_or_default());
-            let result = build(&inputs, &exe, Emit::Exe).and_then(|()| {
+            let result = build(&inputs, &exe, Emit::Exe, with_std).and_then(|()| {
                 Command::new(&exe)
                     .status()
                     .map_err(|e| environment(format!("cannot run `{}`: {e}", exe.display())))
@@ -156,13 +164,32 @@ fn run(args: &[String]) -> Result<ExitCode, Failure> {
     }
 }
 
+/// The standard library's source, compiled into this binary
+/// (`docs/standard-library.md` §2).
+///
+/// Embedded rather than looked up, so `--std` adds **no search path**,
+/// no manifest and no build step -- `modules.md` §6 promised none of
+/// those, and this keeps the promise by never going near the disk.
+///
+/// The cost is that the library's version is the compiler's version.
+/// For a language at this stage that is the right trade -- one artifact,
+/// one thing to install, nothing to resolve -- and §2.1 records it as
+/// the first thing to revisit when a package story exists.
+const STD: &[(&str, &str)] = &[
+    ("<std>/bytes.ls", include_str!("../../../std/bytes.ls")),
+    ("<std>/math.ls", include_str!("../../../std/math.ls")),
+    ("<std>/io.ls", include_str!("../../../std/io.ls")),
+    ("<std>/buffer.ls", include_str!("../../../std/buffer.ls")),
+];
+
 fn parse_args(
     args: &[String],
     allow_output: bool,
-) -> Result<(Vec<PathBuf>, Option<PathBuf>, Emit), Failure> {
+) -> Result<(Vec<PathBuf>, Option<PathBuf>, Emit, bool), Failure> {
     let mut inputs: Vec<PathBuf> = Vec::new();
     let mut output = None;
     let mut emit = Emit::Exe;
+    let mut with_std = false;
     let mut it = args.iter();
 
     while let Some(arg) = it.next() {
@@ -179,6 +206,11 @@ fn parse_args(
                     None => return Err(usage("`--emit` needs a kind")),
                 };
             }
+            // `docs/standard-library.md` §2. Opt-in, and never an
+            // implicit prelude: this decides whether the library's
+            // *source* is present, never whether a name is in scope. A
+            // program still writes `import std.io;` where it uses it.
+            "--std" => with_std = true,
             other if other.starts_with('-') => {
                 return Err(usage(format!("unknown option `{other}`")));
             }
@@ -191,7 +223,7 @@ fn parse_args(
     if inputs.is_empty() {
         return Err(usage("no input file given"));
     }
-    Ok((inputs, output, emit))
+    Ok((inputs, output, emit, with_std))
 }
 
 fn default_output(input: &Path, emit: Emit) -> PathBuf {
@@ -208,7 +240,7 @@ fn default_output(input: &Path, emit: Emit) -> PathBuf {
 /// The `SourceMap` hands out a base offset per file and resolves any
 /// diagnostic's span back to the file it came from, so nothing downstream
 /// of here learns that a program can have more than one (§4).
-fn parse_program(inputs: &[PathBuf]) -> Result<(Ast, SourceMap), Failure> {
+fn parse_program(inputs: &[PathBuf], with_std: bool) -> Result<(Ast, SourceMap), Failure> {
     let mut map = SourceMap::new();
     let mut ast = Ast::new();
     let mut sources = Vec::new();
@@ -218,6 +250,17 @@ fn parse_program(inputs: &[PathBuf]) -> Result<(Ast, SourceMap), Failure> {
         let base = map.add(input.display().to_string(), text.clone());
         sources.push((text, base));
     }
+    // The library is more files of the same program (`many-files.md` §2)
+    // -- it arrives from `include_str!` rather than from the disk, and
+    // nothing downstream of here can tell the difference. Named
+    // `<std>/io.ls` in the map, so a diagnostic inside the library says
+    // so rather than naming a path that does not exist.
+    if with_std {
+        for (name, text) in STD {
+            let base = map.add((*name).to_owned(), (*text).to_owned());
+            sources.push(((*text).to_owned(), base));
+        }
+    }
     for (text, base) in &sources {
         lex_sys_syntax::parse_into(&mut ast, text, *base)
             .map_err(|d| refused(d.render_in(&map)))?;
@@ -226,8 +269,8 @@ fn parse_program(inputs: &[PathBuf]) -> Result<(Ast, SourceMap), Failure> {
 }
 
 /// Read, parse and lower a program, reporting any refusal with its source line.
-fn compile_to_ir(inputs: &[PathBuf]) -> Result<lex_sys_ir::Program, Failure> {
-    let (ast, map) = parse_program(inputs)?;
+fn compile_to_ir(inputs: &[PathBuf], with_std: bool) -> Result<lex_sys_ir::Program, Failure> {
+    let (ast, map) = parse_program(inputs, with_std)?;
     let program = lex_sys_ir::lower(&ast).map_err(|d| refused(d.render_in(&map)))?;
     let where_ = inputs[0].display().to_string();
 
@@ -261,8 +304,8 @@ fn compile_to_ir(inputs: &[PathBuf]) -> Result<lex_sys_ir::Program, Failure> {
 ///
 /// The program is checked first: hashing something that does not compile would
 /// hand out an identity for a thing that is not a program.
-fn print_ids(inputs: &[PathBuf]) -> Result<(), Failure> {
-    let (ast, map) = parse_program(inputs)?;
+fn print_ids(inputs: &[PathBuf], with_std: bool) -> Result<(), Failure> {
+    let (ast, map) = parse_program(inputs, with_std)?;
     lex_sys_ir::lower(&ast).map_err(|d| refused(d.render_in(&map)))?;
 
     let identities = lex_sys_id::identify(&ast);
@@ -291,8 +334,8 @@ fn print_ids(inputs: &[PathBuf]) -> Result<(), Failure> {
     }
 }
 
-fn build(inputs: &[PathBuf], output: &Path, emit: Emit) -> Result<(), Failure> {
-    let program = compile_to_ir(inputs)?;
+fn build(inputs: &[PathBuf], output: &Path, emit: Emit, with_std: bool) -> Result<(), Failure> {
+    let program = compile_to_ir(inputs, with_std)?;
     let object = lex_sys_codegen::compile_object(&program, "main")
         .map_err(|e| environment(format!("code generation failed: {e}")))?;
 

@@ -190,8 +190,19 @@ fn every_example_runs_and_prints_what_it_says() {
 
         let scratch = scratch(&format!("example-{name}"));
         let exe = scratch.join(&name);
+        // Every example is built with the standard library available
+        // (`docs/standard-library.md` §2). Passing it unconditionally is
+        // safe precisely because of §5.2 -- a declaration nobody calls
+        // emits nothing, and `std_declarations_cost_nothing_unless_called`
+        // is that as a test rather than as a hope.
         let build = Command::new(BIN)
-            .args(["build".as_ref(), path.as_os_str(), "-o".as_ref(), exe.as_os_str()])
+            .args([
+                "build".as_ref(),
+                path.as_os_str(),
+                "--std".as_ref(),
+                "-o".as_ref(),
+                exe.as_os_str(),
+            ])
             .output()
             .expect("the compiler runs");
         assert!(
@@ -253,6 +264,10 @@ fn printing_preserves_every_identity_and_is_idempotent() {
         "examples/buffer",
         "examples/slab",
         "examples/modular",
+        // The standard library is code, and gets the same contract every
+        // other file here gets: printed, reparsed, identical hashes, and
+        // a fixed point.
+        "std",
     ] {
         for entry in std::fs::read_dir(repo_root().join(dir)).expect("a readable directory") {
             let path = entry.expect("a readable entry").path();
@@ -961,6 +976,160 @@ fn the_modular_example_builds_and_runs() {
     let run = Command::new(&exe).output().expect("the compiled program runs");
     assert_eq!(String::from_utf8_lossy(&run.stdout), "seen 3, total 60\n60\n");
     assert_eq!(run.status.code(), Some(0));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The standard library type-checks on its own, with no program
+/// (`docs/standard-library.md` §7).
+///
+/// Named on the command line like any other module -- which is the point
+/// of `modules.md`: the library is not special, it is just files whose
+/// source happens to ship in the compiler.
+#[test]
+fn the_standard_library_compiles_on_its_own() {
+    let root = repo_root().join("std");
+    let mut command = Command::new(BIN);
+    command.arg("check");
+    for name in ["bytes.ls", "math.ls", "io.ls", "buffer.ls"] {
+        command.arg(root.join(name));
+    }
+    let out = command.output().expect("the compiler runs");
+    // No `main`, so the CLI refuses at the end -- but only after every
+    // declaration has been checked, which is what this is asserting.
+    let text = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        text.contains("no `main` function"),
+        "the library itself should check clean; got:\n{text}"
+    );
+}
+
+/// `--std` makes the library's source present without naming a file
+/// (§2), and it is still opt-in: the program writes its own `import`.
+#[test]
+fn std_is_available_behind_a_flag() {
+    let dir = scratch("std-flag");
+    let source = dir.join("tool.ls");
+    std::fs::write(
+        &source,
+        "import std.io;\n\
+         import std.bytes;\n\
+         fn main(world: World) -> [] int {\n\
+             let Split { io, ffi, fs, heap, args } = split(world);\n\
+             release(args); release(ffi); release(fs); release(heap);\n\
+             borrow mut io as &!i in {\n\
+                 io.print_pad(i, 0 - 42, 6);\n\
+                 io.newline(i);\n\
+             }\n\
+             release(io);\n\
+             return bytes.digit_of(55) - 7;\n\
+         }\n",
+    )
+    .expect("a writable fixture");
+    let exe = dir.join("tool");
+    let build = Command::new(BIN)
+        .args([
+            "build".as_ref(),
+            source.as_os_str(),
+            "--std".as_ref(),
+            "-o".as_ref(),
+            exe.as_os_str(),
+        ])
+        .output()
+        .expect("the compiler runs");
+    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+
+    let run = Command::new(&exe).output().expect("the compiled program runs");
+    assert_eq!(String::from_utf8_lossy(&run.stdout), "   -42\n");
+    assert_eq!(run.status.code(), Some(0), "`digit_of('7')` is 7");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `docs/standard-library.md` §5.2: a declaration nobody calls costs
+/// nothing.
+///
+/// The same program built with `--std` and without it emits
+/// **byte-identical** object files. Not smaller-by-a-bit -- the same
+/// bytes, because emission is driven by what `main` reaches and an
+/// unreached declaration is still checked and never lowered.
+///
+/// This claim was **false** when it was first written down, which is why
+/// it is a test: the library added 5.6 KB to a program that called none
+/// of it, because pass 2 seeded from every non-generic function rather
+/// than from the entry point.
+#[test]
+fn std_declarations_cost_nothing_unless_called() {
+    const BARE: &str = "fn main(world: World) -> [] int {\n\
+                            let Split { io, ffi, fs, heap, args } = split(world);\n\
+                            release(args); release(ffi); release(fs); release(heap);\n\
+                            borrow mut io as &!i in { putchar(i, 65); }\n\
+                            release(io);\n\
+                            return 0;\n\
+                        }\n";
+    let dir = scratch("std-costs-nothing");
+    let source = dir.join("bare.ls");
+    std::fs::write(&source, BARE).expect("a writable fixture");
+
+    let object = |name: &str, extra: &[&str]| -> Vec<u8> {
+        let out = dir.join(name);
+        let mut command = Command::new(BIN);
+        command.arg("build").arg(&source);
+        for flag in extra {
+            command.arg(flag);
+        }
+        command.arg("--emit").arg("obj").arg("-o").arg(&out);
+        let build = command.output().expect("the compiler runs");
+        assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+        std::fs::read(&out).expect("a readable object file")
+    };
+
+    assert_eq!(
+        object("without.o", &[]),
+        object("with.o", &["--std"]),
+        "the standard library reached the output of a program that never calls it"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `std.math` §3.3: `abs` traps on the most negative integer.
+///
+/// Every other language's `abs` returns the negative number here, which
+/// is the silently-wrong answer this one exists to refuse. It does not
+/// return at all -- and the trap is `0 - n` doing what `-` already does
+/// rather than a check bolted on, so it costs nothing on every other
+/// input.
+#[test]
+fn abs_of_the_most_negative_integer_traps() {
+    let dir = scratch("std-abs-traps");
+    let source = dir.join("abs.ls");
+    std::fs::write(
+        &source,
+        "import std.math;\n\
+         fn main(world: World) -> [] int {\n\
+             let Split { io, ffi, fs, heap, args } = split(world);\n\
+             release(args); release(ffi); release(fs); release(heap); release(io);\n\
+             return math.abs(-9223372036854775808);\n\
+         }\n",
+    )
+    .expect("a writable fixture");
+    let exe = dir.join("abs");
+    let build = Command::new(BIN)
+        .args([
+            "build".as_ref(),
+            source.as_os_str(),
+            "--std".as_ref(),
+            "-o".as_ref(),
+            exe.as_os_str(),
+        ])
+        .output()
+        .expect("the compiler runs");
+    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+
+    let run = Command::new(&exe).output().expect("the compiled program runs");
+    assert!(!run.status.success(), "`abs(int::MIN)` must not succeed");
+    assert_eq!(run.status.code(), None, "it is killed by a signal, not an exit");
 
     let _ = std::fs::remove_dir_all(&dir);
 }
