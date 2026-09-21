@@ -558,6 +558,17 @@ pub enum BinOp {
     /// rather than as an instruction.
     And,
     Or,
+    /// The bit operators (`docs/bitwise.md`). `BitAnd` is `&` and is not
+    /// `And`: this language has no truthy integer, so the two are never
+    /// interchangeable and the checker says so rather than coercing.
+    BitAnd,
+    BitOr,
+    BitXor,
+    /// `<<` and `>>`. The amount traps outside `0..64` (§3), and neither
+    /// traps on the value it produces (§4): a shift is bits, and bits do
+    /// not overflow. `Shr` is arithmetic because `int` is signed (§2).
+    Shl,
+    Shr,
 }
 
 impl BinOp {
@@ -795,6 +806,10 @@ pub enum Expr {
     },
     Neg(Box<Expr>),
     Not(Box<Expr>),
+    /// `~a` (`docs/bitwise.md` §1). Its own node rather than
+    /// `Xor(a, -1)`, because the backend has the instruction and a reader
+    /// of the IR should see what was written.
+    BitNot(Box<Expr>),
     Bin {
         op: BinOp,
         lhs: Box<Expr>,
@@ -2234,7 +2249,7 @@ fn settle_types(stmts: &mut [Stmt], unifier: &Unifier) {
 fn settle_expr(expr: &mut Expr, unifier: &Unifier) {
     match expr {
         Expr::Int(_) | Expr::Bool(_) | Expr::Load(_) => {}
-        Expr::Neg(inner) | Expr::Not(inner) => settle_expr(inner, unifier),
+        Expr::Neg(inner) | Expr::Not(inner) | Expr::BitNot(inner) => settle_expr(inner, unifier),
         Expr::Bin { lhs, rhs, .. } => {
             settle_expr(lhs, unifier);
             settle_expr(rhs, unifier);
@@ -5293,6 +5308,10 @@ impl<'a> FnLowering<'a> {
                         self.expect_type(&Type::Bool, &found, operand_span)?;
                         (Expr::Not(Box::new(inner)), Type::Bool)
                     }
+                    ast::UnOp::BitNot => {
+                        self.expect_type(&Type::Int, &found, operand_span)?;
+                        (Expr::BitNot(Box::new(inner)), Type::Int)
+                    }
                     ast::UnOp::Deref => self.deref(inner, &found, operand_span)?,
                 }
             }
@@ -5327,6 +5346,15 @@ impl<'a> FnLowering<'a> {
                         self.expect_type(&Type::Bool, &operand, lhs_span)?;
                     }
                     BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
+                        self.expect_type(&Type::Int, &operand, lhs_span)?;
+                    }
+                    // `int` and nothing else. A `bool` is refused here
+                    // rather than treated as one bit, because `&` and `&&`
+                    // would then differ only in whether they short-circuit
+                    // and a typo would compile (`docs/bitwise.md` §1). A
+                    // `byte` is refused for `strings.md` §2's reason: it
+                    // has no arithmetic, and masking is arithmetic.
+                    BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr => {
                         self.expect_type(&Type::Int, &operand, lhs_span)?;
                     }
                     // `==` and `!=` compare two values of the same *scalar*
@@ -5654,6 +5682,11 @@ fn bin_op(op: ast::BinOp) -> BinOp {
         ast::BinOp::Ge => BinOp::Ge,
         ast::BinOp::And => BinOp::And,
         ast::BinOp::Or => BinOp::Or,
+        ast::BinOp::BitAnd => BinOp::BitAnd,
+        ast::BinOp::BitOr => BinOp::BitOr,
+        ast::BinOp::BitXor => BinOp::BitXor,
+        ast::BinOp::Shl => BinOp::Shl,
+        ast::BinOp::Shr => BinOp::Shr,
     }
 }
 

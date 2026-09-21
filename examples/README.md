@@ -197,6 +197,26 @@ way on purpose.
 
 ## Libraries
 
+### `base64/` — a program that did not start here
+
+GNU coreutils' `base64`, ported and checked against it: the conformance
+suite pipes the same bytes through both binaries and compares, twelve
+sizes, both directions, three malformed inputs and a megabyte.
+
+It is the one program in this directory that had opinions before it
+arrived — the 76-column wrapping, the padding, the exit status on bad
+input — and it is worth reading for what it *did not* need. No new
+capability, no library, no change to linearity or effect rows. What it
+needed was the bit operators, which did not exist until it asked
+(`docs/bitwise.md`).
+
+It streams, and that is not style: an arena is one 64 KiB chunk and
+standard input is not, so three-bytes-in-four-characters-out was the only
+way to write it — which is also how the C writes it.
+
+`docs/porting.md` is the report, including §6 on what one small port does
+not establish.
+
 ### `serve/` — a REST endpoint over a real socket
 
 The answer to *can this language do X?*, where X is the one everybody

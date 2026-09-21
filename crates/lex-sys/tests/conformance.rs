@@ -278,6 +278,7 @@ fn printing_preserves_every_identity_and_is_idempotent() {
         // The benchmarks are code too, and the pairs are the place a
         // careless edit would land without anyone reading it.
         "benches",
+        "examples/base64",
         // The standard library is code, and gets the same contract every
         // other file here gets: printed, reparsed, identical hashes, and
         // a fixed point.
@@ -2187,5 +2188,246 @@ fn every_benchmark_pair_agrees() {
     }
 
     assert_eq!(pairs, 4, "every pair in `benches/` should be covered here");
+    let _ = std::fs::remove_dir_all(&scratch);
+}
+
+/// `docs/bitwise.md` §3 and §4 — what a shift does at the edges.
+///
+/// Not reject fixtures: a trapping program is one that compiled, and the
+/// reject harness runs `check` (`slicing.md` §8 made the same correction).
+///
+/// The fourth case is the one that is easy to get wrong in the other
+/// direction. `1 << 63` sets the sign bit, which read as arithmetic is an
+/// overflow — and §4 says a shift is bits, so it is the answer.
+#[test]
+fn a_shift_past_the_width_traps() {
+    let scratch = scratch("bitwise-shift");
+    // (expression, does it trap). A trap is `ud2`, so the process is killed
+    // by a signal and has no exit code — which is how every other trapping
+    // test here states it.
+    let cases = [
+        ("1 << 64", true),
+        ("1 >> 64", true),
+        ("1 << (0 - 1)", true),
+        ("1 >> (0 - 1)", true),
+        // Cranelift's `ishl` masks the amount, so an unguarded lowering
+        // would make this `1 << 1` and hand back 2. It traps instead.
+        ("1 << 65", true),
+        ("1 << 63", false),
+        ("1 << 0", false),
+        ("1 << 63 >> 63", false),
+    ];
+
+    for (index, (expression, traps)) in cases.iter().enumerate() {
+        let source = format!(
+            "fn main(world: World) -> [] int {{\n\
+             \x20   let Split {{ io, ffi, fs, heap, args }} = split(world);\n\
+             \x20   release(args); release(heap); release(fs); release(ffi); release(io);\n\
+             \x20   var seen = 0;\n\
+             \x20   if ({expression}) != 12345 {{ seen = 0; }}\n\
+             \x20   return seen;\n\
+             }}\n"
+        );
+        let path = scratch.join(format!("shift{index}.ls"));
+        std::fs::write(&path, &source).expect("a writable fixture");
+        let exe = scratch.join(format!("shift{index}"));
+        let build = Command::new(BIN)
+            .args(["build".as_ref(), path.as_os_str(), "-o".as_ref(), exe.as_os_str()])
+            .output()
+            .expect("the compiler runs");
+        assert!(
+            build.status.success(),
+            "`{expression}` should compile — the amount is a runtime value, not a type error:\n{}",
+            String::from_utf8_lossy(&build.stderr)
+        );
+        let run = Command::new(&exe).output().expect("the program runs");
+        if *traps {
+            assert_eq!(
+                run.status.code(),
+                None,
+                "`{expression}` should be killed by a signal, not exit"
+            );
+        } else {
+            assert_eq!(run.status.code(), Some(0), "`{expression}` should not trap");
+        }
+    }
+
+    let _ = std::fs::remove_dir_all(&scratch);
+}
+
+/// `docs/bitwise.md` §6 — the operator set grew and no hash moved.
+///
+/// An operator is hashed by a code inside `Binary`/`Unary` rather than by
+/// a node tag of its own, and the new codes were *appended*. So a program
+/// written before this slice hashes to what it hashed before.
+///
+/// The values below were not recomputed after the change. They were taken
+/// from a build of `83cc7a7`, the commit immediately before this slice, and
+/// the two compilers print the same bytes for the same source — which is
+/// what makes this a check rather than a restatement.
+#[test]
+fn ids_are_stable_across_the_operator_set() {
+    // Deliberately uses only the operators that existed beforehand.
+    let source = "fn mix(a: int, b: int) -> [] bool {\n\
+                  \x20   return a + b * 2 - 1 < 10 && !(a == b);\n\
+                  }\n";
+    let scratch = scratch("ids-operator-set");
+    let path = scratch.join("mix.ls");
+    std::fs::write(&path, source).expect("a writable fixture");
+
+    let output = Command::new(BIN).arg("ids").arg(&path).output().expect("the compiler runs");
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let text = String::from_utf8(output.stdout).expect("hashes are ascii");
+
+    // The whole point is that these are *literal* and were not recomputed
+    // after the operators landed. If a future slice inserts an operator
+    // code rather than appending one, this is what says so.
+    assert!(
+        text.contains("3c635be9a28ee7ea3f1f096db9c25f312d6ffd5f43c89e58820361e2e01f25fc"),
+        "a signature moved; §6's append-only rule was broken\n{text}"
+    );
+    assert!(
+        text.contains("d8f04b00ae8eef0ca032ba48f781d453a9f283116b410bd20c03a835f73fd1ad"),
+        "a body moved; §6's append-only rule was broken\n{text}"
+    );
+
+    let _ = std::fs::remove_dir_all(&scratch);
+}
+
+/// `examples/base64/` — the port, checked against the program it ports.
+///
+/// `docs/porting.md`'s claim is that this is GNU coreutils' `base64`, and
+/// a claim of that shape is worth what it is tested with. So the test
+/// pipes the same bytes through both and compares: twelve input sizes
+/// including the ones around the 76-column wrap, both directions, plus the
+/// three malformed inputs where the exit status is the whole behaviour.
+///
+/// The comparison runs against **GNU** coreutils specifically, because
+/// that is what `docs/porting.md` claims this is a port of, and the other
+/// implementations disagree: macOS ships BSD `base64`, which prints a
+/// newline for empty input where GNU prints nothing. Neither is wrong —
+/// the port targets one of them, so the test compares against that one.
+///
+/// Where GNU `base64` is not on the path the comparison is skipped rather
+/// than failed. Everything that needs no reference — the round trip, the
+/// exit statuses, the megabyte — still runs on every platform, which is
+/// why the darwin job is not simply doing less work.
+#[test]
+fn base64_agrees_with_coreutils() {
+    let scratch = scratch("example-base64");
+    let exe = scratch.join("base64");
+    let build = Command::new(BIN)
+        .args([
+            "build".as_ref(),
+            repo_root().join("examples/base64/base64.ls").as_os_str(),
+            "--std".as_ref(),
+            "-o".as_ref(),
+            exe.as_os_str(),
+        ])
+        .output()
+        .expect("the compiler runs");
+    assert!(
+        build.status.success(),
+        "`base64` should compile, but the compiler said:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+
+    /// Feed `input` to `command` on stdin and hand back (stdout, exit code).
+    ///
+    /// The write goes on its own thread. Writing the whole input first and
+    /// only then reading deadlocks as soon as the output exceeds a pipe
+    /// buffer: the child blocks writing, so it stops reading, so the
+    /// parent blocks writing. Base64 output is larger than its input, so
+    /// this is reached by any case past about 48 KiB — which is exactly
+    /// the megabyte case at the end, the one that is here to prove the
+    /// program streams.
+    fn pipe(command: &Path, args: &[&str], input: &[u8]) -> (Vec<u8>, Option<i32>) {
+        let mut child = Command::new(command)
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("the program runs");
+        let mut stdin = child.stdin.take().expect("a piped stdin");
+        let owned = input.to_vec();
+        let writer = std::thread::spawn(move || {
+            // A broken pipe is not a failure here: a program that refuses
+            // its input exits before reading all of it, which is what the
+            // malformed cases below are about.
+            let _ = stdin.write_all(&owned);
+            drop(stdin);
+        });
+        let out = child.wait_with_output().expect("it exits");
+        writer.join().expect("the writer thread finishes");
+        (out.stdout, out.status.code())
+    }
+
+    // Deterministic rather than random: a failing test should fail the same
+    // way twice. The sizes are the boundaries — empty, each remainder mod
+    // 3, and either side of the 57 input bytes that fill a 76-column line.
+    let sizes = [0usize, 1, 2, 3, 4, 5, 17, 56, 57, 58, 100, 1000];
+    let corpus: Vec<Vec<u8>> =
+        sizes.iter().map(|n| (0..*n).map(|i| (i * 37 + i / 5) as u8).collect()).collect();
+
+    // `base64 --version` prints "base64 (GNU coreutils) 9.4" on GNU. BSD's
+    // has no `--version` at all and exits non-zero, which is the same
+    // answer for this purpose: not the program that was ported.
+    let reference = Path::new("/usr/bin/base64");
+    let have_reference = reference.exists()
+        && Command::new(reference)
+            .arg("--version")
+            // Null stdin, so a version probe can never end up waiting on
+            // input it would otherwise inherit from the test runner.
+            .stdin(Stdio::null())
+            .output()
+            .is_ok_and(|v| {
+                v.status.success() && String::from_utf8_lossy(&v.stdout).contains("GNU coreutils")
+            });
+
+    for (size, input) in sizes.iter().zip(&corpus) {
+        let (ours, status) = pipe(&exe, &[], input);
+        assert_eq!(status, Some(0), "encoding {size} bytes should succeed");
+
+        if have_reference {
+            let (theirs, _) = pipe(reference, &[], input);
+            assert_eq!(
+                String::from_utf8_lossy(&ours),
+                String::from_utf8_lossy(&theirs),
+                "encoding {size} bytes differs from GNU coreutils"
+            );
+        }
+
+        // The round trip holds with or without a reference to compare to.
+        let (back, status) = pipe(&exe, &["-d"], &ours);
+        assert_eq!(status, Some(0), "decoding {size} bytes should succeed");
+        assert_eq!(&back, input, "the round trip lost {size} bytes");
+    }
+
+    // Malformed input, where the exit status *is* the behaviour.
+    for bad in [&b"abc$def"[..], &b"QQ=A"[..], &b"Q"[..]] {
+        let (_, status) = pipe(&exe, &["-d"], bad);
+        assert_eq!(status, Some(1), "`{}` should be refused", String::from_utf8_lossy(bad));
+        if have_reference {
+            let (_, theirs) = pipe(reference, &["-d"], bad);
+            assert_eq!(
+                status,
+                theirs,
+                "GNU coreutils disagrees about `{}`",
+                String::from_utf8_lossy(bad)
+            );
+        }
+    }
+
+    // An arena is one 64 KiB chunk, so a megabyte through it is the proof
+    // that nothing buffers the input (`docs/porting.md` §4).
+    let large: Vec<u8> = (0..1_048_576).map(|i| (i * 31 + i / 7) as u8).collect();
+    let (encoded, status) = pipe(&exe, &[], &large);
+    assert_eq!(status, Some(0), "a megabyte should encode");
+    let (decoded, status) = pipe(&exe, &["-d"], &encoded);
+    assert_eq!(status, Some(0), "a megabyte should decode");
+    assert_eq!(decoded.len(), large.len(), "the round trip changed a megabyte's length");
+    assert!(decoded == large, "the round trip changed a megabyte's contents");
+
     let _ = std::fs::remove_dir_all(&scratch);
 }

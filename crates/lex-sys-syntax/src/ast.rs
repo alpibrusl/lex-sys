@@ -144,6 +144,10 @@ impl TypeExpr {
 pub enum UnOp {
     Neg,
     Not,
+    /// `~a` — every bit flipped (`docs/bitwise.md` §1). Distinct from
+    /// `Not`, which is `!` on a `bool`: this language does not treat an
+    /// integer as a truth value, so the two never stand in for each other.
+    BitNot,
     /// `*r` — read what a reference points at
     /// (`docs/reading-references.md` §3).
     ///
@@ -170,6 +174,17 @@ pub enum BinOp {
     Le,
     Gt,
     Ge,
+    /// The bit operators (`docs/bitwise.md`). `BitAnd` is spelled `&` and
+    /// is a different operator from `And`, which is `&&` and
+    /// short-circuits; §5 puts the two at different precedence levels for
+    /// the reason C's ordering is a known defect.
+    BitAnd,
+    BitOr,
+    BitXor,
+    /// `<<` and `>>`. The amount must be in `0..64` or the shift traps
+    /// (§3); `>>` is arithmetic because `int` is signed (§2).
+    Shl,
+    Shr,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]

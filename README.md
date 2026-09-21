@@ -180,7 +180,8 @@ intended.
 ## What exists
 
 `int`, `byte` and `bool`; functions and calls; arithmetic and comparison;
-`&&`/`||` with short-circuiting; `if`/`else`, `while`, `let`/`var`; structs,
+`&&`/`||` with short-circuiting; the bit operators and hexadecimal
+literals; `if`/`else`, `while`, `let`/`var`; structs,
 enums with exhaustive `match`, tuples, and generics over all of them with
 `[T: val]` mode bounds; `res`/`val` linearity with destructuring `let` and
 liveness-checked shadowing; shared and unique borrows with lexical regions;
@@ -221,6 +222,16 @@ several processes are fine.
 [`docs/reach.md`](docs/reach.md) is the measured version, including the
 place where narrowing runs out: the row says `ffi("libc")` and cannot say
 `net`, because a library is not an authority domain.
+
+And one program here did not start here. `examples/base64/` is GNU
+coreutils' `base64`, ported and checked byte-for-byte against it in both
+directions. It needed the bit operators, which did not exist, and nothing
+else — no new capability, no library, no change to linearity or effect
+rows. Its authority report is three lines and every one is checkable from
+outside: `args`, `io_read`, `io_write`, and it never touches the
+filesystem, the heap or foreign code.
+[`docs/porting.md`](docs/porting.md), including §6 on what one small port
+does not establish.
 
 ---
 

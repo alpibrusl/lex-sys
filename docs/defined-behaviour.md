@@ -260,7 +260,7 @@ that adds it, before the code that needs one:
 
 | Missing | What will need deciding |
 |---|---|
-| Shifts and bitwise operators | Shift amounts ≥ 64, and whether `>>` is arithmetic or logical (it will be arithmetic; `int` is signed) |
+| ~~Shifts and bitwise operators~~ | **Done — `docs/bitwise.md`.** Both questions answered as predicted: `>>` is arithmetic, and a shift amount outside `0..64` **traps** rather than being masked the way Cranelift's instruction would. It also answered two this row did not ask: a shift does not trap on the *value* it produces (§4), and the precedence is Rust's rather than C's (§5) |
 | Unsigned integers and other widths | Conversion rules, and whether unsigned arithmetic also traps (it should). `byte` exists but has no arithmetic at all (`strings.md` §2), which is what lets this stay deferred |
 | Casts and conversions | Narrowing, and whether a lossy one traps or is refused |
 | Floating point | IEEE-754 semantics, NaN ordering, and whether the optimiser may reassociate (it may not) |

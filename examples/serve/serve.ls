@@ -155,6 +155,43 @@ fn route[&q, &o](request: &q [byte], out: &!o [byte]) -> [] int {
     return respond(out, 404, "Not Found", "{\"error\":\"not found\"}");
 }
 
+// Read until the request line is complete, which is what `read` does not
+// promise.
+//
+// One `read` returns what has *arrived*, not what was sent, and a client's
+// request can be split across segments — so a server that reads once and
+// routes what it got will occasionally route half a request line. It is
+// rare on loopback and not rare under load, which is how this was found:
+// the conformance suite failed roughly one run in six on a busy machine,
+// answering 404 to a request for `/health`.
+//
+// The loop ends at the first newline, because the request line is all the
+// router reads. A server that parsed headers would look for CRLF CRLF and
+// would be the same shape.
+fn read_request[&f, &b](libc: &f Ffi("libc"), conn: int, buffer: &!b [byte])
+    -> [ffi("libc")] int {
+    var filled = 0;
+    while filled < len(buffer) {
+        let got = read(libc, conn, buffer[filled..len(buffer)]);
+        if got < 0 {
+            return 0 - 1;
+        }
+        // End of stream before a complete line: hand back what there is
+        // and let the router refuse it.
+        if got == 0 {
+            return filled;
+        }
+        let end = filled + got;
+        while filled < end {
+            if int_of(buffer[filled]) == 10 {
+                return end;
+            }
+            filled = filled + 1;
+        }
+    }
+    return filled;
+}
+
 // ---------------------------------------------------------------------
 // The server
 // ---------------------------------------------------------------------
@@ -200,7 +237,12 @@ fn serve[&f, &a](libc: &f Ffi("libc"), port: &a [byte]) -> [ffi("libc")] int {
         // `read` is told the slice's own length, so the bytes it may write
         // are the bytes that exist.
         let request = alloc_slice[scratch](4096, byte_of(0));
-        let got = read(libc, conn, request);
+        let got = read_request(libc, conn, request);
+        if got < 0 {
+            close(libc, conn);
+            close(libc, fd);
+            return 4;
+        }
         let reply = alloc_slice[scratch](512, byte_of(0));
         let end = route(request[0..got], reply);
         write(libc, conn, reply[0..end]);
