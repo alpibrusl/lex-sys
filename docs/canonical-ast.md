@@ -230,6 +230,17 @@ empty.
   and not yet frozen across releases. Freezing them means writing them down
   here as a table, which is worth doing once the AST stops growing — every
   milestone from M2 on adds nodes.
+
+  Until then the moves are at least **visible**:
+  `crates/lex-sys-id/tests/golden.rs` pins 35 fixtures, one per node family,
+  to the hashes they emit today. It is not a freeze and a failure is not a
+  bug report — it asks which of two things happened, an intended encoding
+  change or something reaching the hash that should not have, and says to
+  record the answer in the commit message. The point is the **rate**: the
+  question of whether this section can ever be emptied is a question about
+  how often these actually move, and nothing was measuring that. The 61
+  tests beside the encoder are all relational — they compare two hashes to
+  each other and none of them says what a hash *is*.
 - **`BodyId` across a type-checker change.** Bodies hash from the AST, not the
   typed IR, so inference changes do not move them today. Whether that survives
   M2 — where a body's meaning depends on effects and linearity that are not
@@ -237,11 +248,42 @@ empty.
 - **Cross-version stability.** No claim is made that a hash from this build
   matches one from any other build. The domain tags exist so that claim can be
   made later.
-- **Field order where the declaration decides it.** A struct literal lists its
-  fields in whatever order it likes and the checker reorders them, so
-  `P { x: 1, y: 2 }` and `P { y: 2, x: 1 }` are the same value — and they hash
-  differently. A destructuring pattern has the same gap for the same reason:
-  `let P { x, y } = p` and `let P { y, x } = p` bind the same values. Both
-  could be canonicalised by sorting into declaration order, which is not known
-  where the encoder runs; neither is, and the tests say so rather than
-  asserting the property does not exist.
+
+---
+
+> **Struct literal and pattern field order** was the fourth entry here and is
+> **closed**, but not the way it was written. Both halves of the claim were
+> wrong, so the correction is recorded rather than the text quietly replaced.
+>
+> It said a struct literal *"lists its fields in whatever order it likes and
+> the checker reorders them"*, making `P { x: 1, y: 2 }` and `P { y: 2, x: 1 }`
+> the same value hashing differently. The checker does not reorder them — it
+> **refuses** the second spelling:
+>
+> > ``field `x` is written after `y`, but `P` declares it before; a struct
+> > literal's fields run in declaration order, so writing them in another
+> > order would hide what runs first``
+>
+> That is `defined-behaviour.md` §3 doing its job — the order you read is the
+> order it runs — and it means there was never a gap here. There is only one
+> spelling of a given literal, so the hash could not disagree with the value.
+>
+> It also said the destructuring pattern had *"the same gap for the same
+> reason — the declaration's order is not known where the encoder runs"*.
+> That gap was real: `let P { y, x } = p` compiles and used to hash
+> differently from `let P { x, y } = p`, though a pattern binds by name and
+> runs nothing. But the stated reason was wrong twice over. The encoder holds
+> the whole `Ast` and could look a declaration up; and it does not need to,
+> because **sorting by name** settles it without a lookup and is the better
+> rule anyway — it also survives a struct reordering its own fields, which
+> binds nothing different and should move no body's hash.
+>
+> So the pattern's field names are now sorted where they are encoded. The
+> binders are sorted *with* them, because they are positional from the
+> destructure onwards: encoding `[x, y]` while pushing `[y, x]` would give two
+> programs that bind differently the same bytes, and a collision is worse than
+> the spurious difference being removed. There is a test for that, and one for
+> shadowing.
+>
+> A tuple destructuring and an enum pattern's bindings are positional and stay
+> that way: `let (a, b) = t` and `let (b, a) = t` are different programs.

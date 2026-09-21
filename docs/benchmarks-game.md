@@ -66,7 +66,7 @@ checked against a value the Game publishes, on every run.
 | **binary-trees** | Ported. `box`/`unbox` over a `Heap` |
 | Mandelbrot | Already in `benches/three/` |
 | n-body | Reachable now that §3's `sqrt` exists; not done |
-| fasta, reverse-complement | Reachable, and IO-bound: `io.write_all` is one `putchar` per byte, so they would mostly measure a libc call per character. That is a real finding and a separate slice, not a benchmark result |
+| fasta, reverse-complement | Reachable, and IO-bound: `io.write_all` is one `putchar` per byte, so they would mostly measure a libc call per character. That is a real finding and a separate slice, not a benchmark result. **Since built** — [`bulk-io.md`](bulk-io.md) is the slice, the finding was about authority rather than speed, and these two are now ordinary work |
 | k-nucleotide | Needs a hash table. Writable, not written |
 | pidigits | Needs **bignum division**, which `std.bignum` deliberately does not have (`float-printing.md` §3.2: the one quotient a printer needs is a single digit) |
 | regex-redux | Needs a regex engine. Out of reach |

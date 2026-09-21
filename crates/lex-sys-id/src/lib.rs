@@ -846,13 +846,34 @@ impl BodyHasher<'_> {
                 // Field *names* are encoded, because which field each binder
                 // takes is what the pattern says; the binders themselves are
                 // positional from here on, like any other local.
-                self.encoder.len(fields.len());
-                for field in fields {
+                //
+                // Sorted by name, because `let P { x, y } = p` and
+                // `let P { y, x } = p` bind exactly the same names to exactly
+                // the same values and a pattern runs nothing, so the order
+                // they are written in carries no meaning for the hash to
+                // record. This is the one place in the encoder where written
+                // order is discarded, and it needs the binders sorted *with*
+                // the names: they are positional from here on, so encoding
+                // `[x, y]` while pushing `[y, x]` would give the same bytes
+                // to two programs that bind differently -- a collision, which
+                // is worse than the spurious difference this removes.
+                //
+                // By name and not into declaration order: a name needs no
+                // lookup, and it keeps a body's hash from moving when a
+                // struct reorders its fields, which binds nothing different.
+                //
+                // Safe because a struct's field names are distinct, so no two
+                // binders pushed here share a name and `Scope::position`'s
+                // last-match-wins finds the same one either way.
+                let mut sorted: Vec<Symbol> = fields.clone();
+                sorted.sort_by(|a, b| self.ast.name_of(*a).cmp(self.ast.name_of(*b)));
+                self.encoder.len(sorted.len());
+                for field in &sorted {
                     self.encoder.str(self.ast.name_of(*field));
                 }
                 // The value is encoded before the binders exist, as for `let`.
                 self.expr(*value);
-                for field in fields {
+                for field in &sorted {
                     self.scope.binders.push(*field);
                 }
             }
@@ -1006,14 +1027,18 @@ impl BodyHasher<'_> {
             Expr::StructLit { name, qualifier, fields } => {
                 self.encoder.tag(tag::STRUCT_LIT);
                 self.qualified_type_reference(*qualifier, *name);
-                // Field order as written is *not* canonicalised here: the
-                // checker reorders into declaration order, and two literals
-                // differing only in the order they list fields are the same
-                // value. Sorting by name would make that true of the hash too;
-                // it is left alone because the declaration's order is not
-                // known here, and `docs/canonical-ast.md` §8 keeps it open --
-                // as it does for a destructuring pattern, which has the same
-                // gap for the same reason.
+                // Field order as written needs no canonicalising, which an
+                // earlier version of this comment got wrong: it said the
+                // checker reorders the fields, so two spellings were the same
+                // value hashing differently. The checker **refuses** the
+                // second spelling instead -- a struct literal's fields run in
+                // declaration order, so writing them in another order would
+                // hide what runs first (`defined-behaviour.md` §3). There is
+                // only ever one spelling of a given literal to hash.
+                //
+                // A destructuring pattern is the case that really did have
+                // the gap, and it is sorted where it is encoded: nothing runs
+                // in a pattern, so there is no order to preserve.
                 self.encoder.len(fields.len());
                 for (field, value) in fields {
                     self.encoder.str(self.ast.name_of(*field));
@@ -1533,18 +1558,53 @@ mod tests {
     }
 
     #[test]
-    fn a_destructuring_pattern_hashes_the_field_order_it_wrote() {
-        // A pattern binds by field name, so the two bodies below mean
-        // exactly the same thing and hash differently anyway. That is the
-        // same gap a struct literal's field order has, for the same reason
-        // -- the declaration's order is not known here -- and
-        // `docs/canonical-ast.md` §8 records both as open rather than
-        // pretending otherwise.
+    fn a_destructuring_patterns_field_order_does_not_reach_the_hash() {
+        // A pattern binds by field name and runs nothing, so the two bodies
+        // below mean exactly the same thing -- and now hash the same.
+        //
+        // This test used to assert the opposite. `docs/canonical-ast.md` §8
+        // listed the difference as an open gap shared with a struct literal's
+        // field order, on the reasoning that the declaration's order was not
+        // known where the encoder runs. Both halves were wrong: the literal
+        // has no gap at all (the checker *refuses* the second spelling, it
+        // does not reorder it), and the pattern needed no declaration order
+        // to be fixed -- sorting by name is enough and is better, because it
+        // also survives a struct reordering its own fields.
         let written = "struct P { x: int, y: int } \
                  fn f(p: P) -> [] int { let P { x, y } = p; return x; }";
         let reordered = "struct P { x: int, y: int } \
                  fn f(p: P) -> [] int { let P { y, x } = p; return x; }";
-        assert_ne!(body(written, "f"), body(reordered, "f"));
+        assert_eq!(body(written, "f"), body(reordered, "f"));
+    }
+
+    #[test]
+    fn sorting_a_pattern_does_not_collide_two_different_bodies() {
+        // The binders are positional from the destructure onwards, so sorting
+        // the names without sorting the binders with them would give these
+        // two bodies the same bytes. They return different fields and must
+        // stay apart -- a collision is worse than the difference the sort
+        // removes.
+        let takes_x = "struct P { x: int, y: int } \
+                 fn f(p: P) -> [] int { let P { x, y } = p; return x; }";
+        let takes_y = "struct P { x: int, y: int } \
+                 fn f(p: P) -> [] int { let P { x, y } = p; return y; }";
+        assert_ne!(body(takes_x, "f"), body(takes_y, "f"));
+    }
+
+    #[test]
+    fn a_pattern_binder_still_shadows_an_outer_local() {
+        // Sorting reorders the binders a destructure pushes, so the check
+        // that it did not disturb shadowing: `x` after the pattern is the
+        // field, not the earlier local, whichever order the pattern is
+        // written in.
+        let outer = "struct P { x: int, y: int, z: int } \
+                 fn f(p: P) -> [] int { let x = 9; let P { x, y, z } = p; return x; }";
+        let reordered = "struct P { x: int, y: int, z: int } \
+                 fn f(p: P) -> [] int { let x = 9; let P { z, y, x } = p; return x; }";
+        let no_shadow = "struct P { x: int, y: int, z: int } \
+                 fn f(p: P) -> [] int { let x = 9; let P { y, z } = p; return x; }";
+        assert_eq!(body(outer, "f"), body(reordered, "f"));
+        assert_ne!(body(outer, "f"), body(no_shadow, "f"));
     }
 
     // ---- regions (`docs/linearity-and-effects.md` §5) -------------------

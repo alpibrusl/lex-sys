@@ -245,6 +245,17 @@ It streams, and that is not style: an arena is one 64 KiB chunk and
 standard input is not, so three-bytes-in-four-characters-out was the only
 way to write it — which is also how the C writes it.
 
+The encoder buffers now. `emit` used to be a `putchar` per character;
+it fills a 4 KiB slice and flushes it with `io.write_all`, because
+`docs/bulk-io.md` measured a libc call per byte at **12.8×** a bulk
+write. That is worth **1.6×** on this program rather than 12.8×, and §4
+of that document is honest about where the rest went — the cost moved
+from calls into byte-at-a-time stores that `cc -O2` vectorises and
+Cranelift does not. The visible price in the source is that `emit`
+threads `(at, column)` through and answers a pair: there is no object to
+keep them in, which is the same shape the rest of this program already
+had.
+
 `docs/porting.md` is the report, including §6 on what one small port does
 not establish.
 

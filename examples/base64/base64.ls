@@ -71,16 +71,25 @@ fn value_of(c: int) -> [] int {
 // Encoding
 // ---------------------------------------------------------------------
 
-// One output character, wrapping the line at 76 columns the way coreutils
-// does. `column` goes in and comes back out because there is nowhere else
-// to keep it: this is a program, not an object.
-fn emit[&i](io: &!i Io, c: int, column: int) -> [io_write] int {
-    putchar(io, c);
+// One output character into the line buffer, wrapping at 76 columns the
+// way coreutils does.
+//
+// This was a `putchar` straight to the console until `docs/bulk-io.md`,
+// which measured a libc call per byte at 12.8× a bulk write. Filling a
+// buffer and writing the run at once is what `write_bytes` is *for* —
+// and §5 of that document is the note that a buffered writer is a
+// library-shaped problem now rather than a language-shaped one.
+//
+// `at` and `column` both go in and come back out because there is
+// nowhere else to keep them: this is a program, not an object, and
+// threading two integers is what that costs.
+fn emit[&o](out: &!o [byte], at: int, column: int, c: int) -> [] (int, int) {
+    out[at] = byte_of(c);
     if column + 1 == 76 {
-        putchar(io, 10);
-        return 0;
+        out[at + 1] = byte_of(10);
+        return (at + 2, 0);
     }
-    return column + 1;
+    return (at + 1, column + 1);
 }
 
 // Three bytes to four characters. `held` is 0, 1 or 2 bytes short of a
@@ -93,55 +102,69 @@ fn encode[&i](io: &!i Io) -> [io_read, io_write] int {
     var held = 0;
     var column = 0;
 
-    var c = getchar(io);
-    while c >= 0 {
-        bits = (bits << 8) | c;
-        held = held + 1;
-        if held == 3 {
-            column = emit(io, int_of(table[(bits >> 18) & 0x3f]), column);
-            column = emit(io, int_of(table[(bits >> 12) & 0x3f]), column);
-            column = emit(io, int_of(table[(bits >> 6) & 0x3f]), column);
-            column = emit(io, int_of(table[bits & 0x3f]), column);
-            bits = 0;
-            held = 0;
+    region o {
+        // One buffer, flushed when a group might not fit. 4096 is a page
+        // and the tail leaves room for a group plus its newline.
+        let out = alloc_slice[o](4096, byte_of(0));
+        var at = 0;
+
+        var c = getchar(io);
+        while c >= 0 {
+            bits = (bits << 8) | c;
+            held = held + 1;
+            if held == 3 {
+                let a = emit(out, at, column, int_of(table[(bits >> 18) & 0x3f]));
+                let b = emit(out, a.0, a.1, int_of(table[(bits >> 12) & 0x3f]));
+                let d = emit(out, b.0, b.1, int_of(table[(bits >> 6) & 0x3f]));
+                let e = emit(out, d.0, d.1, int_of(table[bits & 0x3f]));
+                at = e.0;
+                column = e.1;
+                if at > 4080 {
+                    io.write_all(io, out[0..at]);
+                    at = 0;
+                }
+                bits = 0;
+                held = 0;
+            }
+            c = getchar(io);
         }
-        c = getchar(io);
-    }
 
-    // The tail. One held byte becomes two characters and two `=`; two held
-    // bytes become three characters and one `=`. The shifts are the same
-    // ones above with the missing bytes read as zero, which is what the
-    // padding is *for*.
-    if held == 1 {
-        bits = bits << 16;
-        column = emit(io, int_of(table[(bits >> 18) & 0x3f]), column);
-        column = emit(io, int_of(table[(bits >> 12) & 0x3f]), column);
-        column = emit(io, 61, column);
-        column = emit(io, 61, column);
-    }
-    if held == 2 {
-        bits = bits << 8;
-        column = emit(io, int_of(table[(bits >> 18) & 0x3f]), column);
-        column = emit(io, int_of(table[(bits >> 12) & 0x3f]), column);
-        column = emit(io, int_of(table[(bits >> 6) & 0x3f]), column);
-        column = emit(io, 61, column);
-    }
+        // The tail. One held byte becomes two characters and two `=`; two
+        // held bytes become three characters and one `=`. The shifts are
+        // the same ones above with the missing bytes read as zero, which
+        // is what the padding is *for*.
+        if held == 1 {
+            bits = bits << 16;
+            let a = emit(out, at, column, int_of(table[(bits >> 18) & 0x3f]));
+            let b = emit(out, a.0, a.1, int_of(table[(bits >> 12) & 0x3f]));
+            let d = emit(out, b.0, b.1, 61);
+            let e = emit(out, d.0, d.1, 61);
+            at = e.0;
+            column = e.1;
+        }
+        if held == 2 {
+            bits = bits << 8;
+            let a = emit(out, at, column, int_of(table[(bits >> 18) & 0x3f]));
+            let b = emit(out, a.0, a.1, int_of(table[(bits >> 12) & 0x3f]));
+            let d = emit(out, b.0, b.1, int_of(table[(bits >> 6) & 0x3f]));
+            let e = emit(out, d.0, d.1, 61);
+            at = e.0;
+            column = e.1;
+        }
 
-    // coreutils ends with a newline unless the output was empty, and
-    // `column == 0` is exactly "nothing since the last one".
-    if column > 0 {
-        putchar(io, 10);
+        // A final newline unless the last line already ended with one,
+        // which is what `column == 0` means here.
+        if column != 0 {
+            out[at] = byte_of(10);
+            at = at + 1;
+        }
+        if at > 0 {
+            io.write_all(io, out[0..at]);
+        }
     }
     return 0;
 }
 
-// ---------------------------------------------------------------------
-// Decoding
-// ---------------------------------------------------------------------
-
-// Four characters to three bytes, ignoring anything not in the alphabet
-// except that `=` ends the stream. Returns 0, or 1 if the input was
-// malformed -- which is the exit status, because that is what the C does.
 fn decode[&i](io: &!i Io) -> [io_read, io_write] int {
     var bits = 0;
     var held = 0;
