@@ -1,4 +1,4 @@
-//~ ERROR nothing moves out of a reference
+//~ ERROR expected `Box[Cell]`, found `&r Box[Cell]`
 
 // `docs/sharing.md` §2.1, the first of three.
 //
@@ -7,11 +7,13 @@
 // same cell. It is how every refcounting library in every other language
 // begins, and here it does not get past the checker.
 //
-// The rule it hits was not written with `Rc` in mind. `reading-references`
-// §2 says a reference gives references, so reading a `res` field through
-// one would leave two owners of a single allocation -- which is the exact
-// thing `clone` was trying to do. The refusal is not a technicality; it
-// is the whole argument of §2 arriving one line early.
+// The rule it hits was not written with `Rc` in mind, and it is now the
+// plainest rule in the language rather than a special one about reading.
+// `rc.held` through a reference is a `&r Box[Cell]`
+// (`reading-references.md` §2.0) -- a borrow of the cell, not a second
+// pointer to it -- and the struct literal wants a `Box[Cell]` it owns.
+// A borrow is not an owner. That is the whole refusal, and it is the
+// whole argument of `sharing.md` arriving one line early.
 
 struct Cell {
     value: int,

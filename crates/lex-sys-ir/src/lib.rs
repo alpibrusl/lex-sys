@@ -624,6 +624,21 @@ pub enum Expr {
         args: Vec<Type>,
         index: u32,
     },
+    /// `base.index` where the field is `res`, so what comes back is a
+    /// **reference to** the field rather than a copy of it
+    /// (`docs/reading-references.md` §2.0).
+    ///
+    /// The same arithmetic as [`Expr::FieldRef`], stopping one step
+    /// earlier: that node loads the field's leaves from `address +
+    /// offset`, and this one is `address + offset`. A `res` field cannot
+    /// be copied, so a borrow is the only thing reading one through a
+    /// reference could mean.
+    FieldAddr {
+        base: Box<Expr>,
+        def: DefId,
+        args: Vec<Type>,
+        index: u32,
+    },
     /// `s[i]` — one element of a slice, bounds-checked (`defined-behaviour`
     /// §8). `element` is what comes back, which is how the backend knows
     /// the stride.
@@ -748,6 +763,13 @@ pub enum Expr {
     /// The same, where `base` is a *reference* — [`Expr::FieldRef`]'s
     /// counterpart for a type with no declaration.
     TupleFieldRef {
+        base: Box<Expr>,
+        components: Vec<Type>,
+        index: u32,
+    },
+    /// The same, where the component is `res`: [`Expr::FieldAddr`]'s
+    /// counterpart for a type with no declaration.
+    TupleFieldAddr {
         base: Box<Expr>,
         components: Vec<Type>,
         index: u32,
@@ -2237,7 +2259,7 @@ fn settle_expr(expr: &mut Expr, unifier: &Unifier) {
                 settle_expr(arg, unifier);
             }
         }
-        Expr::FieldRef { base, args, .. } => {
+        Expr::FieldRef { base, args, .. } | Expr::FieldAddr { base, args, .. } => {
             settle_expr(base, unifier);
             for arg in args.iter_mut() {
                 *arg = unifier.resolve(arg);
@@ -2255,7 +2277,8 @@ fn settle_expr(expr: &mut Expr, unifier: &Unifier) {
             }
         }
         Expr::TupleField { base, components, .. }
-        | Expr::TupleFieldRef { base, components, .. } => {
+        | Expr::TupleFieldRef { base, components, .. }
+        | Expr::TupleFieldAddr { base, components, .. } => {
             settle_expr(base, unifier);
             for component in components.iter_mut() {
                 *component = unifier.resolve(component);
@@ -4861,7 +4884,10 @@ impl<'a> FnLowering<'a> {
                 let base_span = self.ast.expr_span(base_id);
                 let (lowered, base_ty) = self.expr(base_id)?;
                 let mut resolved = self.unifier.resolve(&base_ty);
-                let through_reference = matches!(resolved, Type::Ref { .. });
+                let through_reference = match &resolved {
+                    Type::Ref { unique, region, .. } => Some((*unique, *region)),
+                    _ => None,
+                };
                 if let Type::Ref { inner, .. } = resolved {
                     resolved = *inner;
                 }
@@ -4883,26 +4909,21 @@ impl<'a> FnLowering<'a> {
                         span,
                     ));
                 };
-                if through_reference {
-                    // `docs/reading-references.md` §2, in the place tuples
+                if let Some((unique, region)) = through_reference {
+                    // `docs/reading-references.md` §2.0, in the place tuples
                     // add. A `val` component is copied out, which costs the
                     // referent nothing; a `res` one cannot be copied, so
-                    // reading it here would leave two owners of one value.
-                    // Enforced from the start this time -- the last place
-                    // this rule was missing cost a double free to find.
+                    // what comes back is a reference to it. A tuple is an
+                    // anonymous struct, so it had better not need its own
+                    // ideas about this either.
+                    let base = Box::new(lowered);
                     if mode_of(self.defs, self.unifier, &self.bounds, &ty) == Mode::Res {
-                        return Err(Diagnostic::new(
-                            format!(
-                                "`{}` is `res`, and nothing moves out of a reference: reading it here would leave two owners of one value. Take the whole value apart instead, or reach the component on an owner",
-                                self.unifier.display(&ty)
-                            ),
-                            span,
+                        return Ok((
+                            Expr::TupleFieldAddr { base, components, index },
+                            Type::Ref { unique, region, inner: Box::new(ty) },
                         ));
                     }
-                    return Ok((
-                        Expr::TupleFieldRef { base: Box::new(lowered), components, index },
-                        ty,
-                    ));
+                    return Ok((Expr::TupleFieldRef { base, components, index }, ty));
                 }
                 self.trace
                     .emit(Event::Read { ty: Type::Tuple(components.clone()), span: base_span });
@@ -4916,7 +4937,14 @@ impl<'a> FnLowering<'a> {
                 // One level: a reference to a reference has to be written
                 // through twice, because auto-dereferencing a chain is the
                 // kind of convenience that makes a cost invisible.
-                let through_reference = matches!(resolved, Type::Ref { .. });
+                // The base's mode and region travel with it: a field of a
+                // `&!r` is reachable uniquely and a field of a `&r` is not,
+                // and either way the field's reference lives exactly as long
+                // as the one it was reached through (§2.0).
+                let through_reference = match &resolved {
+                    Type::Ref { unique, region, .. } => Some((*unique, *region)),
+                    _ => None,
+                };
                 if let Type::Ref { inner, .. } = resolved {
                     resolved = *inner;
                 }
@@ -4948,40 +4976,39 @@ impl<'a> FnLowering<'a> {
                     ));
                 };
                 let ty = fields[index].1.substitute(&type_args, &[]);
-                if through_reference {
+                if let Some((unique, region)) = through_reference {
                     // `docs/reading-references.md` §2: **nothing moves out
                     // of a reference, ever.** That rule was stated for
-                    // `match` and field access is the other way to reach
-                    // into a value, so it holds here too -- and until this
-                    // check existed it did not.
+                    // `match`, and field access is the other way to reach
+                    // into a value, so it holds here too.
                     //
-                    // A `val` field is *copied* out, which is what a
-                    // reference is for and costs the referent nothing. A
-                    // `res` field cannot be copied, so reading one here
-                    // would produce a second owner of a value the referent
-                    // still owns: two obligations where one is owed, and a
-                    // double free at the end of it. That was reachable from
-                    // ordinary code with no `unsafe` anywhere, which this
-                    // language does not have.
-                    if mode_of(self.defs, self.unifier, &self.bounds, &ty) == Mode::Res {
-                        return Err(Diagnostic::new(
-                            format!(
-                                "`{}` is `res`, and nothing moves out of a reference: reading it here would leave two owners of one value. Take the whole value apart instead, or reach the field on an owner",
-                                self.unifier.display(&ty)
-                            ),
-                            span,
-                        ));
-                    }
+                    // It decides what comes back rather than whether
+                    // anything does. A `val` field is *copied*, which costs
+                    // the referent nothing and is what a reference is for.
+                    // A `res` field cannot be copied -- that is what `res`
+                    // means -- so what comes back is a **reference to** it,
+                    // exactly as `match` on a reference binds a `res`
+                    // payload. Nothing moves either way, and the double
+                    // free that copying one caused is unexpressible either
+                    // way (§2.0).
+                    //
                     // Reading through a reference is what a reference is
                     // *for*, so no `Read` event: the referent is frozen for
                     // the whole region and nothing is being moved.
+                    let base = Box::new(lowered);
+                    if mode_of(self.defs, self.unifier, &self.bounds, &ty) == Mode::Res {
+                        return Ok((
+                            Expr::FieldAddr {
+                                base,
+                                def: def_id,
+                                args: type_args,
+                                index: index as u32,
+                            },
+                            Type::Ref { unique, region, inner: Box::new(ty) },
+                        ));
+                    }
                     return Ok((
-                        Expr::FieldRef {
-                            base: Box::new(lowered),
-                            def: def_id,
-                            args: type_args,
-                            index: index as u32,
-                        },
+                        Expr::FieldRef { base, def: def_id, args: type_args, index: index as u32 },
                         ty,
                     ));
                 }
@@ -7968,16 +7995,52 @@ mod linearity_tests {
     }
 
     #[test]
-    fn a_res_field_cannot_be_read_through_a_reference() {
-        // `docs/reading-references.md` §2.0, and the unit test for a real
-        // soundness hole: this compiled until the check existed, and gave
-        // a double free under valgrind.
+    fn a_res_field_through_a_reference_is_a_borrow() {
+        // `docs/reading-references.md` §2.0. A `res` field cannot be
+        // copied, so what comes back is a reference to it -- exactly as
+        // `match` on a reference binds a `res` payload.
+        accepted(
+            "res struct Holder { f: File } \
+             fn peek[&r](h: &r Holder) -> [] int { let taken = h.f; return 0; } \
+             fn main() -> [] int { return 0; }",
+        );
+
+        // And consuming it is refused, which is the soundness hole this
+        // has now closed twice: allowed once (a double free under
+        // valgrind), then refused outright, which overshot. The refusal
+        // belongs at the *use*, because the double free was never about
+        // reading -- and the ordinary type rule already puts it there.
         let message = refused(
             "res struct Holder { f: File } \
              fn steal[&r](h: &r Holder) -> [] int { let taken = h.f; return close(taken); } \
              fn main() -> [] int { return 0; }",
         );
-        assert!(message.contains("nothing moves out of a reference"), "{message}");
+        assert!(message.contains("expected `File`, found `&r File`"), "{message}");
+    }
+
+    #[test]
+    fn a_borrowed_field_carries_the_bases_mode_and_region() {
+        // A field of a `&!r` is reachable uniquely, which is §2.2's
+        // disjointness argument for payloads applied to fields: they are
+        // different offsets in one value and no two names reach the same
+        // one.
+        accepted(
+            "res struct Holder { f: File } \
+             fn peek[&r](h: &!r Holder) -> [] int { let taken = h.f; return 0; } \
+             fn main() -> [] int { return 0; }",
+        );
+
+        // And it may be handed back at the function's own region, which
+        // is exactly `contents`' shape: the caller supplied `r`, so a
+        // reference valid for `r` is a reference the caller can hold.
+        // Nothing here needed a new rule -- a block region still cannot
+        // escape its block, by the same occurs-check as every other
+        // reference (`contents_escapes_its_borrow.ls`).
+        accepted(
+            "res struct Holder { f: File } \
+             fn take[&r](h: &r Holder) -> [] &r File { return h.f; } \
+             fn main() -> [] int { return 0; }",
+        );
     }
 
     #[test]
@@ -8063,14 +8126,24 @@ mod linearity_tests {
     /// tuples from the start rather than after a double free found it
     /// missing, which is how it was found for struct fields.
     #[test]
-    fn a_res_component_does_not_move_out_of_a_reference_and_a_val_one_copies() {
-        let message = refused(
+    fn a_res_component_borrows_out_of_a_reference_and_a_val_one_copies() {
+        // Binding it is a borrow, like a struct's field; consuming it is
+        // refused by the type, like a struct's field. A tuple is an
+        // anonymous struct, so it had better not need its own ideas.
+        accepted(
             "fn peek[&p](pair: &p (Box[int], int)) -> [] int { let held = pair.0; return 0; } \
              fn main(world: World) -> [] int { \
              let Split { io, ffi, fs, heap, args } = split(world); \
              release(args); release(ffi); release(fs); release(heap); release(io); return 0; }",
         );
-        assert!(message.contains("nothing moves out of a reference"), "{message}");
+        let message = refused(
+            "fn steal[&h, &p](heap: &!h Heap, pair: &p (Box[int], int)) -> [heap] int { \
+             return unbox(heap, pair.0); } \
+             fn main(world: World) -> [] int { \
+             let Split { io, ffi, fs, heap, args } = split(world); \
+             release(args); release(ffi); release(fs); release(heap); release(io); return 0; }",
+        );
+        assert!(message.contains("found `&p Box[int]`"), "{message}");
 
         accepted(
             "fn peek[&p](pair: &p (int, int)) -> [] int { return pair.0 + pair.1; } \

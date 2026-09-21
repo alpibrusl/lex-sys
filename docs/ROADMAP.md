@@ -43,11 +43,13 @@ reasoning — this table is the index, not the argument.
 | [#32](https://github.com/alpibrusl/lex-sys/pull/32) | [A standard library](standard-library.md) | `--std`, with the source compiled into the binary rather than looked up. Found the compiler emitting **every** non-generic function rather than what `main` reaches — 6720 bytes against 1048 for a program calling none of it |
 | [#33](https://github.com/alpibrusl/lex-sys/pull/33) | [Mode polymorphism](mode-polymorphism.md) | Checking a claim found a **leak and a double free**: a `val` on a generic declaration was trusted rather than checked. And a worse bug — a call took its types from one function and its effect row from another, so a call into C could declare `[]` and compile |
 | [#34](https://github.com/alpibrusl/lex-sys/pull/34) | [Collections](collections.md) | Which collections hold a resource is decided by **shape**, not generics: a list works because taking it apart produces its elements; an array does not because freeing one is a single `free` that runs nothing |
+| [#35](https://github.com/alpibrusl/lex-sys/pull/35) | The README | Not a language change: the README had grown a paragraph per slice in three places at once, so the history moved here and the per-example prose moved to `examples/` |
+| [#36](https://github.com/alpibrusl/lex-sys/pull/36) | [A borrowed field](reading-references.md) | The double free was never about **reading**, it was about **owning**. A `res` field through a reference is a borrow, and the refusal that used to guard it was doing work the type rule already does |
 
 ### The pattern, if there is one
 
-Seven of these thirteen slices found a bug or falsified a claim the
-project had already written down, and three of those were soundness
+Eight of these fourteen slices found a bug, falsified a claim the project
+had already written down, or both — and three of those were soundness
 bugs reachable from ordinary code. That is not an accident of luck: each
 slice is built by writing the thing the previous document said was
 possible, and the documents keep being wrong in the same direction —
@@ -58,7 +60,10 @@ documents are trustworthy at all: **a falsified claim is corrected in
 place, in the document that made it, rather than quietly edited.**
 `sharing.md` corrects `linearity-and-effects.md` §9;
 `collections.md` corrects both `standard-library.md` §4 and
-`mode-polymorphism.md` §1, the second of which was itself a correction.
+`mode-polymorphism.md` §1, the second of which was itself a correction;
+and #36 corrects `reading-references.md` §2.0 and `sharing.md` §2.1,
+where a refusal turned out to be broader than the hazard it was written
+for.
 
 ---
 
@@ -66,7 +71,6 @@ place, in the document that made it, rather than quietly edited.**
 
 | Next | Why it is next |
 |---|---|
-| Reading a `res` field through a reference | `match` on a reference **borrows**; field access on one **copies**, so a struct with a `res` field cannot be read through a reference at all while the equivalent enum can. `std.buffer` and `std.vec` have each paid for it with a by-value-and-back accessor. [`collections.md`](collections.md) §5.1 |
 | A writer abstraction | Format into a buffer or a file rather than only the console. Wants either closures or a dispatch story, and the interesting part is the effect row of a writer that could be either |
 | `defer` | [`linearity-and-effects.md`](linearity-and-effects.md) §4.2 is verbose without it. The expansion is mechanical; the question is whether a consumption the programmer did not write at the point it happens is still "visible" |
 | Capability release at `main` | Four `release` calls is ceremony. Letting the runtime reclaim `World`'s parts is convenient and is *exactly* the affine hole §4 refuses everywhere else |

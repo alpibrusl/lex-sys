@@ -116,22 +116,20 @@ pub fn push_nat[&h](heap: &!h Heap, b: Buffer, n: int) -> [heap] Buffer {
     return push(heap, out, byte_of(48 + n % 10));
 }
 
-// Print what is in the buffer, and hand the buffer back.
+// Print what is in the buffer.
 //
-// By value rather than by reference, and that is forced rather than
-// stylistic: a `Buffer` owns its box, and a `res` field cannot be read
-// through a reference (`docs/reading-references.md` §2 — nothing moves
-// out of a reference). So the way to reach the box is to take the whole
-// buffer apart, which means owning it, which means handing it back.
-pub fn write[&i](io: &!i Io, b: Buffer) -> [io_write] Buffer {
-    let Buffer { held, used } = b;
-    borrow held as &r in {
-        let whole = contents(r);
-        var i = 0;
-        while i < used {
-            putchar(io, int_of(whole[i]));
-            i = i + 1;
-        }
+// By reference, which took two slices to become possible. A `Buffer`
+// owns its box, and a `res` field could not be reached through a
+// reference at all — so this used to take the buffer by value and hand
+// it back, and every caller had to thread the result. `b.held` is a
+// `&b Box[[byte]]` now (`docs/reading-references.md` §2.0), and the
+// buffer is not disturbed by being printed.
+pub fn write[&i, &b](io: &!i Io, b: &b Buffer) -> [io_write] int {
+    let whole = contents(b.held);
+    var i = 0;
+    while i < b.used {
+        putchar(io, int_of(whole[i]));
+        i = i + 1;
     }
-    return Buffer { held: held, used: used };
+    return b.used;
 }
