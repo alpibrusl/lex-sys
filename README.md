@@ -184,8 +184,24 @@ and requires every hash to survive.
 > still declares what it did. That is
 > [`docs/modules.md`](docs/modules.md).
 >
-> **Still missing:** the standard library itself — now genuinely
-> unblocked. Do not mistake this for a usable language yet.
+> **And there is a standard library.** `std.bytes` (text, which here
+> means bytes), `std.io` (the console), `std.math`, and `std.buffer` —
+> the one collection, because every other one wants generics over a
+> *mode* and there are none yet. Reached with `--std`, whose source is
+> compiled into the `lex-sys` binary rather than looked up, so it adds
+> no search path and no manifest. It is opt-in and never a prelude: a
+> program still writes `import std.io;` where it uses one.
+>
+> Building it found the compiler emitting **every** non-generic function
+> rather than what `main` reaches — 6720 bytes against 1048 for a
+> program calling none of the library. Fixed rather than documented
+> around: checking is total, emission starts at the entry point, and
+> every program gets the benefit. That is
+> [`docs/standard-library.md`](docs/standard-library.md).
+>
+> **Still missing:** a writer abstraction, `Option`/`Result` over
+> resources, and collections beyond a byte buffer — all waiting on mode
+> polymorphism. Do not mistake this for a usable language yet.
 
 ## What this is
 
@@ -373,6 +389,21 @@ cargo run -p lex-sys -- run examples/slab/main.ls examples/slab/slab.ls
 # old handle:   missing
 ```
 
+`examples/wordcount.ls` is the before-and-after for the standard
+library. It used to open with `space`, `newline`, `write_all`,
+`print_nat` and `is_blank` — five helpers that are not what the program
+is about, and that 24 other files here each wrote out again. They are
+`std.io` and `std.bytes` now:
+
+```sh
+cargo run -p lex-sys -- run examples/wordcount.ls --std
+```
+
+`is_blank` moving out is the part worth noticing. `wordcount` counted
+space and newline; `tally` counted six bytes; neither knew the other
+disagreed. One definition, in one place, is most of what a standard
+library is for.
+
 `examples/modular/` is two modules and a root. `fmt.text` holds the
 console helpers, `fmt.counts` holds a tally and imports `fmt.text`, and
 `main` imports both — one under its own name and one renamed with `as`,
@@ -440,7 +471,7 @@ arithmetic, slices, strings, file IO through a path-carrying capability, a
 general heap with recursive types, boxed slices and the growable buffers
 they allow, reading through references — `*r` and `match` on a reference —
 tuples, the command line, standard input, programs spread over several
-files, and modules with visibility.
+files, modules with visibility, and a standard library.
 
 ```
 res struct Ticket { serial: int }
@@ -696,10 +727,25 @@ its own identity nor any caller's — `canonical-ast.md` §1 survives
 namespaces, and there is a test that compiles the same two functions
 flat and modular and asserts all four hashes are identical.
 
-**What does not, yet:** the standard library itself, flag parsing,
-environment variables, and standard error. All of them are now ordinary
-work rather than blocked work, which is the difference these changes
-made.
+The standard library came last, and building it found a real cost the
+compiler had been paying all along. A program that called none of it
+still got 6720 bytes of object against 1048 without — because emission
+seeded from *every* non-generic function rather than from what `main`
+reaches, which is indistinguishable from reachability right up until
+there is a library. The two passes have one job each now: checking is
+total, emission starts at the entry point. Every program gets it, not
+just ones using `std`.
+
+It also surfaced a must-reject fixture that had been **passing for the
+wrong reason** — `effect_not_propagated.ls` was refused for a missing
+argument rather than for the effect rule it tests, and only the change
+in checking order revealed it.
+
+**What does not, yet:** a writer abstraction, `Option` and `Result` over
+resource types, collections beyond a byte buffer, flag parsing,
+environment variables, and standard error. The first three wait on mode
+polymorphism; the rest are ordinary work rather than blocked work, which
+is the difference these changes made.
 
 Every example declares what it prints in its own header, and a test walks
 `examples/` and checks them, so an example that stops matching the language
@@ -765,6 +811,7 @@ carry them exists now, while it is cheap.
 | [`docs/shadowing.md`](docs/shadowing.md) | Rebinding a name in one block: why it was refused, and the liveness rule that replaces the refusal | **settled and built** — the last of `sharing.md` §4's three gaps, and one rule where there were two |
 | [`docs/standard-input.md`](docs/standard-input.md) | `getchar`, and why reading the console is a second label on `Io` rather than a seventh capability | **settled and built** — `examples/tally.ls` is `wc` over a pipe; the `io` effect label became `io_write` |
 | [`docs/modules.md`](docs/modules.md) | `module`, `import`, `pub` and qualified names — a namespace, not an identity, and not a trust boundary | **settled and built** — the precondition for a standard library; a module reaches no hash, and a test says so |
+| [`docs/standard-library.md`](docs/standard-library.md) | `std.bytes`, `std.io`, `std.math`, `std.buffer`, and `--std` with the source in the binary | **settled and built** — and it found the compiler emitting unreachable code; a program with `--std` and one without now emit byte-identical objects |
 | `docs/memory-model.md` | Regions, escape, the escape hatches and their cost | not written — §5 and §6 settled and built regions and escape, and `sharing.md` has now settled §9's hatches. Nothing is left that a document of its own would say |
 | [`docs/defined-behaviour.md`](docs/defined-behaviour.md) | Every place C and Rust leave behaviour open, and what we define it to | **written and enforced** — overflow traps, evaluation order is left to right, and §9 names the fixture behind each rule |
 | [`docs/strings.md`](docs/strings.md) | What a string is: bytes rather than an encoding, `byte` as storage rather than arithmetic, packed layout, literals and the static region | **settled and built** — gated M3's last item; §9's must-reject suite is enforced |

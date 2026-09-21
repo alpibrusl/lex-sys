@@ -1911,16 +1911,17 @@ pub fn lower(ast: &Ast) -> Result<Program, Diagnostic> {
         });
     }
 
-    // Pass 1: check each generic function once, with its parameters rigid.
+    // Pass 1: check **every** function, once.
     //
-    // Without this an unused generic function is never checked at all, since
-    // pass 2 only reaches what is called. Rigid parameters are also the
-    // stronger check: a body that type-checks for every `T` is checked once,
-    // rather than once per instantiation and never for the `T` nobody used.
+    // Checking is total and emission is not, which is the split that lets
+    // `docs/standard-library.md` §5.2 be true: a library declaration
+    // nobody calls is still type-checked, and still costs no bytes.
+    //
+    // A generic function is checked with its parameters *rigid*, which is
+    // the stronger check as well as the only one available: a body that
+    // type-checks for every `T` is checked once, rather than once per
+    // instantiation and never for the `T` nobody used.
     for (index, signature) in signatures.iter().enumerate() {
-        if signature.generics.is_empty() {
-            continue;
-        }
         let rigid: Vec<Type> = (0..signature.generics.len() as u32).map(Type::Param).collect();
         let mut checking = Mono::new(false);
         lower_function(
@@ -1935,12 +1936,33 @@ pub fn lower(ast: &Ast) -> Result<Program, Diagnostic> {
         )?;
     }
 
-    // Pass 2: emit a copy of every function actually reachable, starting from
-    // the ones that need no type arguments.
+    // Pass 2: emit a copy of every function actually reachable.
+    //
+    // The roots are `main` and nothing else -- a program is what its
+    // entry point reaches. Before `docs/standard-library.md` this seeded
+    // from every non-generic function instead, which was indistinguishable
+    // while every function in a program was one somebody wrote; with a
+    // standard library it is the difference between a 1 KB object and a
+    // 7 KB one for a program that calls none of it.
+    //
+    // With no `main` there is no program, only declarations -- `lex-sys
+    // check` on a library on its own, which has to check all of them. So
+    // every non-generic function is a root in that case, which is the
+    // binary-versus-library distinction every toolchain draws, drawn by
+    // the one fact available here.
     let mut mono = Mono::new(true);
-    for (index, signature) in signatures.iter().enumerate() {
-        if signature.generics.is_empty() {
+    let entry =
+        signatures.iter().position(|s| ast.name_of(s.name) == "main" && s.generics.is_empty());
+    match entry {
+        Some(index) => {
             mono.request(index, Vec::new());
+        }
+        None => {
+            for (index, signature) in signatures.iter().enumerate() {
+                if signature.generics.is_empty() {
+                    mono.request(index, Vec::new());
+                }
+            }
         }
     }
 

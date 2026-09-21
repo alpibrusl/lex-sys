@@ -1,15 +1,39 @@
 // wordcount.ls — `wc` over an embedded document, and the first program in
 // this repo that is mostly *text processing* rather than a demonstration.
 //
-// It is here because strings are the point at which lex-sys stops being a
-// language you can show and starts being one you can use. Everything it
-// does is ordinary: a literal is a slice, a slice is a reference, bytes are
-// compared and converted explicitly, the scratch buffer lives in an arena,
-// and the console capability is threaded to the one place that prints.
+// It is also the before-and-after for `docs/standard-library.md`. This
+// file used to open with `space`, `newline`, `write_all`, `print_nat`
+// and `is_blank` — five helpers that were not what the program is about,
+// and that 24 other files here each wrote out again. They are `std.io`
+// and `std.bytes` now, and the program is sixty lines shorter for it.
+//
+// Build it with the library:
+//
+//     lex-sys run examples/wordcount.ls --std
+//
+// `--std` is not a search path: the library's source is compiled into
+// the `lex-sys` binary (§2). And it is not a prelude either — the two
+// `import` lines below are what put a name in scope, and a program that
+// writes neither gets neither.
+//
+// `is_blank` moving out is the part worth noticing. This file's version
+// counted space and newline; `std.bytes` counts the six bytes C calls
+// space, which is what `examples/tally.ls` needed and got wrong twice.
+// Two programs here had two definitions of a word boundary and neither
+// knew. One definition, in one place, is most of what a standard library
+// is for (`docs/standard-library.md` §5.3).
 //
 // What it is *not* is Unicode-aware. `docs/strings.md` §1 claims no
 // encoding, so this counts bytes and ASCII whitespace, and says so. A UTF-8
 // decoder is library work over exactly this slice type.
+
+// Imported as `console` rather than `io`, because this program already
+// binds an `Io` called `io` and `console.write_all(io, ..)` reads badly even
+// though it compiles -- a qualifier and a binding are different
+// namespaces, and a reader should not have to know that to follow a
+// line. `as` exists for exactly this (`docs/modules.md` §4).
+import std.io as console;
+import std.bytes;
 //~ STDOUT the quick brown fox
 //~ STDOUT jumps over the lazy dog
 //~ STDOUT and then the fox rests
@@ -23,41 +47,20 @@
 
 // ------------------------------------------------------------- output ----
 
-fn space[&i](io: &!i Io) -> [io_write] int {
-    return putchar(io, 32);
-}
-
-fn newline[&i](io: &!i Io) -> [io_write] int {
-    return putchar(io, 10);
-}
-
-fn write_all[&r, &i](io: &!i Io, s: &r [byte]) -> [io_write] int {
-    var n = 0;
-    while n < len(s) {
-        putchar(io, int_of(s[n]));
-        n = n + 1;
-    }
-    return len(s);
-}
-
-fn print_nat[&i](io: &!i Io, n: int) -> [io_write] int {
-    if n >= 10 {
-        print_nat(io, n / 10);
-    }
-    return putchar(io, 48 + n % 10);
-}
-
-// A label, then the number right-aligned in a small field. Three calls to
+// A label, then the number right-aligned in a small field. Five calls to
 // this is the whole report.
+//
+// The only output helper left, because it is the only one that is about
+// *this* program's layout. Everything it calls is `std.io`.
 fn row[&r, &i](io: &!i Io, label: &r [byte], value: int, width: int) -> [io_write] int {
-    write_all(io, label);
+    console.write_all(io, label);
     var pad = width - len(label);
     while pad > 0 {
-        space(io);
+        console.space(io);
         pad = pad - 1;
     }
-    print_nat(io, value);
-    return newline(io);
+    console.print_nat(io, value);
+    return console.newline(io);
 }
 
 // --------------------------------------------------------- the bytes -----
@@ -76,10 +79,13 @@ fn space_byte() -> [] byte {
     return byte_of(32);
 }
 
-// §2: comparing storage is not arithmetic, so `==` on bytes is allowed --
-// and it is the only operator that is.
-fn is_blank(b: byte) -> [] bool {
-    return b == space_byte() || b == newline_byte();
+// `std.bytes.is_blank` takes an `int`, because that is what `getchar`
+// hands back and what `int_of` produces. Converting here rather than
+// giving the library a `byte` overload is the honest shape: the language
+// has no overloading, and one function that works for both callers beats
+// two that nearly do.
+fn blank(b: byte) -> [] bool {
+    return bytes.is_blank(int_of(b));
 }
 
 // ---------------------------------------------------------- counting -----
@@ -103,7 +109,7 @@ fn count_words[&r](text: &r [byte]) -> [] int {
     var inside = false;
     var n = 0;
     while n < len(text) {
-        if is_blank(text[n]) {
+        if blank(text[n]) {
             inside = false;
         } else {
             if !inside {
@@ -164,13 +170,13 @@ fn count_word[&r, &n](text: &r [byte], needle: &n [byte]) -> [] int {
         if matches_at(text, needle, at) == 1 {
             var standalone = true;
             if at > 0 {
-                if !is_blank(text[at - 1]) {
+                if !blank(text[at - 1]) {
                     standalone = false;
                 }
             }
             let after = at + len(needle);
             if after < len(text) {
-                if !is_blank(text[after]) {
+                if !blank(text[after]) {
                     standalone = false;
                 }
             }
@@ -187,8 +193,8 @@ fn count_word[&r, &n](text: &r [byte], needle: &n [byte]) -> [] int {
 
 fn report[&i](io: &!i Io) -> [io_write] int {
     let text = document();
-    write_all(io, text);
-    write_all(io, "--\n");
+    console.write_all(io, text);
+    console.write_all(io, "--\n");
 
     let lines = count_lines(text);
     let words = count_words(text);
