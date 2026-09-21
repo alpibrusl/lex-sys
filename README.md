@@ -190,7 +190,9 @@ calls; arenas, a general heap with recursive types, boxed slices and the
 growable buffers they allow; slices and strings; file IO through a
 path-carrying capability; the console in both directions; the command line;
 programs spread over several files; modules with visibility; and a standard
-library of eight modules.
+library of ten modules — one of which prints a `float` as the shortest
+decimal that reads back to the same bits, written in lex-sys rather than in
+the compiler ([`docs/float-printing.md`](docs/float-printing.md)).
 
 What is **not** there yet, and why, is [`docs/ROADMAP.md`](docs/ROADMAP.md).
 

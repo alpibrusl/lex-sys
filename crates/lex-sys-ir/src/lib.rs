@@ -266,6 +266,21 @@ pub enum Builtin {
     /// `floor`, `ceil` and round-to-nearest belong in `std.math`, where
     /// each can say which it is.
     Truncate,
+    /// `bits_of(x: float) -> [] int` — the IEEE-754 representation, read
+    /// as an integer (`docs/float-printing.md` §2).
+    ///
+    /// A *reinterpretation*, not a conversion: the bits are unchanged and
+    /// IEEE-754 says exactly what they mean. `float_of` and `truncate`
+    /// are the conversions, and both are about values.
+    ///
+    /// It exists so numeric library code can be written **in the
+    /// language** rather than in the compiler. Without it, decomposing a
+    /// float into sign, exponent and mantissa is impossible, and every
+    /// routine that needs to — printing, `copysign`, `frexp`, a total
+    /// order — has to become a builtin. `std.fmt` is the first caller and
+    /// is the argument: a correct shortest-round-trip printer, written in
+    /// lex-sys, rather than a hole in the standard library.
+    BitsOf,
     /// `is_nan(x: float) -> [] bool` (§5).
     ///
     /// Exists because NaN breaks comparison — `x == x` is false for it —
@@ -366,6 +381,7 @@ impl Builtin {
         Builtin::FloatOf,
         Builtin::Truncate,
         Builtin::IsNan,
+        Builtin::BitsOf,
         Builtin::FsRead,
         Builtin::FsWrite,
         Builtin::Box,
@@ -393,6 +409,7 @@ impl Builtin {
             Builtin::FloatOf => "float_of",
             Builtin::Truncate => "truncate",
             Builtin::IsNan => "is_nan",
+            Builtin::BitsOf => "bits_of",
             Builtin::FsRead => "fs_read",
             Builtin::FsWrite => "fs_write",
             Builtin::Box => "box",
@@ -523,6 +540,7 @@ impl Builtin {
             Builtin::FloatOf => (vec![Type::Int], Type::Float),
             Builtin::Truncate => (vec![Type::Float], Type::Int),
             Builtin::IsNan => (vec![Type::Float], Type::Bool),
+            Builtin::BitsOf => (vec![Type::Float], Type::Int),
             // Both are checked at the call site rather than here, because a
             // fixed signature cannot say what they need. `release` ends any
             // capability, and there is more than one kind; `narrow` has an

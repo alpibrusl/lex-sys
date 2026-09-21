@@ -213,9 +213,13 @@ the nearest value that is. A method that *converged* and a method that
 reached the answer are different things, and this is where the
 difference becomes visible.
 
-It also shows what `floating-point.md` §7 admits is missing: every number
-here is printed through `truncate` and a scale factor, because printing a
-float is still an open question.
+Every number here is printed by `std.fmt.float_into` — the shortest
+decimal that reads back to the same bits, written in lex-sys rather than
+in the compiler (`float-printing.md`). An earlier version of this file
+reported everything through `truncate` and a scale factor of 1e18,
+because printing a float was still open; the difference is visible in
+step 3, whose residual was `6007304882427` there and is
+`6.007304882427178e-6` here. Three digits the scale factor was eating.
 
 ### `base64/` — a program that did not start here
 

@@ -133,6 +133,35 @@ worked at both modes since M2, and what was missing was a library that
 said so. The fourth needed a bound on a type declaration, because
 `res struct Vec[T: val]` is two modes about two different things.
 
+### 3.6 `std.fmt` and `std.bignum` — printing a float
+
+```
+fmt.float_into(out, x) -> int       // bytes written, or -1 if `out` is short
+```
+
+The shortest decimal that reads back to the same bits — `0.1` as `1e-1`,
+not as `0.1000000000000000055511151231257827` and not as `0.100000`.
+`docs/float-printing.md` is the whole story; two things belong here.
+
+**It is library code, and that is the interesting part.** Float printing
+is the routine every other language keeps in its runtime, in C or Rust,
+a thousand lines behind whatever interface it chose. Here it is
+`std/fmt.ls`, written in lex-sys, with an effect row of `[]` and no
+`Heap` — the working numbers live in a `region`. The compiler's entire
+contribution is `bits_of`, a bitcast. Anything `float_into` does, a
+program could have done.
+
+**`std.bignum` is underneath, and has no division.** Exact integers to
+1080 bits, base-2³² limbs in a fixed-length `[int]`, in place and
+allocation-free. It is ninety lines rather than four hundred because the
+one quotient the printer needs is a single digit, and nine subtractions
+settle it.
+
+Neither module is a general-purpose facility and neither pretends to be:
+`std.bignum` is as wide as `std.fmt` needs, and `std.fmt` prints one
+type. §4's "no allocation-free string formatting" still stands for
+everything else.
+
 ---
 
 ## 4. What is deliberately not in it
@@ -158,9 +187,12 @@ said so. The fourth needed a bound on a type declaration, because
   therefore `[T: val]`, honestly, and `std.list` is the collection that
   holds resources. The difference is the **shape**, which is what both
   earlier answers missed by looking at the generics.
-* **No allocation-free string formatting.** `print_*` writes to the
-  console. Formatting *into* a buffer is a second surface and wants
-  §6's open question about writers answered first.
+* **No allocation-free string formatting**, with one exception that
+  proves the rule. `print_*` writes to the console; formatting *into* a
+  buffer is a second surface and wants §6's open question about writers
+  answered first. `fmt.float_into` (§3.6) does write into a caller's
+  `[byte]`, because printing a float has no second way to do it — and
+  it is one function for one type, not the surface.
 * **No implicit prelude.** §2.
 
 ---

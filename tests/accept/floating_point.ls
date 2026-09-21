@@ -12,6 +12,9 @@
 //~ STDOUT nan-equals-itself 0
 //~ STDOUT inf-beats-everything 1
 //~ STDOUT toward-zero -2
+//~ STDOUT bits-of-one 4607182418800017408
+//~ STDOUT sign-of-minus-zero 1
+//~ STDOUT minus-zero-equals-zero 1
 //~ EXIT 0
 
 import std.io;
@@ -42,8 +45,9 @@ fn main(world: World) -> [] int {
     let inf = 1.0 / 0.0;
 
     borrow mut io as &!i in {
-        // Arithmetic, reported through `truncate` because printing a
-        // float is §7's open question.
+        // Arithmetic, reported through `truncate`: this fixture predates
+        // `std.fmt` and stays integral on purpose, so that what it checks
+        // is the arithmetic rather than the printer.
         label(i, "sum", truncate((1.5 + 2.0) * 10.0));
         // `float_of` spells the widening; there is no implicit one.
         label(i, "half", truncate(float_of(1) / 2.0 * 10.0));
@@ -64,6 +68,18 @@ fn main(world: World) -> [] int {
 
         // §4: toward zero, so -2.7 truncates to -2 and not to -3.
         label(i, "toward-zero", truncate(-2.7));
+
+        // §4.1: `bits_of` converts nothing. 1.0's sign, exponent and
+        // mantissa laid end to end are this integer, and reading them
+        // is what lets `std.fmt` print a float without the compiler's
+        // help (`float-printing.md` §2).
+        label(i, "bits-of-one", bits_of(1.0));
+        // And the sign bit survives, which is why `-0.0` prints with a
+        // sign rather than becoming zero on the way out. `§5` says
+        // `-0.0 == 0.0` is true, so the bits are the only place the
+        // difference is visible at all.
+        label(i, "sign-of-minus-zero", flag(bits_of(-0.0) < 0));
+        label(i, "minus-zero-equals-zero", flag(-0.0 == 0.0));
     }
 
     release(io);
