@@ -120,9 +120,21 @@ and requires every hash to survive.
 > so the doubling policy belongs to the program. That is
 > [`docs/boxed-slices.md`](docs/boxed-slices.md).
 >
-> **Still missing:** sharing — §9's `Rc` and `Gen` — and a standard
-> library. Both are now unblocked rather than impossible. Do not mistake
-> this for a usable language yet.
+> **And sharing has an answer, which is not the one the design expected.**
+> `linearity-and-effects.md` §9 promised two escape hatches for the
+> structures linearity cannot express, `Rc` and `Gen`, "both libraries,
+> not language features". Building them found that is true of `Gen` and
+> **false of `Rc`**: an `Rc` needs a copyable pointer, and this language
+> has none — three different ways of writing one are three fixtures in
+> `tests/reject/`, each refused by a different rule that was not written
+> with `Rc` in mind. `Gen` works precisely because a handle *points at
+> nothing*, and `examples/slab/` is it. That is
+> [`docs/sharing.md`](docs/sharing.md), which corrects the document it
+> implements.
+>
+> **Still missing:** a standard library, and the ergonomics a linear
+> language most wants — tuples, renaming in patterns. Do not mistake this
+> for a usable language yet.
 
 ## What this is
 
@@ -285,6 +297,21 @@ buffer is three allocations, which is what valgrind reports.
 ```sh
 cargo run -p lex-sys -- run examples/buffer/main.ls examples/buffer/buffer.ls
 # counting: 1 4 9 16 25 36 49 64
+```
+
+`examples/slab/` is shared ownership, as far as this language reaches: a
+slab that owns every value and hands out `Gen { index, generation }`
+handles, which are two plain `int`s and copy like any other `val`. The
+line worth watching is the last one — a handle whose slot was removed
+comes back `Missing`, which is a **value the program decides what to do
+about** rather than a dangling pointer it gets no say in.
+
+```sh
+cargo run -p lex-sys -- run examples/slab/main.ls examples/slab/slab.ls
+# live handle:  7
+# after remove: missing
+# new handle:   9
+# old handle:   missing
 ```
 
 `examples/wordfreq/` is the capstone, and the only example that is three
@@ -533,10 +560,21 @@ section has said since M0 that "moving a function between files changes
 nothing about it"; with one file there was nothing to test. The same
 function in two files now demonstrably has the same `SigId` and `BodyId`.
 
-**What does not, yet:** sharing — §9's `Rc` and `Gen` — a standard library,
-`import`, namespaces and visibility, flag parsing, environment variables,
-and standard input. All of them are now ordinary work rather than blocked
-work, which is the difference this change made.
+Sharing came after that, and it is the one slice that changed a design
+document rather than implementing it. §9 promised `Rc` and `Gen` as two
+libraries; `Gen` is one, and is `examples/slab/`. `Rc` is not, and cannot
+be — it needs a value that copies *and* names an allocation, and every
+value here is one or the other. Three ways of writing it are three
+fixtures in `tests/reject/`, refused by three unrelated rules. A copyable
+pointer is not a feature this language is missing; it is one the language
+is made of not having.
+
+**What does not, yet:** a standard library, `import`, namespaces and
+visibility, flag parsing, environment variables, standard input — and the
+ergonomics a linear language most wants, which writing `examples/slab/`
+made concrete: no tuples, no renaming in a destructuring pattern, no
+shadowing within a block. All of them are now ordinary work rather than
+blocked work, which is the difference these changes made.
 
 Every example declares what it prints in its own header, and a test walks
 `examples/` and checks them, so an example that stops matching the language
@@ -597,7 +635,8 @@ carry them exists now, while it is cheap.
 | [`docs/reading-references.md`](docs/reading-references.md) | `*r`, and `match` on a reference binding payloads as references | **settled and built** — closed the two limits the heap slice left open; §7's must-reject suite is enforced |
 | [`docs/heap.md`](docs/heap.md) | The `Heap` capability and `Box[T]`: why the heap cannot leak, recursive types, heap versus arena | **settled and built** — closes M2's last unchecked item; §8's must-reject suite is enforced |
 | [`docs/filesystem.md`](docs/filesystem.md) | The `Fs(prefix)` capability, why the operations are builtins rather than `extern fn`, the runtime path check and why `..` is refused | **settled and built** — the last mile to M3's acceptance criterion; §7's must-reject suite is enforced |
-| `docs/memory-model.md` | Regions, escape, the escape hatches and their cost | not written — §5 and §6 settled and built regions and escape; what remains is §9's escape hatches, which M3 needs |
+| [`docs/sharing.md`](docs/sharing.md) | §9's escape hatches as built: why `Rc` needs a copyable pointer this language does not have, why `Gen` does not, and what a linear library costs to write | **settled and built, and it corrects `linearity-and-effects.md` §9** — three reject fixtures for the three ways `Rc` fails; `examples/slab/` is the one that works |
+| `docs/memory-model.md` | Regions, escape, the escape hatches and their cost | not written — §5 and §6 settled and built regions and escape, and `sharing.md` has now settled §9's hatches. Nothing is left that a document of its own would say |
 | [`docs/defined-behaviour.md`](docs/defined-behaviour.md) | Every place C and Rust leave behaviour open, and what we define it to | **written and enforced** — overflow traps, evaluation order is left to right, and §9 names the fixture behind each rule |
 | [`docs/strings.md`](docs/strings.md) | What a string is: bytes rather than an encoding, `byte` as storage rather than arithmetic, packed layout, literals and the static region | **settled and built** — gated M3's last item; §9's must-reject suite is enforced |
 
@@ -615,7 +654,7 @@ M0–M3 with acceptance criteria, sequencing, risks and open decisions.
 |---|---|---|
 | **M0** — native hello world ([#3](https://github.com/alpibrusl/lex-sys/issues/3)) | Lexer, parser, AST, IR, Cranelift backend, a real executable | **done** — green on both targets |
 | **M1** — typed core | Type checker, `bool`, structs, ADTs with exhaustiveness, monomorphised generics. No linearity, no effects — deliberately | **done** |
-| **M2** — the actual thesis ([#2](https://github.com/alpibrusl/lex-sys/issues/2)) | Linear ownership, effect rows and capability-passing as **one** system | **complete** — §3 through §8 of the design document, every must-reject fixture enforced. §9's last item, a heap whose cost is documented, is [`docs/heap.md`](docs/heap.md); its two *sharing* hatches wait for a module system |
+| **M2** — the actual thesis ([#2](https://github.com/alpibrusl/lex-sys/issues/2)) | Linear ownership, effect rows and capability-passing as **one** system | **complete** — §3 through §8 of the design document, every must-reject fixture enforced. §9's last item, a heap whose cost is documented, is [`docs/heap.md`](docs/heap.md); its two *sharing* hatches are [`docs/sharing.md`](docs/sharing.md), which found that only one of the two is a library |
 | **M3** — minimal but real | Slices and strings, arenas, libc FFI, settled overflow semantics, canonical printer, per-unit identity, file IO through `Fs` | **complete.** `examples/lines.ls` is the acceptance criterion: a tool that reads and writes files, counts and filters, and whose authority to do any of it is one narrowed capability |
 
 Deliberately excluded from "minimal": borrow checker, traits, `comptime`, own

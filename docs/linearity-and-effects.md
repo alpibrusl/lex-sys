@@ -928,6 +928,23 @@ the exact point they enter the program.
 
 ## 9. Escape hatches
 
+> **Built, and this section was half wrong. See `docs/sharing.md`.**
+>
+> Both hatches below were written. `Gen` is a library exactly as described
+> and now lives in `examples/slab/`. `Rc` is **not expressible at all**:
+> it needs a copyable pointer, and this language has none — `Box[T]` is
+> `res`, a reference is bounded by its region, and there is no third
+> thing. Three ways of trying are three fixtures in `tests/reject/`, each
+> refused by a different rule that was not written with `Rc` in mind.
+>
+> So "neither touches the checker" is the claim that did not survive
+> being built: a real `Rc` is a language feature, not a library.
+> `sharing.md` §2.3 has what you can have instead — shared ownership is
+> reachable, the *ambient handle* is not.
+>
+> The rest of this section stands, and `sharing.md` supersedes the `Rc`
+> row of the table.
+
 Linearity cannot express shared mutable graphs, observers, or any structure
 where "who owns this" has no answer. Two hatches, both **libraries, not
 language features** — neither touches the checker, and that is the point:
@@ -945,6 +962,10 @@ table above is part of the contract, in the same spirit as `[budget]`.
 and the program decides what to do about it. A dangling pointer is undefined
 behaviour and the program does not get a say. That asymmetry is most of why
 this language exists.
+
+That last paragraph turned out to be stronger than it knew: `Gen` is not
+merely the one to prefer, it is the only one of the two there is. See
+`docs/sharing.md`.
 
 ---
 
