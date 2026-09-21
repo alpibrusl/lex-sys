@@ -323,11 +323,14 @@ type checker produced** — C can only *promise* the same fact with
 state it at all. 35% of the functions in this repository qualify, and on
 a pure call across a compilation boundary the fact is worth 1.94× as
 common-subexpression elimination, or 158× where the call is also
-loop-invariant. Nothing collects it today: Cranelift has no call
-attribute for it, and an own optimiser is a
-[non-goal](#explicit-non-goals). [`docs/purity.md`](docs/purity.md) is the
-measurement, and it is the first argument for the LLVM backend that is
-about capability rather than speed.
+loop-invariant. Nothing collects it today, and §4.2 of that document is honest about why
+it may not matter soon: **lex-sys compiles whole programs**, and a purity
+fact only earns anything across a boundary the optimiser cannot see past.
+Give LLVM the whole program and it infers the same thing itself. The row
+is a real advantage over C and Rust *if* separate compilation ever
+arrives, and mostly redundant until then.
+[`docs/purity.md`](docs/purity.md) is the measurement and the
+correction.
 
 ---
 
