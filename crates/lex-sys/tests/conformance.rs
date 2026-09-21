@@ -398,6 +398,96 @@ fn indexing_past_a_slice_traps_rather_than_reading_on() {
     }
 }
 
+/// `docs/authority.md` §2: the report names what a program performs.
+///
+/// Three examples whose surfaces differ, so this fails if the union is
+/// taken over the wrong set rather than merely if it is empty.
+#[test]
+fn the_authority_report_names_what_a_program_performs() {
+    let cases: &[(&str, &[&str], &[&str])] = &[
+        // The console, both directions, and nothing else.
+        (
+            "tally.ls",
+            &["io_read", "io_write"],
+            &["the filesystem", "the heap", "the command line", "foreign code"],
+        ),
+        // Writes only.
+        (
+            "hello.ls",
+            &["io_write"],
+            &["the filesystem", "the heap", "the command line", "foreign code"],
+        ),
+        // Calls into C, and the symbol is named.
+        ("pipeline.ls", &["ffi(\"libc\")", "io_write", "labs"], &["the filesystem"]),
+    ];
+
+    for (name, performs, never) in cases {
+        let path = repo_root().join("examples").join(name);
+        let out = Command::new(BIN)
+            .args(["authority".as_ref(), path.as_os_str(), "--std".as_ref()])
+            .output()
+            .expect("the compiler runs");
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let text = String::from_utf8_lossy(&out.stdout);
+        for label in *performs {
+            assert!(text.contains(label), "`{name}` should perform `{label}`:\n{text}");
+        }
+        for what in *never {
+            assert!(text.contains(what), "`{name}` should never touch {what}:\n{text}");
+        }
+    }
+}
+
+/// §2.1, and the bug that section records.
+///
+/// `examples/lines.ls` reads `argv` in `main`'s **own body**, and `main`
+/// declares `[]` because it owns its capabilities rather than borrowing
+/// them. A report built from declared rows said *never touches the
+/// command line* about the repository's command-line tool.
+#[test]
+fn the_authority_report_sees_what_main_does_itself() {
+    let path = repo_root().join("examples").join("lines.ls");
+    let out = Command::new(BIN)
+        .args(["authority".as_ref(), path.as_os_str(), "--std".as_ref()])
+        .output()
+        .expect("the compiler runs");
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("args"), "`lines.ls` reads argv in `main`:\n{text}");
+    assert!(!text.contains("the command line"), "`lines.ls` does touch the command line:\n{text}");
+}
+
+/// §2.2: an absent label is a proof rather than an absence of evidence —
+/// the capability was released, and nothing creates another.
+#[test]
+fn an_unused_capability_never_appears() {
+    let dir = scratch("authority-negative");
+    let source = dir.join("quiet.ls");
+    // Releases everything and performs nothing at all.
+    std::fs::write(
+        &source,
+        "fn main(world: World) -> [] int {\n\
+             let Split { io, ffi, fs, heap, args } = split(world);\n\
+             release(args); release(ffi); release(fs); release(heap); release(io);\n\
+             return 0;\n\
+         }\n",
+    )
+    .expect("a writable fixture");
+
+    let out = Command::new(BIN)
+        .args(["authority".as_ref(), source.as_os_str()])
+        .output()
+        .expect("the compiler runs");
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("performs nothing"), "{text}");
+    for what in ["the console", "the filesystem", "the heap", "the command line", "foreign code"] {
+        assert!(text.contains(what), "`{what}` should be listed as untouched:\n{text}");
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// `docs/slicing.md` §2: a range past the end traps.
 ///
 /// The same rule indexing has, applied to the operation that produces a

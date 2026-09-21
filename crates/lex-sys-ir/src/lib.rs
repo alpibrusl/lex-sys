@@ -904,6 +904,16 @@ pub struct Func {
     pub name: String,
     /// The declared row, checked exact against what the body performs.
     pub effects: Effects,
+    /// What the body actually performs, **before** ownership discharges
+    /// it (`docs/authority.md` §2).
+    ///
+    /// The same set for every function that borrows its authority, and
+    /// different for exactly the one that does not: `main` owns what
+    /// `split` gave it, so its declared row is `[]` however much it does.
+    /// A program's authority surface is the union of *these*, and reading
+    /// the declared rows instead silently loses whatever `main` did
+    /// itself.
+    pub performs: Effects,
     pub n_params: u32,
     /// One entry per slot, parameters first. The backend reads these to pick a
     /// machine type, so every slot's type is resolved before it gets here.
@@ -2477,6 +2487,10 @@ fn lower_function(
     // Taken from the signature, not from the body, so the rule lives at the
     // boundary with every other rule.
     let mut performed = performed;
+    // Kept before the discharge below, because this is the only place the
+    // full set exists: `main` owns its capabilities, so discharging leaves
+    // `[]` behind however much the body did (`docs/authority.md` §2).
+    let performs = performed.clone();
     let mut authority = Effects::pure();
     for param in &params {
         authority.union(&discharged_by(defs, param));
@@ -2517,6 +2531,7 @@ fn lower_function(
     Ok(Func {
         name: instance_name(ast.name_of(decl.name), args, unifier),
         effects: signature.effects.clone(),
+        performs,
         n_params: decl.params.len() as u32,
         slots,
         ret,
