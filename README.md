@@ -334,10 +334,28 @@ algorithm written three times, at the same semantics:
 
 Rust carries ownership, bounds checks and monomorphisation and pays
 essentially nothing for them, so **the 1.6× is not the price of safety or
-effect rows — it is Cranelift against LLVM.** That makes "any larger gap
-early on is implementation maturity rather than language design" a claim
-with a falsifier: if an LLVM backend lands and the gap stays at 1.6×, it
-was wrong.
+effect rows — it is Cranelift against LLVM.**
+
+**And 1.6× was two kernels' midpoint.**
+[`benchmarks-game.md`](docs/benchmarks-game.md) added three programs from
+the Computer Language Benchmarks Game, each checked against the answer
+the Game publishes, and across five kernels the gap runs **1.17× to
+2.58×**:
+
+| | what dominates | lex-sys / C |
+|---|---|---|
+| binary-trees | `malloc` and `free` | **1.17×** |
+| fannkuch-redux | integer arrays, branches | 1.32× |
+| sieve | memory and cache | 1.56× |
+| Mandelbrot | float compute | 1.69× |
+| spectral-norm | a float loop with a division | **2.58×** |
+
+The range is legible rather than noisy: **it tracks how much of the run
+is in code Cranelift generated.** Where the program is mostly inside
+libc's allocator, the backend has less of the run to be slower at. That
+makes the falsifier sharper rather than weaker — if an LLVM backend
+lands and the *range* does not collapse toward its low end, the claim was
+wrong.
 
 **Some of the gap was ours and has been closed.**
 [`compile-time.md`](docs/compile-time.md) found `2 + 3 * 4 - 14` — which

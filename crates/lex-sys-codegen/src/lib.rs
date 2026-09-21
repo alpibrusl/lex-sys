@@ -530,10 +530,19 @@ struct BodyEmitter<'a, 'f> {
     /// address, which is observable, so `docs/strings.md` §8 keeps it open
     /// until there is a rule for it.
     literals: u32,
-    /// Each open arena's base pointer and bump pointer, indexed by the arena
-    /// number `Stmt::Region` carries. Variables rather than values because a
-    /// `region` inside a loop opens a fresh arena on every iteration.
-    arenas: Vec<(Variable, Variable)>,
+    /// Each arena's base pointer and bump pointer, **indexed by the arena
+    /// number** `Stmt::Region` carries, and `None` where that arena is not
+    /// open here. Variables rather than values because a `region` inside a
+    /// loop opens a fresh arena on every iteration.
+    ///
+    /// Indexed rather than stacked, which it was until two *sibling*
+    /// `region` blocks crashed the compiler. Arena numbers are handed out
+    /// in the order the lowering meets the blocks, so siblings get 0 and
+    /// 1 — but the second opens after the first has closed, and a stack
+    /// had length 0 when it wanted index 1. No program in the repository
+    /// had two regions side by side, so the assertion that documented the
+    /// assumption held for a year and was wrong the whole time.
+    arenas: Vec<Option<(Variable, Variable)>>,
     /// Slot leaves occupy the variables below this; temporaries the backend
     /// needs for its own purposes are numbered from here.
     next_var: u32,
@@ -693,7 +702,7 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
         // what guarantees that — so releasing here is releasing memory
         // nothing can still reach.
         for index in (0..self.arenas.len()).rev() {
-            let (base_var, _) = self.arenas[index];
+            let Some((base_var, _)) = self.arenas[index] else { continue };
             let held = self.builder.use_var(base_var);
             self.free(held);
         }
@@ -816,8 +825,13 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
         let bump_var = self.temporary(pointer);
         self.builder.def_var(base_var, base);
         self.builder.def_var(bump_var, base);
-        debug_assert_eq!(self.arenas.len(), arena as usize, "arenas open in order");
-        self.arenas.push((base_var, bump_var));
+        // Grow to fit rather than push: a sibling `region` carries a
+        // higher number than one already closed, so the slot may be past
+        // the end and the ones before it may be empty.
+        if self.arenas.len() <= arena as usize {
+            self.arenas.resize(arena as usize + 1, None);
+        }
+        self.arenas[arena as usize] = Some((base_var, bump_var));
 
         let returned = self.stmts(body);
 
@@ -828,7 +842,7 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
             let held = self.builder.use_var(base_var);
             self.free(held);
         }
-        self.arenas.pop();
+        self.arenas[arena as usize] = None;
         returned
     }
 
@@ -837,7 +851,8 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
     /// Shared by `alloc` and `alloc_slice`, which differ only in how many
     /// bytes they ask for and what they write there.
     fn bump(&mut self, arena: u32, bytes: Value) -> Value {
-        let (base_var, bump_var) = self.arenas[arena as usize];
+        let (base_var, bump_var) =
+            self.arenas[arena as usize].expect("`alloc` names an arena open here");
         let at = self.builder.use_var(bump_var);
         let next = self.builder.ins().iadd(at, bytes);
 

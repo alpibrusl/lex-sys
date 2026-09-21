@@ -116,7 +116,20 @@ different code layouts (padding the object with unused functions to move
 changed its sign).
 
 We do not have an explanation, and this document is not going to invent
-one. What can be said is bounded and worth saying: the difference is about
+one.
+
+> **It has a name, found later.** Mytkowicz, Diwan, Hauswirth and Sweeney,
+> *"Producing Wrong Data Without Doing Anything Obviously Wrong!"*
+> (ASPLOS 2009), showed that link order and environment size shift a
+> measured speedup by **more than the optimisation being studied** —
+> which is exactly the experiment above, run by accident. So the
+> paragraph below is right that the things deciding the time are not in
+> the source language, and the phenomenon is measurement bias rather
+> than a mystery.
+>
+> What still stands is the sign: padding moved the figure between −5.8%
+> and −10.5% and never changed it. Bias of that size explains the
+> spread, not a consistent direction. What can be said is bounded and worth saying: the difference is about
 0.6 cycles per iteration in a loop whose real work is a load, four
 compares and two unpredictable branches, and at that scale the things that
 decide the time are not in the source language. It is evidence for §2 —
