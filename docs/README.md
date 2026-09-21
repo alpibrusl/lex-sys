@@ -5,6 +5,12 @@ place for it to be wrong. M0, M1 and M2 are built; `bootstrap.md` records
 what M0 settled, and `linearity-and-effects.md` carries a "what was built"
 note in every section whose code exists.
 
+This file is the index of what each document *settles*.
+[`ROADMAP.md`](ROADMAP.md) is the index of what **shipped when**, and what
+each slice found — including the claims these documents got wrong and had
+to correct. Neither belongs in the README, which says what the language is
+rather than how it got there.
+
 | Doc | Purpose | Status |
 |---|---|---|
 | `linearity-and-effects.md` | The core type-system rules: linear/affine ownership, capability-typed effects, how they unify, and the cases that **must** be rejected. Worked examples throughout. | **settled and built** ([#2](https://github.com/alpibrusl/lex-sys/issues/2)) — §3 through §8 implemented, every row of §11's must-reject table enforced by a fixture |

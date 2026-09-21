@@ -1,0 +1,100 @@
+# Roadmap
+
+Where `lex-sys` is, what got it here, and what is next. The README says
+what the language *is*; this file is the only place that tracks its
+history, so the README does not have to grow a paragraph per change.
+
+Tracked in the epic: **[#1](https://github.com/alpibrusl/lex-sys/issues/1)**
+— milestones with acceptance criteria, sequencing, risks and open
+decisions.
+
+---
+
+## Milestones
+
+| Milestone | What | Status |
+|---|---|---|
+| **M0** — native hello world ([#3](https://github.com/alpibrusl/lex-sys/issues/3)) | Lexer, parser, AST, IR, Cranelift backend, a real executable | **done** — green on linux-x86_64 and darwin-aarch64 |
+| **M1** — typed core | Type checker, `bool`, structs, ADTs with exhaustive `match`, monomorphised generics. No linearity, no effects — deliberately | **done** |
+| **M2** — the actual thesis ([#2](https://github.com/alpibrusl/lex-sys/issues/2)) | Linear ownership, effect rows and capability-passing as **one** system | **done** — §3 through §8 of [`linearity-and-effects.md`](linearity-and-effects.md), every must-reject fixture enforced |
+| **M3** — minimal but real | Slices and strings, arenas, libc FFI, settled overflow semantics, canonical printer, per-unit identity, file IO through `Fs` | **done** — `examples/lines.ls` is the acceptance criterion: a tool that reads and writes files, counts and filters, and whose authority to do any of it is one narrowed capability |
+
+Everything below M3 is post-milestone work, shipped one slice at a time.
+
+---
+
+## What has landed
+
+One row per slice, newest last. Each links to the document that holds the
+reasoning — this table is the index, not the argument.
+
+| # | Slice | The claim worth remembering |
+|---|---|---|
+| [#22](https://github.com/alpibrusl/lex-sys/pull/22) | [A general heap](heap.md) | `Box[T]` is `res`, so §4's exactly-once rule turns out to be a **memory safety** rule for free: no leaks, no double frees, no use-after-free, none of them checked by anything new |
+| [#23](https://github.com/alpibrusl/lex-sys/pull/23) | [Reading through a reference](reading-references.md) | **A reference gives references.** One rule closed two limits that looked unrelated, and there are no binding modes to infer because the scrutinee decides |
+| [#24](https://github.com/alpibrusl/lex-sys/pull/24) | [Command-line arguments](arguments.md) | An effect row is about **visibility**, not containment. Arguments grant no power, and they are still an effect, because a function that branches on `--force` should say so in its type |
+| [#25](https://github.com/alpibrusl/lex-sys/pull/25) | [A program in more than one file](many-files.md) | The smallest feature with the largest consequence: three design docs had each had to write *"there is nowhere to put a library"*. It also made `canonical-ast.md` §1 testable for the first time |
+| [#26](https://github.com/alpibrusl/lex-sys/pull/26) | [Boxed slices](boxed-slices.md) | `Box[[T]]` is a pointer *and* a length — what every collection wants. Found a double free reachable from ordinary code |
+| [#27](https://github.com/alpibrusl/lex-sys/pull/27) | [Sharing](sharing.md) | `Rc` is **not expressible**: it needs a value that copies *and* names an allocation, and every value here is one or the other. Three ways of writing it are three fixtures, refused by three unrelated rules. `Gen` is a library, and is `examples/slab/` |
+| [#28](https://github.com/alpibrusl/lex-sys/pull/28) | [Tuples](tuples.md) | The first feature a **library** asked for rather than a design — and it costs nothing: a tuple and the struct it replaces emit byte-identical objects |
+| [#29](https://github.com/alpibrusl/lex-sys/pull/29) | [Shadowing](shadowing.md) | The restriction was a real rule stated too bluntly. A binding may be shadowed exactly when it is dead — which is the rule assignment already had, so it is one rule with two syntaxes |
+| [#30](https://github.com/alpibrusl/lex-sys/pull/30) | [Standard input](standard-input.md) | Not a seventh capability: a second **label** on `Io`, following `Fs`'s `fs_read`/`fs_write`. Which renamed `putchar`'s effect to `io_write` across the repository |
+| [#31](https://github.com/alpibrusl/lex-sys/pull/31) | [Modules](modules.md) | **A module reaches no hash.** A call has encoded the callee's hash rather than its spelling since M0, so namespaces cost the identity system nothing — and a module is not a trust boundary: `pub` means reachable, never safe |
+| [#32](https://github.com/alpibrusl/lex-sys/pull/32) | [A standard library](standard-library.md) | `--std`, with the source compiled into the binary rather than looked up. Found the compiler emitting **every** non-generic function rather than what `main` reaches — 6720 bytes against 1048 for a program calling none of it |
+| [#33](https://github.com/alpibrusl/lex-sys/pull/33) | [Mode polymorphism](mode-polymorphism.md) | Checking a claim found a **leak and a double free**: a `val` on a generic declaration was trusted rather than checked. And a worse bug — a call took its types from one function and its effect row from another, so a call into C could declare `[]` and compile |
+| [#34](https://github.com/alpibrusl/lex-sys/pull/34) | [Collections](collections.md) | Which collections hold a resource is decided by **shape**, not generics: a list works because taking it apart produces its elements; an array does not because freeing one is a single `free` that runs nothing |
+
+### The pattern, if there is one
+
+Seven of these thirteen slices found a bug or falsified a claim the
+project had already written down, and three of those were soundness
+bugs reachable from ordinary code. That is not an accident of luck: each
+slice is built by writing the thing the previous document said was
+possible, and the documents keep being wrong in the same direction —
+optimistic about what generality the type system already had.
+
+The convention that follows is worth stating, because it is why the
+documents are trustworthy at all: **a falsified claim is corrected in
+place, in the document that made it, rather than quietly edited.**
+`sharing.md` corrects `linearity-and-effects.md` §9;
+`collections.md` corrects both `standard-library.md` §4 and
+`mode-polymorphism.md` §1, the second of which was itself a correction.
+
+---
+
+## What is next
+
+| Next | Why it is next |
+|---|---|
+| Reading a `res` field through a reference | `match` on a reference **borrows**; field access on one **copies**, so a struct with a `res` field cannot be read through a reference at all while the equivalent enum can. `std.buffer` and `std.vec` have each paid for it with a by-value-and-back accessor. [`collections.md`](collections.md) §5.1 |
+| A writer abstraction | Format into a buffer or a file rather than only the console. Wants either closures or a dispatch story, and the interesting part is the effect row of a writer that could be either |
+| `defer` | [`linearity-and-effects.md`](linearity-and-effects.md) §4.2 is verbose without it. The expansion is mechanical; the question is whether a consumption the programmer did not write at the point it happens is still "visible" |
+| Capability release at `main` | Four `release` calls is ceremony. Letting the runtime reclaim `World`'s parts is convenient and is *exactly* the affine hole §4 refuses everywhere else |
+| `[budget]` | Carried over from Lex and not specified here. Plainly a capability carrying an integer; what it costs at runtime, and whether it is checked or merely accounted, is unanswered |
+| Effect polymorphism | A function generic over the *row* it performs. Named nowhere yet, and much larger than anything above |
+
+Ordinary work, blocked by nothing: flag parsing, environment variables,
+standard error.
+
+---
+
+## Deliberately excluded
+
+Borrow checker, traits, `comptime`, an own optimiser, incremental
+compilation, LSP, async.
+
+Each is "yes, later" rather than "no". Saying yes early is what turns
+three months into three years, and the
+[non-goals](../README.md#explicit-non-goals) say which of them are "no"
+outright.
+
+---
+
+## Beyond
+
+The first real target is **`lex-os`** — production systems work, no
+rewrite risk.
+
+Self-hosting the lex-lang toolchain stays a *spike before a plan*: port
+`lex-ast`/`lex-vcs` canonical forms and verify byte-identical
+`OpId`/`SigId`/`StageId` over the existing ~136k-op corpus, then decide.
