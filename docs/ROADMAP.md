@@ -87,13 +87,18 @@ caught before the project did.
 
 | Next | Why it is next |
 |---|---|
-| An LLVM backend | `purity.md` §4.1 changed what this is for. It was "make the 1.6× smaller"; it is now the only way to spend the one fact this language has that C cannot check and Rust cannot say — `readnone` is exactly the row, and `willreturn` is §6's second predicate |
 | `float` | `against-c-and-rust.md` §4 turned this from a gap into an argued one: it buys **expressiveness, not speed** — f64 was 17% slower than fixed point on the kernel measured — and what it costs today is ten orders of magnitude of precision. The design question left is which of IEEE-754's corners this language defines rather than inherits |
 | File handles | `porting.md` §9.1 put a program behind `filesystem.md` §3's own deferral. Reading a file of unknown size currently means reading it repeatedly — 1.2 MB is read six times — because `fs_read` cannot report truncation and there is nothing to hold open. §3 says a handle is "a milestone, not a paragraph", and it is the milestone a real program is now waiting on |
 | Effect polymorphism | A function generic over the *row* it performs. Named nowhere yet, and much larger than anything above |
 
+An LLVM backend is **not** next, and `purity.md` §4.2 is why the case for
+it shrank rather than grew: the row's advantage needs a compilation
+boundary, lex-sys compiles whole programs, and LLVM infers the same fact
+itself when it can see every body. It remains the answer to the 1.6×, and
+that is a performance problem in a language that is not yet usable.
+
 Ordinary work, blocked by nothing: `jo` instead of `seto`/`test`/`jne`
-(`overflow-cost.md` §3.4), flag parsing, standard error, and `float` — which `reach.md` §6 upgrades from an omission to a named gap,
+(`overflow-cost.md` §3.4), flag parsing, standard error — which `reach.md` §6 upgrades from an omission to a named gap,
 since `std.math` does not yet mean what its name suggests.
 
 Environment variables moved off that list and onto `reach.md`'s: `getenv`

@@ -157,9 +157,44 @@ parameter check produce both facts with no analysis at all — the
 information a C compiler must infer, or a C programmer must promise, this
 language simply has.
 
-So the LLVM backend is no longer only "make the 1.6× smaller". It is the
-one place where this language has something to give an optimiser that the
-optimiser cannot get anywhere else.
+### 4.2 And there is no lex-sys program that can show it
+
+> **This document overstated its own conclusion on the first pass, and
+> the correction is the interesting part.**
+
+The draft said the LLVM backend would be *"the one place this language
+has something to give an optimiser that the optimiser cannot get anywhere
+else."* True of the language. Not reachable by any program written in it
+today, for a reason that has nothing to do with purity:
+
+**lex-sys has no separate compilation.** A program is the set of files
+named on the command line, parsed into one AST (`many-files.md` §2).
+There are no libraries, no `import` of a compiled unit, no linking of two
+lex-sys objects. So there is no boundary for a purity fact to survive —
+and §1's whole argument was about what survives a boundary.
+
+Give that whole program to LLVM and LLVM sees every body. Its
+`function-attrs` pass infers `readnone` itself, for the same functions,
+without being told. The row would be **correct and redundant**.
+
+What is left is narrower and worth stating exactly, because it is not
+nothing:
+
+- LLVM's inference is a conservative analysis that gives up — on
+  recursion, on large bodies, on anything reached indirectly. The row
+  never gives up, because it was checked rather than inferred.
+- The row is available *before* codegen, to any consumer, including
+  tools. `lex-sys authority` prints it today and no optimiser is involved.
+
+But the 158× in §4's table came from a benchmark built with a
+**deliberate** compilation boundary, in C, because that is the only way
+to show the effect at all. lex-sys cannot construct that program.
+
+**So the honest conclusion is conditional**: the row is a real advantage
+over C and Rust *if* lex-sys ever gains separate compilation or a library
+model — which `many-files.md` §2.1 defers on purpose — and is mostly
+redundant with LLVM's own inference until then. That is a reason to file
+this and move on rather than to build on it, and `ROADMAP.md` says so.
 
 ---
 
@@ -175,6 +210,9 @@ optimiser cannot get anywhere else.
   what survives a boundary LLVM will not cross: a large function, a
   separate compilation unit without LTO, recursion. Where inlining
   reaches, C and Rust already have this and pay nothing for it.
+- **And lex-sys has no such boundary** (§4.2). The measurement is real,
+  the advantage is real, and no program in this language can exhibit it
+  until the compilation model changes.
 - **`__attribute__((const))` is a fair comparison and a flattering one.**
   It is the strongest form (no memory reads at all); a function reading
   through a shared reference would be `((pure))` in C, which permits less.
@@ -185,6 +223,7 @@ optimiser cannot get anywhere else.
 
 | Question | Why it waits |
 |---|---|
+| Separate compilation | §4.2, and it is now the *precondition* rather than a convenience: without a compilation boundary there is nowhere for a purity fact to be worth anything. `many-files.md` §2.1 lists the three questions it defers — path resolution, cycles, where a library lives — and none has become easier |
 | *Pure and cannot trap* | §3. Checkable — a body of `wrapping_*`, comparisons and control flow has no trapping operation — and it is what separates 1.94× from 158×. The awkward part is that it is a property of a *body*, where purity is a property of a signature, so it does not survive a separate compilation the way the row does |
 | An LLVM backend that reads it | §4.1. The row already produces `readnone`; this is the first argument for the backend that is about capability rather than speed |
 | Purity in the hash | A function's row is already in its `SigId`, so purity is derivable from the hash without the body. Whether a *consumer* should be told is a question about what the content-addressed store promises |
