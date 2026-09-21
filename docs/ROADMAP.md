@@ -48,10 +48,11 @@ reasoning — this table is the index, not the argument.
 | [#37](https://github.com/alpibrusl/lex-sys/pull/37) | [Slicing](slicing.md) | `s[a..b]`, and the answer to "a writer abstraction": there should not be one, because a function taking a `Writer` must declare the **union** of what every destination could do, and a union row is not an exact row. The abstraction is the buffer |
 | [#38](https://github.com/alpibrusl/lex-sys/pull/38) | [`defer`](defer.md) | Sugar that **stays** sugar: expanded during lowering, so the checker replays the same events the hand-written version would, and there is one set of linearity rules rather than two. §12's question answered — "visible" here means *the type says what happened*, not "written on the line where it runs" |
 | [#39](https://github.com/alpibrusl/lex-sys/pull/39) | [The authority surface](authority.md) | §12's release question answered **no**: the four `release` calls are not ceremony around the authority declaration, they *are* it — `main` owns rather than borrows, so its row is `[]` and every entry point has the same signature. `lex-sys authority` reads them instead |
+| [#40](https://github.com/alpibrusl/lex-sys/pull/40) | [`[budget]`](budget.md) | Answered **no**, from the units: a budget is wall-clock seconds, commands and **cents**, none of which is a property of a program's text. `lex-os` already charges it, at the boundary that can stop you. What was wanted was legibility, so the authority report grew `--output json` |
 
 ### The pattern, if there is one
 
-Ten of these seventeen slices found a bug, falsified a claim the project
+Ten of these eighteen slices found a bug, falsified a claim the project
 had already written down, or both — and three of those were soundness
 bugs reachable from ordinary code. That is not an accident of luck: each
 slice is built by writing the thing the previous document said was
@@ -74,7 +75,6 @@ for.
 
 | Next | Why it is next |
 |---|---|
-| `[budget]` | Carried over from Lex and not specified here. Plainly a capability carrying an integer; what it costs at runtime, and whether it is checked or merely accounted, is unanswered |
 | Effect polymorphism | A function generic over the *row* it performs. Named nowhere yet, and much larger than anything above |
 
 Ordinary work, blocked by nothing: flag parsing, environment variables,

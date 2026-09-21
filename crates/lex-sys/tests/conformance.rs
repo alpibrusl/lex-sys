@@ -488,6 +488,65 @@ fn an_unused_capability_never_appears() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// `docs/budget.md` §5: the report as data, in the shape a supervisor
+/// checks against a grant.
+///
+/// `effects` is the distinct kinds — the coarse question — and `labels`
+/// keeps the narrowing for the precise one, which is the line
+/// `lex-os-check`'s `CheckReport` already draws for Lex programs.
+#[test]
+fn the_authority_report_has_a_machine_readable_form() {
+    let path = repo_root().join("examples").join("tour.ls");
+    let out = Command::new(BIN)
+        .args([
+            "authority".as_ref(),
+            path.as_os_str(),
+            "--std".as_ref(),
+            "--output".as_ref(),
+            "json".as_ref(),
+        ])
+        .output()
+        .expect("the compiler runs");
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let text = String::from_utf8_lossy(&out.stdout);
+
+    // Parsed rather than pattern-matched, so a malformed document fails
+    // here rather than in whatever reads it next. No JSON dependency in
+    // this crate, so the check is structural: balanced braces and
+    // brackets, the three keys, and the narrowing carried through.
+    assert_eq!(text.matches('{').count(), text.matches('}').count(), "unbalanced braces:\n{text}");
+    assert_eq!(
+        text.matches('[').count(),
+        text.matches(']').count(),
+        "unbalanced brackets:\n{text}"
+    );
+    for key in ["\"effects\"", "\"labels\"", "\"foreign_symbols\""] {
+        assert!(text.contains(key), "missing {key}:\n{text}");
+    }
+    // The coarse kind and the precise argument, both present and distinct.
+    assert!(text.contains("\"fs_read\""), "{text}");
+    assert!(
+        text.contains("{ \"name\": \"fs_read\", \"argument\": \"/tmp\" }"),
+        "the narrowing should survive:\n{text}"
+    );
+    // A label that was never narrowed carries an explicit null rather
+    // than being absent, so a consumer never has to tell the two apart.
+    assert!(
+        text.contains("{ \"name\": \"heap\", \"argument\": null }"),
+        "an unnarrowed label needs an explicit null:\n{text}"
+    );
+    assert!(text.contains("\"labs\""), "the foreign symbol should be named:\n{text}");
+
+    // And the human form is unchanged by the flag's existence.
+    let plain = Command::new(BIN)
+        .args(["authority".as_ref(), path.as_os_str(), "--std".as_ref()])
+        .output()
+        .expect("the compiler runs");
+    assert!(plain.status.success());
+    let plain = String::from_utf8_lossy(&plain.stdout);
+    assert!(plain.contains("fs_read(\"/tmp\")"), "{plain}");
+}
+
 /// `docs/slicing.md` §2: a range past the end traps.
 ///
 /// The same rule indexing has, applied to the operation that produces a

@@ -1128,9 +1128,15 @@ push if something here feels wrong.
   once, and the part that would keep the error off the definition's line.
 - **`Rc` cycles.** Documented as a leak. A systems language may be entitled to
   say exactly that, or a `Weak` may be table stakes.
-- **Budget.** `[budget]` is carried over from Lex (#1) but not specified here.
-  It is plainly a capability carrying an integer; what it costs at runtime, and
-  whether it is checked or merely accounted, is unanswered.
+- **Budget.** *Answered `no` — see `docs/budget.md`.* It does not belong
+  here. `lex-os` already separates the three questions a capability
+  language faces — *may this reach X at all* (the type check, which is
+  this document), *which host or path* (the perimeter), and *how much*
+  (the supervisor, charged per mediated command) — and a budget's units
+  settle it: wall-clock seconds, commands, **money in cents**. None of
+  those is a property of a program's text. What was wanted is
+  legibility rather than enforcement, and that is
+  `lex-sys authority --output json`.
 
 ---
 

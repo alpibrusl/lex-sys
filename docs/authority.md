@@ -125,7 +125,7 @@ opening either.
 | Question | Why it waits |
 |---|---|
 | `release(a, b, c)` | Would make the five lines two while keeping every name, so it loses nothing §1 defends. It is also a variadic form in a language with none, for a saving of three lines once per program |
-| A machine-readable form | `--output json` for this, the way `check` has one. Wanted by a packaging story that does not exist yet |
+| ~~A machine-readable form~~ | **Done** — `--output json`, in the shape `lex-os-check`'s `CheckReport` already uses. `docs/budget.md` §5 is why it was the half actually wanted |
 | Authority of a *library* | With no `main` there is no program, so there is no surface — only per-function rows, which `lex-sys ids` already lists |
 
 ---

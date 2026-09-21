@@ -254,7 +254,7 @@ lex-sys build <file.ls>... [-o <output>] [--emit exe|obj] [--std]
 lex-sys check <file.ls>... [--std]    # refuse, or say nothing
 lex-sys run   <file.ls>... [--std]    # build, run, exit with the program's status
 lex-sys ids   <file.ls>... [--std]    # each declaration's content hash
-lex-sys authority <file.ls>... [--std]  # what the program can reach, and what it cannot
+lex-sys authority <file.ls>... [--std] [--output json]  # what it can reach
 lex-sys print <file.ls>               # the unit, rendered in canonical form
 ```
 
@@ -275,7 +275,9 @@ never touches
 The surface is the union of what everything `main` reaches performs, so
 it is precise rather than conservative — rows are exact in both
 directions. An absent label is a proof: the capability was released, and
-nothing in the language creates another. [`docs/authority.md`](docs/authority.md).
+nothing in the language creates another. `--output json` gives the same
+report as data, for a supervisor checking it against a grant.
+[`docs/authority.md`](docs/authority.md).
 
 A program is the **set of files named on the command line**, in any order.
 Each is in a module — the root, unless it says `module a.b;` — and reaches
