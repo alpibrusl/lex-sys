@@ -59,8 +59,13 @@ fn read_file[&h, &f, &p](heap: &!h Heap, fs: &f Fs(""), path: &p [byte],
     var out = text;
     var capacity = 65536;
     var attempts = 0;
-    // Eight doublings from 64 KiB reaches 16 MiB, which is where this
-    // gives up rather than growing without bound.
+    // Eight attempts from 64 KiB reach a largest capacity of 8 MiB, and
+    // the read has to come back *strictly* shorter to be believed -- so
+    // this refuses a file of 8 MiB or more. An earlier version of this
+    // comment said sixteen, counting doublings rather than attempts;
+    // `docs/file-handles.md` §1.1 has the measurement. Worse, the
+    // refusal is indistinguishable from a missing file (§1.2): both
+    // answer -1 here and there is no standard error to say which.
     while attempts < 8 {
         var got = 0;
         var scratch = buffer.empty(heap, capacity);

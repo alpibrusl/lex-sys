@@ -224,6 +224,19 @@ and no way to ask a file's size, so `read_file` reads into 64 KiB, and if
 the answer came back *equal* to the buffer it doubles and reads the whole
 file again. A 1.2 MB file is therefore read six times.
 
+> **Measured since, and sharper than this paragraph.**
+> `file-handles.md` §1 traced it: six reads, but **2.75×** the file's
+> bytes rather than six times them, because each attempt stops at its
+> own capacity. The constant factor is under 3 at every size, which is a
+> *weaker* argument than "six times" sounds.
+>
+> The real costs are the two this paragraph missed. The loop gives up at
+> **8 MiB**, not the 16 MiB `sort.ls` claimed, so the example cannot sort
+> a file of 8,388,608 bytes or more (§1.1). And giving up returns the
+> same `-1` as a file that could not be opened, with nothing printed,
+> so hitting the ceiling is indistinguishable from a typo in a filename
+> (§1.2).
+
 That is not a bug and it is the cost of `filesystem.md` §3's own
 position: *"a file handle is a linear resource — it is precisely the
 thing this language exists to track — and giving it a type means deciding
