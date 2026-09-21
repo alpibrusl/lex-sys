@@ -3667,3 +3667,93 @@ fn benchmark_game_programs_print_the_published_answer() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `docs/bulk-io.md` §3.2 — a faster program is not a more powerful one.
+///
+/// This is the whole argument of the slice, so it is pinned byte for
+/// byte rather than field by field: the same program written with
+/// `putchar` and with `write_bytes` must produce an *identical*
+/// authority report. If a future change gave the bulk primitive its own
+/// effect label, its own capability, or a `foreign_symbols` entry for
+/// the `fwrite` it lowers to, this fails — and it should, because §2's
+/// complaint was precisely that the fast path used to cost more
+/// authority than the slow one.
+///
+/// `foreign_symbols` staying empty is the subtle half. `write_bytes`
+/// does call libc, but the program neither declared that call nor can
+/// choose it; it is the builtin's implementation, the same way `putchar`
+/// has always been libc's. A report that named `fwrite` here would be
+/// telling a reader to audit something they cannot influence.
+#[test]
+fn bulk_output_costs_exactly_what_one_byte_costs() {
+    const PROLOGUE: &str = "\
+fn main(world: World) -> [] int {
+    let Split { io, ffi, fs, heap, args } = split(world);
+    release(args); release(heap); release(fs); release(ffi);
+";
+    let per_byte = format!(
+        "{PROLOGUE}    borrow mut io as &!i in {{ putchar(i, 104); putchar(i, 105); }}\n    release(io);\n    return 0;\n}}\n"
+    );
+    let bulk = format!(
+        "{PROLOGUE}    borrow mut io as &!i in {{ write_bytes(i, \"hi\"); }}\n    release(io);\n    return 0;\n}}\n"
+    );
+
+    let slow = authority_json(&per_byte, "bulk-authority-putchar");
+    let fast = authority_json(&bulk, "bulk-authority-write");
+    assert_eq!(slow, fast, "`write_bytes` must report exactly what `putchar` reports (§3.2)");
+    assert!(slow.contains("\"effects\": [\"io_write\"]"), "and that is `io_write`:\n{slow}");
+    assert!(
+        slow.contains("\"foreign_symbols\": []"),
+        "a builtin's own libc call is not the program reaching foreign code:\n{slow}"
+    );
+}
+
+/// §3 — `write_bytes` goes through the same stream `putchar` does.
+///
+/// The reason the primitive lowers to `fwrite` on `stdout` rather than
+/// POSIX `write` on descriptor 1: `putchar` is buffered by stdio, so a
+/// raw descriptor write would have jumped the queue and the two kinds of
+/// output would interleave in the wrong order. Nothing about the types
+/// catches that — only running it does. The fixture writes a strictly
+/// increasing sequence through alternating primitives, so any reordering
+/// shows up as an out-of-order digit rather than as a subtle diff.
+#[test]
+fn bulk_and_per_byte_output_share_one_stream() {
+    let dir = scratch("bulk-ordering");
+    let path = dir.join("ordering.ls");
+    let source = "\
+fn main(world: World) -> [] int {
+    let Split { io, ffi, fs, heap, args } = split(world);
+    release(args); release(heap); release(fs); release(ffi);
+    borrow mut io as &!i in {
+        var round = 0;
+        while round < 2000 {
+            putchar(i, 48);
+            write_bytes(i, \"12\");
+            putchar(i, 51);
+            write_bytes(i, \"456\");
+            putchar(i, 55);
+            write_bytes(i, \"89\");
+            round = round + 1;
+        }
+    }
+    release(io);
+    return 0;
+}
+";
+    std::fs::write(&path, source).expect("a writable fixture");
+    let exe = dir.join("ordering");
+    let build = Command::new(BIN)
+        .args(["build".as_ref(), path.as_os_str(), "-o".as_ref(), exe.as_os_str()])
+        .output()
+        .expect("the compiler runs");
+    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+    let run = Command::new(&exe).output().expect("the program runs");
+    assert_eq!(run.status.code(), Some(0), "it exits cleanly");
+    assert_eq!(
+        String::from_utf8_lossy(&run.stdout),
+        "0123456789".repeat(2000),
+        "the two primitives must interleave in program order, not in stream order"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -201,6 +201,22 @@ pub enum Builtin {
     /// is there so that a function which does not hold one cannot call this,
     /// which is the whole safety story stated as a type (§8.2).
     PutChar,
+    /// `write_bytes[&i, &b](io: &!i Io, bytes: &b [byte]) -> [io_write] int` —
+    /// a whole slice, behind the same capability (`docs/bulk-io.md` §3).
+    ///
+    /// The comment above `PutChar` said M2 would replace it with "a
+    /// capability-gated foreign call". That turned out to be the wrong
+    /// shape and `bulk-io.md` §2 is why: `examples/serve/` *had* the
+    /// foreign call, and reaching it cost `Ffi("libc")` — which
+    /// `reach.md` §5 establishes is every authority at once. So a
+    /// program that wanted to print quickly had to ask for everything,
+    /// and the incentive ran backwards.
+    ///
+    /// This is a second primitive behind the **same** capability
+    /// instead. It changes what a grant of `Io` is worth without
+    /// changing what it permits: the row is still `io_write`, and a
+    /// faster program is not a more powerful one (§3.2).
+    Write,
     /// `getchar[&i](io: &!i Io) -> [io_read] int` — libc's `getchar`, one
     /// byte in, behind the capability that authorises it.
     ///
@@ -377,6 +393,7 @@ pub enum Builtin {
 impl Builtin {
     pub const ALL: &'static [Builtin] = &[
         Builtin::PutChar,
+        Builtin::Write,
         Builtin::GetChar,
         Builtin::Split,
         Builtin::Release,
@@ -405,6 +422,7 @@ impl Builtin {
     pub fn name(self) -> &'static str {
         match self {
             Builtin::PutChar => "putchar",
+            Builtin::Write => "write_bytes",
             Builtin::GetChar => "getchar",
             Builtin::Split => "split",
             Builtin::Release => "release",
@@ -439,6 +457,10 @@ impl Builtin {
     pub fn symbol(self) -> Option<&'static str> {
         match self {
             Builtin::PutChar => Some("putchar"),
+            // `fwrite`, not POSIX `write`: `putchar` goes through stdio,
+            // and a bulk write on a raw descriptor would interleave
+            // wrongly with it. The stream has to be the same one.
+            Builtin::Write => Some("fwrite"),
             Builtin::GetChar => Some("getchar"),
             _ => None,
         }
@@ -457,6 +479,7 @@ impl Builtin {
             // leaf-free, so it contributes no values either way, and
             // skipping it keeps the argument positions honest.
             Builtin::PutChar | Builtin::GetChar | Builtin::ArgCount | Builtin::Arg => 1,
+            Builtin::Write => 1,
             _ => 0,
         }
     }
@@ -471,6 +494,8 @@ impl Builtin {
     pub fn regions(self) -> usize {
         match self {
             Builtin::PutChar | Builtin::GetChar | Builtin::ArgCount | Builtin::Arg => 1,
+            // Two: the borrowed `Io` and the slice's own region.
+            Builtin::Write => 2,
             _ => 0,
         }
     }
@@ -490,6 +515,25 @@ impl Builtin {
                         inner: Box::new(named(PRELUDE_IO)),
                     },
                     Type::Int,
+                ],
+                Type::Int,
+            ),
+            // The same borrowed `Io`, and a shared slice of the bytes.
+            // Shared rather than unique because writing reads them, and
+            // `strings.md` §4's coercion lets a caller hand over a
+            // unique one anyway.
+            Builtin::Write => (
+                vec![
+                    Type::Ref {
+                        unique: true,
+                        region: Region::Param(0),
+                        inner: Box::new(named(PRELUDE_IO)),
+                    },
+                    Type::Ref {
+                        unique: false,
+                        region: Region::Param(1),
+                        inner: Box::new(Type::Slice(Box::new(Type::Byte))),
+                    },
                 ],
                 Type::Int,
             ),
@@ -567,7 +611,7 @@ impl Builtin {
     /// in an exact row (§7.3).
     pub fn effects(self) -> Effects {
         match self {
-            Builtin::PutChar => Effects::plain(["io_write"]),
+            Builtin::PutChar | Builtin::Write => Effects::plain(["io_write"]),
             // `docs/standard-input.md` §2: the same capability, the other
             // direction, its own label. A row saying `[io_write]` does not
             // permit a read, which is what makes the two labels a

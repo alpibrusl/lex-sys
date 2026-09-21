@@ -375,6 +375,22 @@ recursion, so `fib(23)` is a runtime call at `-O2` and a constant here.
 the answer is parity and the one where the estimate that motivated the
 work turned out to be four times too optimistic.
 
+**And some of it was a capability bug wearing a performance costume.**
+[`bulk-io.md`](docs/bulk-io.md) found that printing went one byte per
+libc call, which costs 12.8× — and that the fast path had existed for
+four slices. `examples/serve/` writes whole slices through
+`Ffi("libc")`, and [`reach.md`](docs/reach.md) §5 is explicit that a
+library is not an authority domain, so `Ffi("libc")` is the filesystem,
+the network and `exec` all at once. **The cheap thing to grant was the
+expensive thing to run** — which is the wrong lesson for a capability
+language to teach anyone who profiles it. The fix is a second primitive
+behind the *same* `Io`: `write_bytes(io, bytes)`, same effect label, and
+a conformance test pins the authority report byte-identical before and
+after, because a faster program must not be a more powerful one. Output
+is now within **1.1×** of C's `fwrite`. §4 declines the headline: the
+`base64` example gains 1.6× of that 12.8×, and names where the rest
+went.
+
 **And one place it might have been ahead turned out not to be.**
 [`layout.md`](docs/layout.md) went looking for a win in the fact that
 lex-sys promises no struct layout where C's is part of its ABI, so a

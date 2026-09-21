@@ -11,13 +11,16 @@ import std.math;
 // `[io_write]` on `print_nat` learns the same thing it would learn from
 // a `print_nat` in its own file, which is the point.
 
+// One call, not one per byte (`docs/bulk-io.md`).
+//
+// This was the `putchar` loop until §1 measured what that costs: eight
+// megabytes took 42 ms through it and 3.3 ms through a bulk write, and
+// the 12.8× is libc's per-call overhead rather than anything lex-sys
+// does — C pays 11× for the same shape. What lex-sys could not do was
+// write any other way without asking for `Ffi("libc")`, which §2 is
+// about.
 pub fn write_all[&r, &i](io: &!i Io, s: &r [byte]) -> [io_write] int {
-    var n = 0;
-    while n < len(s) {
-        putchar(io, int_of(s[n]));
-        n = n + 1;
-    }
-    return len(s);
+    return write_bytes(io, s);
 }
 
 // A non-negative integer, decimal, most significant digit first.

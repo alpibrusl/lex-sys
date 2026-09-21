@@ -17,7 +17,7 @@ use cranelift_codegen::ir::{
 use cranelift_codegen::settings::{self, Configurable};
 use cranelift_codegen::{Context, isa};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
-use cranelift_module::{DataDescription, FuncId, Linkage, Module, default_libcall_names};
+use cranelift_module::{DataDescription, DataId, FuncId, Linkage, Module, default_libcall_names};
 use cranelift_object::{ObjectBuilder, ObjectModule};
 use lex_sys_ir::{
     Arm, BinOp, Builtin, Callee, Expr, Func, FuncId as IrFuncId, Place, Program, Slot, Stmt,
@@ -154,6 +154,19 @@ fn leaf_count(ty: &Type, program: &Program, pointer: types::Type) -> u32 {
 struct Console {
     putchar: FuncId,
     getchar: FuncId,
+    /// `fwrite(ptr, size, nmemb, stream)` — the bulk write
+    /// (`docs/bulk-io.md` §3).
+    fwrite: FuncId,
+    /// libc's `stdout`, as a *data* symbol to load a `FILE *` out of.
+    ///
+    /// `fwrite` needs the stream, and it has to be the same stream
+    /// `putchar` uses or the two interleave wrongly — which is why this
+    /// is `fwrite` and not POSIX `write` on descriptor 1 (§3).
+    ///
+    /// The symbol is not spelled the same everywhere: glibc exports
+    /// `stdout`, and macOS's `stdout` is a macro for `__stdoutp`. Both
+    /// of this project's CI targets are here, so both are named.
+    stdout: DataId,
 }
 
 /// How many leaves a return value may have before it travels through memory.
@@ -375,7 +388,34 @@ impl<'a> Emitter<'a> {
             )
             .map_err(|e| CodegenError(e.to_string()))?;
 
-        let console = Console { putchar, getchar };
+        // `size_t fwrite(const void *, size_t, size_t, FILE *)` — four
+        // pointer-or-size arguments and a count back.
+        let mut fwrite_sig = self.module.make_signature();
+        fwrite_sig.call_conv = call_conv;
+        fwrite_sig.params.push(AbiParam::new(pointer));
+        fwrite_sig.params.push(AbiParam::new(pointer));
+        fwrite_sig.params.push(AbiParam::new(pointer));
+        fwrite_sig.params.push(AbiParam::new(pointer));
+        fwrite_sig.returns.push(AbiParam::new(pointer));
+        let fwrite = self
+            .module
+            .declare_function(
+                Builtin::Write.symbol().expect("write_bytes reaches libc"),
+                Linkage::Import,
+                &fwrite_sig,
+            )
+            .map_err(|e| CodegenError(e.to_string()))?;
+
+        let stdout_symbol = match self.module.isa().triple().operating_system {
+            target_lexicon::OperatingSystem::Darwin(_) => "__stdoutp",
+            _ => "stdout",
+        };
+        let stdout = self
+            .module
+            .declare_data(stdout_symbol, Linkage::Import, true, false)
+            .map_err(|e| CodegenError(e.to_string()))?;
+
+        let console = Console { putchar, getchar, fwrite, stdout };
 
         // §8.4: a foreign function is an import under the symbol its
         // declaration named. Its capability parameters carry no data and so
@@ -2092,6 +2132,27 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
                         let result = self.builder.inst_results(call)[0];
                         vec![self.builder.ins().sextend(types::I64, result)]
                     }
+                    // `docs/bulk-io.md` §3: the whole slice in one call,
+                    // through the same stdio stream `putchar` uses.
+                    Callee::Builtin(Builtin::Write) => {
+                        let pointer = self.pointer;
+                        let (start, len) = (args[0], args[1]);
+                        let stream = self
+                            .module
+                            .declare_data_in_func(self.console.stdout, self.builder.func);
+                        let stream = self.builder.ins().global_value(pointer, stream);
+                        // `stdout` is a `FILE *` *variable*, so the symbol
+                        // is the address of the pointer and the stream is
+                        // one load away.
+                        let stream =
+                            self.builder.ins().load(pointer, MemFlags::trusted(), stream, 0);
+                        let one = self.builder.ins().iconst(pointer, 1);
+                        let f = self
+                            .module
+                            .declare_func_in_func(self.console.fwrite, self.builder.func);
+                        let call = self.builder.ins().call(f, &[start, one, len, stream]);
+                        vec![self.builder.inst_results(call)[0]]
+                    }
                     // Sign-extended, not zero-extended: `EOF` is `-1` and
                     // zero-extending would hand the program 4294967295,
                     // which is a byte-range check that silently never
@@ -2314,8 +2375,18 @@ mod tests {
                     "{triple} should define `{expected}`, got {names:?}"
                 );
             }
+            // libc spells macOS's `stdout` as `__stdoutp`, so its Mach-O
+            // symbol is `___stdoutp` — three underscores, prefixed once,
+            // and correct (`docs/bulk-io.md` §3). The check below is a
+            // proxy for "prefixed once" and cannot tell that apart from
+            // the bug, so the one name that is legitimately spelled with
+            // underscores is named here rather than the guard weakened.
+            let spelled_with_underscores = ["___stdoutp", "__stdoutp"];
             assert!(
-                !names.iter().any(|n| n.starts_with("__")),
+                !names
+                    .iter()
+                    .any(|n| n.starts_with("__")
+                        && !spelled_with_underscores.contains(&n.as_str())),
                 "{triple}: a doubly-prefixed symbol is an unresolvable link: {names:?}"
             );
         }
