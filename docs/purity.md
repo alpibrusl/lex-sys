@@ -213,6 +213,14 @@ this and move on rather than to build on it, and `ROADMAP.md` says so.
 - **And lex-sys has no such boundary** (§4.2). The measurement is real,
   the advantage is real, and no program in this language can exhibit it
   until the compilation model changes.
+- **§4.2 was right about reordering and wrong to generalise.**
+  `compile-time.md` found an axis this document did not consider: the row
+  also licenses **evaluation**, and evaluation needs no boundary at all —
+  only purity and constant arguments. `lex-sys` now folds a pure call on
+  constants, on the strength of the same `is_pure` this document defines,
+  and it does not need anything LLVM cannot see past. The band where it
+  beats C is narrow (clang inlines and folds the easy shapes; it gives up
+  on recursion), and it is not nothing, which is more than §4.2 allowed.
 - **`__attribute__((const))` is a fair comparison and a flattering one.**
   It is the strongest form (no memory reads at all); a function reading
   through a shared reference would be `((pure))` in C, which permits less.
@@ -226,6 +234,7 @@ this and move on rather than to build on it, and `ROADMAP.md` says so.
 | Separate compilation | §4.2, and it is now the *precondition* rather than a convenience: without a compilation boundary there is nowhere for a purity fact to be worth anything. `many-files.md` §2.1 lists the three questions it defers — path resolution, cycles, where a library lives — and none has become easier |
 | *Pure and cannot trap* | §3. Checkable — a body of `wrapping_*`, comparisons and control flow has no trapping operation — and it is what separates 1.94× from 158×. The awkward part is that it is a property of a *body*, where purity is a property of a signature, so it does not survive a separate compilation the way the row does |
 | An LLVM backend that reads it | §4.1. The row already produces `readnone`; this is the first argument for the backend that is about capability rather than speed |
+| ~~Nothing collects it~~ | **Partly false now.** `compile-time.md` collects it — not as an attribute for an optimiser, but as the gate on compile-time evaluation. 15 calls in this repository are evaluated on the strength of the row alone |
 | Purity in the hash | A function's row is already in its `SigId`, so purity is derivable from the hash without the body. Whether a *consumer* should be told is a question about what the content-addressed store promises |
 | `__attribute__((const))` emission | If lex-sys ever emits C rather than objects, the row could be written out as the attribute — where it would be, for once, a checked one |
 

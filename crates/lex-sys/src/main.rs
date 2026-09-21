@@ -409,6 +409,15 @@ fn print_authority(inputs: &[PathBuf], with_std: bool, json: bool) -> Result<(),
     pure.sort_unstable();
     let total = program.funcs.len();
 
+    // What compile-time evaluation removed (`docs/compile-time.md` §9).
+    // A pass that rewrites a program's own arithmetic should be able to
+    // say how much of it it rewrote; reporting it is also the only
+    // portable way to *test* that it happened, since reading the
+    // instructions back needs a disassembler and CI has two platforms.
+    let folded_operators: usize =
+        program.funcs.iter().map(|f| f.folded).sum::<usize>() + program.folded_late;
+    let folded_calls = program.folded_calls;
+
     let stdout = io::stdout();
     let mut out = stdout.lock();
     if json {
@@ -431,6 +440,8 @@ fn print_authority(inputs: &[PathBuf], with_std: bool, json: bool) -> Result<(),
             writeln!(out, "  ],")?;
             writeln!(out, "  \"foreign_symbols\": [{}],", quoted(&symbols))?;
             writeln!(out, "  \"pure\": [{}],", quoted(&pure))?;
+            writeln!(out, "  \"folded_operators\": {folded_operators},")?;
+            writeln!(out, "  \"folded_calls\": {folded_calls},")?;
             writeln!(out, "  \"functions\": {total}")?;
             writeln!(out, "}}")?;
             out.flush()
@@ -484,6 +495,15 @@ fn print_authority(inputs: &[PathBuf], with_std: bool, json: bool) -> Result<(),
             writeln!(out, "provably pure ({} of {total})", pure.len())?;
             for name in &pure {
                 writeln!(out, "    {name}")?;
+            }
+        }
+        if folded_operators > 0 || folded_calls > 0 {
+            writeln!(out, "evaluated at compile time")?;
+            if folded_operators > 0 {
+                writeln!(out, "    {folded_operators} operators")?;
+            }
+            if folded_calls > 0 {
+                writeln!(out, "    {folded_calls} calls")?;
             }
         }
         out.flush()
