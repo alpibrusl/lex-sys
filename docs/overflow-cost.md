@@ -93,7 +93,20 @@ also tests a flag.
 That is a real, structural cost, it is exactly the one the README
 promised there would not be, and it lands precisely where the README's own
 "linearity gives the optimiser stronger aliasing facts" argument wants to
-collect its winnings — the hot arithmetic loop.
+collect its winnings — the hot arithmetic loop. (That argument has since
+been falsified on its own terms: `&!` is not a no-aliasing invariant, and
+the README now says so.)
+
+**And this section named one case as though it were the case.**
+`compile-time.md` §2.1 found the same mechanism somewhere this document
+did not look: `2 + 3 * 4 - 14` is a constant, and Cranelift folded none
+of it, because `sadd_overflow` + `trapnz` is not the `iadd` its rules are
+written for. The trap did not block the vectoriser *in particular* — it
+blocks whatever the optimiser would otherwise have known, and a
+constant-folder is the cheapest thing on that list. That one was ours to
+fix and has been: the front end has the literals, so it evaluates them
+itself, and the question of whether the operation traps has an answer
+before the backend ever sees it.
 
 ### 3.3 And the benchmark that came out backwards
 

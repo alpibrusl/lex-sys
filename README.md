@@ -273,9 +273,28 @@ the function's contract.
 ## Performance expectation
 
 Linearity and effects are erased at compile time; generics monomorphise; an
-LLVM backend inherits rustc's own optimiser. Linearity can hand the optimiser
-*stronger* aliasing facts than `&mut` does, and known purity enables
-reordering Rust can't justify.
+LLVM backend inherits rustc's own optimiser.
+
+**One sentence that used to be here was false**, and it is worth replacing
+rather than deleting, because it was the reason to expect speed from
+ownership: *"linearity can hand the optimiser stronger aliasing facts than
+`&mut` does."* It cannot, and
+[`slicing.md`](docs/slicing.md) §4 had already said so in the opposite
+direction — `&!` is a lock on the *binding*, not a no-aliasing invariant
+over references. Four lines falsify it:
+
+```
+fn both[&a, &b](p: &!a [int], q: &!b [int]) -> [] int {
+    p[0] = 1;  q[0] = 2;  return p[0];
+}
+both(s, s)      // compiles, and prints 2
+```
+
+Two unique references, one object, writes that alias. So lex-sys cannot
+emit `noalias` where Rust can, and on the axis everyone expects ownership
+to pay, it is *behind* Rust rather than ahead of C. Whether `&!` should
+mean what `&mut` means is a real question with a real cost — it refuses
+programs that compile today — and it is open rather than answered.
 
 The one structural cost is defining away UB — principally integer-overflow
 semantics — and it has now been **measured** rather than estimated
@@ -317,6 +336,24 @@ effect rows — it is Cranelift against LLVM.** That makes "any larger gap
 early on is implementation maturity rather than language design" a claim
 with a falsifier: if an LLVM backend lands and the gap stays at 1.6×, it
 was wrong.
+
+**Some of the gap was ours and has been closed.**
+[`compile-time.md`](docs/compile-time.md) found `2 + 3 * 4 - 14` — which
+is zero — compiling to a multiply, an add, a subtract, three overflow
+checks and a constant-pool load, where C `-O2` emits `xor %eax,%eax`. The
+cause was `overflow-cost.md` §3.2's mechanism in a second place: a checked
+add is `sadd_overflow` plus a `trapnz`, and Cranelift's folding rules are
+written for the plain form, so **the trap made the arithmetic opaque to
+the optimiser**. The front end has the literals, so it folds them itself —
+and a trap it finds while folding is now a compile error rather than a
+`SIGILL`, which is a correctness dividend rather than a speed one.
+
+That brings constant arithmetic *up to* C and matches C on the calls C
+already inlines. It goes **past** C in one narrow place: clang gives up on
+recursion, so `fib(23)` is a runtime call at `-O2` and a constant here.
+§7 of that document is the honest scorecard, including the shapes where
+the answer is parity and the one where the estimate that motivated the
+work turned out to be four times too optimistic.
 
 There is one thing this language can do that neither of the other two
 can, and it is not tuning. **An effect row of `[]` is a purity proof the

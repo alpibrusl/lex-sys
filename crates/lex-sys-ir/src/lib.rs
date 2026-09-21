@@ -30,6 +30,7 @@ use lex_sys_syntax::ast::{
 use lex_sys_syntax::span::{Diagnostic, Span};
 use lex_sys_types::{DefId, Region, Type, Unifier, UnifyError};
 
+mod fold;
 mod linear;
 
 pub use linear::Mode;
@@ -987,6 +988,14 @@ pub struct Func {
     pub slots: Vec<Type>,
     pub ret: Type,
     pub body: Vec<Stmt>,
+    /// How many operators in this body were evaluated during lowering
+    /// (`docs/compile-time.md` §2.1).
+    ///
+    /// Reported rather than kept quiet: a compiler that rewrites a
+    /// program's own arithmetic should be able to say how much of it it
+    /// rewrote, and §9 lists the alternative — silent folding — as the
+    /// thing that makes the pass hard to trust.
+    pub folded: usize,
 }
 
 impl Func {
@@ -1053,6 +1062,12 @@ impl TypeInfo {
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct Program {
     pub funcs: Vec<Func>,
+    /// How many calls were evaluated at compile time
+    /// (`docs/compile-time.md` §3), across the whole program, and how
+    /// many operators the call pass exposed on top of the ones lowering
+    /// had already folded.
+    pub folded_calls: usize,
+    pub folded_late: usize,
     /// Foreign functions the unit declared, in declaration order.
     pub externs: Vec<ExternFn>,
     /// Indexed by [`DefId`].
@@ -2257,8 +2272,10 @@ pub fn lower(ast: &Ast) -> Result<Program, Diagnostic> {
         funcs[instance] = Some(func);
     }
 
-    Ok(Program {
+    let mut program = Program {
         funcs: funcs.into_iter().map(|f| f.expect("every requested instance is lowered")).collect(),
+        folded_calls: 0,
+        folded_late: 0,
         externs,
         types: defs
             .iter()
@@ -2279,7 +2296,16 @@ pub fn lower(ast: &Ast) -> Result<Program, Diagnostic> {
                 },
             })
             .collect(),
-    })
+    };
+
+    // `docs/compile-time.md` §3. Operators were folded during lowering,
+    // where a trap still had a span to point at (§4); this is the other
+    // half, and it runs here rather than there because a call may name a
+    // function declared further down the file.
+    let tally = fold::evaluate_calls(&mut program);
+    program.folded_calls = tally.calls;
+    program.folded_late = tally.operators;
+    Ok(program)
 }
 
 /// Replace every inference variable in a lowered body with what it was solved
@@ -2484,6 +2510,7 @@ fn lower_function(
         scopes: vec![Vec::new()],
         slots: Vec::new(),
         performed: Effects::pure(),
+        folded: 0,
         region_params: signature
             .regions
             .iter()
@@ -2534,6 +2561,9 @@ fn lower_function(
             span,
         ));
     }
+
+    // Read before `f`'s borrow of the unifier ends with it.
+    let folded = f.folded;
 
     settle_types(&mut body, unifier);
     for slot in slots.iter_mut() {
@@ -2649,6 +2679,7 @@ fn lower_function(
         slots,
         ret,
         body,
+        folded,
     })
 }
 
@@ -3032,6 +3063,8 @@ struct FnLowering<'a> {
     generics: Vec<Type>,
     scopes: Vec<Vec<Binding>>,
     slots: Vec<Type>,
+    /// How many operators this body folded (`docs/compile-time.md` §2.1).
+    folded: usize,
     /// Every effect the body performs, unioned as the walk finds calls
     /// (§7.2: "inside a body there is nothing to infer but a union over the
     /// calls, which is a fold").
@@ -3120,6 +3153,34 @@ impl<'a> FnLowering<'a> {
 
     /// Which module a qualified reference reaches into
     /// (`docs/modules.md` §4), or a located refusal naming the qualifier.
+    /// What to do with a folded operator (`docs/compile-time.md` §4).
+    ///
+    /// A value replaces the node. A trap refuses the program **where the
+    /// expression is written**, which §4.1 argues for rather than
+    /// assumes: an expression with no value is malformed in the way a
+    /// type error is, and making the diagnostic depend on whether the
+    /// branch is reachable would put a reachability analysis into the
+    /// language. `Unknown` is the ordinary case — the operands were not
+    /// both literals — and leaves the node alone.
+    fn settle_fold(
+        &mut self,
+        folded: fold::Folded,
+        fallback: Expr,
+        span: Span,
+    ) -> Result<Expr, Diagnostic> {
+        match folded {
+            fold::Folded::Value(value) => {
+                self.folded += 1;
+                Ok(value)
+            }
+            fold::Folded::Trapped(why) => Err(Diagnostic::new(
+                format!("{why}; the operands are literals, so this can only trap"),
+                span,
+            )),
+            fold::Folded::Unknown => Ok(fallback),
+        }
+    }
+
     fn target_module(&self, qualifier: Option<Symbol>, span: Span) -> Result<u32, Diagnostic> {
         self.ast.resolve_module(self.module, qualifier).ok_or_else(|| {
             Diagnostic::new(
@@ -5404,15 +5465,19 @@ impl<'a> FnLowering<'a> {
                             ));
                         }
                         let ty = self.unifier.resolve(&found);
-                        (Expr::Neg(Box::new(inner)), ty)
+                        let folded = fold::negate(&inner, &ty);
+                        let node = self.settle_fold(folded, Expr::Neg(Box::new(inner)), span)?;
+                        (node, ty)
                     }
                     ast::UnOp::Not => {
                         self.expect_type(&Type::Bool, &found, operand_span)?;
-                        (Expr::Not(Box::new(inner)), Type::Bool)
+                        let folded = fold::not(&inner);
+                        (self.settle_fold(folded, Expr::Not(Box::new(inner)), span)?, Type::Bool)
                     }
                     ast::UnOp::BitNot => {
                         self.expect_type(&Type::Int, &found, operand_span)?;
-                        (Expr::BitNot(Box::new(inner)), Type::Int)
+                        let folded = fold::bit_not(&inner);
+                        (self.settle_fold(folded, Expr::BitNot(Box::new(inner)), span)?, Type::Int)
                     }
                     ast::UnOp::Deref => self.deref(inner, &found, operand_span)?,
                 }
@@ -5508,7 +5573,14 @@ impl<'a> FnLowering<'a> {
                     }
                 }
                 let result = op.result(&operand);
-                (Expr::Bin { op, lhs: Box::new(l), rhs: Box::new(r) }, result)
+                // `docs/compile-time.md` §2.1: the backend cannot fold
+                // this, because a checked add is `sadd_overflow` plus a
+                // `trapnz` and the egraph's rules are written for the
+                // plain form. Here the literals are in hand, so whether
+                // it traps is a question with an answer.
+                let folded = fold::bin(op, &l, &r);
+                let node = Expr::Bin { op, lhs: Box::new(l), rhs: Box::new(r) };
+                (self.settle_fold(folded, node, span)?, result)
             }
             AstExpr::Alloc { region, value } => return self.alloc(*region, *value, span),
             AstExpr::AllocSlice { region, count, fill } => {
