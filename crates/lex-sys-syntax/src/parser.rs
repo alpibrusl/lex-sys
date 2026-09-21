@@ -33,7 +33,15 @@ pub fn parse_into(ast: &mut Ast, source: &str, base: u32) -> Result<(), Diagnost
         token.span = shift(token.span, base);
     }
     let owned = std::mem::take(ast);
-    let mut p = Parser { source, base, tokens, pos: 0, ast: owned, no_struct_literal: false };
+    let mut p = Parser {
+        source,
+        base,
+        tokens,
+        pos: 0,
+        ast: owned,
+        no_struct_literal: false,
+        current_module: 0,
+    };
     let outcome = p.unit();
     *ast = p.ast;
     outcome
@@ -55,6 +63,11 @@ struct Parser<'a> {
     /// the same ambiguity and resolves it the same way: no struct literal
     /// here, and parentheses if you really meant one.
     no_struct_literal: bool,
+    /// The module the items being parsed belong to (`docs/modules.md`
+    /// §3). Zero is the root, which is where a file that declares nothing
+    /// puts things -- so this starts at zero for every file and every
+    /// program written before modules is unaffected.
+    current_module: u32,
 }
 
 impl<'a> Parser<'a> {
@@ -62,6 +75,11 @@ impl<'a> Parser<'a> {
 
     fn peek(&self) -> Token {
         self.tokens[self.pos]
+    }
+
+    /// The kind of the token `n` ahead, saturating at end of file.
+    fn peek_kind(&self, n: usize) -> TokenKind {
+        self.tokens[(self.pos + n).min(self.tokens.len() - 1)].kind
     }
 
     fn text(&self, tok: Token) -> &'a str {
@@ -103,18 +121,72 @@ impl<'a> Parser<'a> {
     // ---- items ---------------------------------------------------------
 
     fn unit(&mut self) -> Result<(), Diagnostic> {
+        // `module a.b;` is the *first* item in a file, and at most one
+        // (`docs/modules.md` §3). "First" is a rule about this file, which
+        // is why it is tracked here rather than on the AST: several files
+        // parse into one `Ast`, and each gets its own answer.
+        let mut declared_module = false;
+        let mut seen_item = false;
+
         while self.peek().kind != TokenKind::Eof {
             match self.peek().kind {
-                TokenKind::Fn => self.fn_decl()?,
+                TokenKind::Module => {
+                    let keyword = self.bump();
+                    if declared_module {
+                        return Err(Diagnostic::new(
+                            "a file declares at most one module",
+                            keyword.span,
+                        ));
+                    }
+                    if seen_item {
+                        return Err(Diagnostic::new(
+                            "a `module` declaration is the first item in its file",
+                            keyword.span,
+                        ));
+                    }
+                    let path = self.module_path()?;
+                    self.expect(TokenKind::Semi)?;
+                    self.current_module = self.ast.module_named(&path);
+                    declared_module = true;
+                    continue;
+                }
+                TokenKind::Import => {
+                    let keyword = self.bump();
+                    let path = self.module_path()?;
+                    // The last segment, unless `as` says otherwise (§4).
+                    let alias = if self.eat(TokenKind::As) {
+                        self.ident()?
+                    } else {
+                        *path.last().expect("a path has at least one segment")
+                    };
+                    let end = self.expect(TokenKind::Semi)?.span;
+                    let import = Import { path, alias, span: keyword.span.to(end) };
+                    self.ast.modules[self.current_module as usize].imports.push(import);
+                    seen_item = true;
+                    continue;
+                }
+                _ => {}
+            }
+
+            seen_item = true;
+            // `pub` is a prefix on a declaration and nothing else, so it is
+            // read here and handed down rather than parsed three times.
+            let public = self.eat(TokenKind::Pub);
+            match self.peek().kind {
+                TokenKind::Fn => self.fn_decl(public)?,
                 TokenKind::Extern => self.extern_decl()?,
-                TokenKind::Struct => self.struct_decl(None, None)?,
-                TokenKind::Enum => self.enum_decl(None, None)?,
+                TokenKind::Struct => self.struct_decl(None, None, public)?,
+                TokenKind::Enum => self.enum_decl(None, None, public)?,
                 TokenKind::Res | TokenKind::Val => {
                     let keyword = self.bump();
                     let mode = if keyword.kind == TokenKind::Res { Mode::Res } else { Mode::Val };
                     match self.peek().kind {
-                        TokenKind::Struct => self.struct_decl(Some(mode), Some(keyword.span))?,
-                        TokenKind::Enum => self.enum_decl(Some(mode), Some(keyword.span))?,
+                        TokenKind::Struct => {
+                            self.struct_decl(Some(mode), Some(keyword.span), public)?
+                        }
+                        TokenKind::Enum => {
+                            self.enum_decl(Some(mode), Some(keyword.span), public)?
+                        }
                         other => {
                             return Err(self.err(format!(
                                 "expected `struct` or `enum` after {}, found {}",
@@ -135,7 +207,21 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
-    fn fn_decl(&mut self) -> Result<ItemId, Diagnostic> {
+    /// `a.b.c` — a module path, segment by segment.
+    fn module_path(&mut self) -> Result<Vec<Symbol>, Diagnostic> {
+        let mut path = vec![self.ident()?];
+        while self.eat(TokenKind::Dot) {
+            path.push(self.ident()?);
+        }
+        Ok(path)
+    }
+
+    /// Push a declaration into whichever module this file is in.
+    fn push_decl(&mut self, item: Item, span: Span) -> ItemId {
+        self.ast.push_item_in(item, span, self.current_module)
+    }
+
+    fn fn_decl(&mut self, public: bool) -> Result<ItemId, Diagnostic> {
         let start = self.expect(TokenKind::Fn)?.span;
         let name = self.ident()?;
         let (generics, regions, outlives) = self.declaration_params()?;
@@ -161,8 +247,18 @@ impl<'a> Parser<'a> {
         let ret = self.type_expr()?;
 
         let (body, end) = self.block()?;
-        Ok(self.ast.push_item(
-            Item::Fn(FnDecl { name, generics, regions, outlives, params, effects, ret, body }),
+        Ok(self.push_decl(
+            Item::Fn(FnDecl {
+                name,
+                public,
+                generics,
+                regions,
+                outlives,
+                params,
+                effects,
+                ret,
+                body,
+            }),
             start.to(end),
         ))
     }
@@ -207,7 +303,7 @@ impl<'a> Parser<'a> {
         let effects = self.effect_row()?;
         let ret = self.type_expr()?;
         let end = self.expect(TokenKind::Semi)?.span;
-        Ok(self.ast.push_item(
+        Ok(self.push_decl(
             Item::Extern(ExternDecl { name, regions, params, effects, ret, symbol }),
             start.to(end),
         ))
@@ -217,6 +313,7 @@ impl<'a> Parser<'a> {
         &mut self,
         mode: Option<Mode>,
         mode_span: Option<Span>,
+        public: bool,
     ) -> Result<ItemId, Diagnostic> {
         let start = mode_span.unwrap_or(self.peek().span);
         self.expect(TokenKind::Struct)?;
@@ -235,15 +332,17 @@ impl<'a> Parser<'a> {
             }
         }
         let end = self.expect(TokenKind::RBrace)?.span;
-        Ok(self
-            .ast
-            .push_item(Item::Struct(StructDecl { name, mode, generics, fields }), start.to(end)))
+        Ok(self.push_decl(
+            Item::Struct(StructDecl { name, public, mode, generics, fields }),
+            start.to(end),
+        ))
     }
 
     fn enum_decl(
         &mut self,
         mode: Option<Mode>,
         mode_span: Option<Span>,
+        public: bool,
     ) -> Result<ItemId, Diagnostic> {
         let start = mode_span.unwrap_or(self.peek().span);
         self.expect(TokenKind::Enum)?;
@@ -270,9 +369,10 @@ impl<'a> Parser<'a> {
             }
         }
         let end = self.expect(TokenKind::RBrace)?.span;
-        Ok(self
-            .ast
-            .push_item(Item::Enum(EnumDecl { name, mode, generics, variants }), start.to(end)))
+        Ok(self.push_decl(
+            Item::Enum(EnumDecl { name, public, mode, generics, variants }),
+            start.to(end),
+        ))
     }
 
     /// `[A, B]` after a declaration's name, or nothing.
@@ -431,7 +531,12 @@ impl<'a> Parser<'a> {
             let end = self.expect(TokenKind::RBracket)?.span;
             return Ok(self.ast.push_type(TypeExpr::Slice(inner), tok.span.to(end)));
         }
-        let name = self.ident()?;
+        // `io.Buffer` — a type reached through an imported module
+        // (`docs/modules.md` §4). Unambiguous in type position: nothing
+        // else here puts a dot between two names.
+        let first = self.ident()?;
+        let (qualifier, name) =
+            if self.eat(TokenKind::Dot) { (Some(first), self.ident()?) } else { (None, first) };
         let mut args = Vec::new();
         let mut end = tok.span;
         // `Ffi("libc")` — a type indexed by a literal (§7.4). Parenthesised
@@ -442,7 +547,9 @@ impl<'a> Parser<'a> {
             let lit_end = self.expect(TokenKind::RParen)?.span;
             let lit = self.ast.push_type(TypeExpr::Lit(text), tok.span.to(lit_end));
             args.push(lit);
-            return Ok(self.ast.push_type(TypeExpr::Name { name, args }, tok.span.to(lit_end)));
+            return Ok(self
+                .ast
+                .push_type(TypeExpr::Name { name, qualifier, args }, tok.span.to(lit_end)));
         }
         if self.eat(TokenKind::LBracket) {
             while self.peek().kind != TokenKind::RBracket {
@@ -453,7 +560,7 @@ impl<'a> Parser<'a> {
             }
             end = self.expect(TokenKind::RBracket)?.span;
         }
-        Ok(self.ast.push_type(TypeExpr::Name { name, args }, tok.span.to(end)))
+        Ok(self.ast.push_type(TypeExpr::Name { name, qualifier, args }, tok.span.to(end)))
     }
 
     // ---- statements ----------------------------------------------------
@@ -543,7 +650,20 @@ impl<'a> Parser<'a> {
                 .push_stmt(Stmt::DestructureTuple { names, value }, kw.span.to(end)));
         }
 
-        let name = self.ident()?;
+        // `let io.Pair { a, b } = p;` — a struct reached through an
+        // imported module (`docs/modules.md` §4). Two tokens of lookahead:
+        // a `.` after a binding name can only be a qualifier here, since
+        // the thing being bound is a name and never a field access.
+        let first = self.ident()?;
+        let (pattern_qualifier, name) = if self.peek().kind == TokenKind::Dot
+            && self.peek_kind(1) == TokenKind::Ident
+            && self.peek_kind(2) == TokenKind::LBrace
+        {
+            self.bump();
+            (Some(first), self.ident()?)
+        } else {
+            (None, first)
+        };
 
         // `let Point { x, y } = p;` — taking a value apart rather than naming
         // it. Decided by the brace, which cannot otherwise follow a binding.
@@ -566,7 +686,12 @@ impl<'a> Parser<'a> {
             let value = self.expr()?;
             let end = self.expect(TokenKind::Semi)?.span;
             return Ok(self.ast.push_stmt(
-                Stmt::Destructure { struct_name: name, fields, value },
+                Stmt::Destructure {
+                    struct_name: name,
+                    qualifier: pattern_qualifier,
+                    fields,
+                    value,
+                },
                 kw.span.to(end),
             ));
         }
@@ -892,6 +1017,30 @@ impl<'a> Parser<'a> {
                 Ok(self.ast.push_expr(Expr::Alloc { region, value }, tok.span.to(end)))
             }
             TokenKind::Ident => {
+                // `io.print_nat(x)`, `io.Shape::Round`, `io.Buffer { .. }`
+                // — a name reached through an imported module
+                // (`docs/modules.md` §4).
+                //
+                // Three tokens of lookahead, because `p.x` is field access
+                // and looks the same for two of them. What separates them
+                // is the *third*: a qualified name is followed by `(`,
+                // `::` or `{`, and a field never is -- this language has
+                // no methods, so `p.x(..)` is not a thing that could mean
+                // something else.
+                let qualifier = if self.peek_kind(1) == TokenKind::Dot
+                    && self.peek_kind(2) == TokenKind::Ident
+                    && matches!(self.peek_kind(3), TokenKind::LParen | TokenKind::ColonColon)
+                    || self.peek_kind(1) == TokenKind::Dot
+                        && self.peek_kind(2) == TokenKind::Ident
+                        && self.peek_kind(3) == TokenKind::LBrace
+                        && !self.no_struct_literal
+                {
+                    let qualifier = self.ident()?;
+                    self.expect(TokenKind::Dot)?;
+                    Some(qualifier)
+                } else {
+                    None
+                };
                 let name = self.ident()?;
                 match self.peek().kind {
                     TokenKind::ColonColon => {
@@ -913,7 +1062,7 @@ impl<'a> Parser<'a> {
                             end = self.expect(TokenKind::RParen)?.span;
                         }
                         Ok(self.ast.push_expr(
-                            Expr::Variant { enum_name: name, variant, args },
+                            Expr::Variant { enum_name: name, qualifier, variant, args },
                             tok.span.to(end),
                         ))
                     }
@@ -930,7 +1079,10 @@ impl<'a> Parser<'a> {
                             Ok(args)
                         })?;
                         let end = self.expect(TokenKind::RParen)?.span;
-                        Ok(self.ast.push_expr(Expr::Call { callee: name, args }, tok.span.to(end)))
+                        Ok(self.ast.push_expr(
+                            Expr::Call { callee: name, qualifier, args },
+                            tok.span.to(end),
+                        ))
                     }
                     TokenKind::LBrace if !self.no_struct_literal => {
                         self.bump();
@@ -947,9 +1099,19 @@ impl<'a> Parser<'a> {
                             Ok(fields)
                         })?;
                         let end = self.expect(TokenKind::RBrace)?.span;
-                        Ok(self.ast.push_expr(Expr::StructLit { name, fields }, tok.span.to(end)))
+                        Ok(self.ast.push_expr(
+                            Expr::StructLit { name, qualifier, fields },
+                            tok.span.to(end),
+                        ))
                     }
-                    _ => Ok(self.ast.push_expr(Expr::Name(name), tok.span)),
+                    _ => {
+                        if qualifier.is_some() {
+                            return Err(self.err(
+                                "a qualified name reaches a function, a type or a variant in that module, not a value",
+                            ));
+                        }
+                        Ok(self.ast.push_expr(Expr::Name(name), tok.span))
+                    }
                 }
             }
             TokenKind::LParen => {
@@ -1187,7 +1349,7 @@ mod tests {
         let (ast, decl) =
             one_fn("fn f() -> [] int { let p = Point { x: 1, y: 2 }; return p.x + p.y; }");
         let Stmt::Let { value, .. } = ast.stmt(decl.body.stmts[0]) else { panic!() };
-        let Expr::StructLit { name, fields } = ast.expr(*value) else { panic!() };
+        let Expr::StructLit { name, fields, .. } = ast.expr(*value) else { panic!() };
         assert_eq!(ast.name_of(*name), "Point");
         assert_eq!(fields.len(), 2);
 
@@ -1304,7 +1466,8 @@ mod tests {
     #[test]
     fn a_let_may_destructure() {
         let (ast, decl) = one_fn("fn f(p: P) -> [] int { let P { x, y } = p; return x + y; }");
-        let Stmt::Destructure { struct_name, fields, value } = ast.stmt(decl.body.stmts[0]) else {
+        let Stmt::Destructure { struct_name, fields, value, .. } = ast.stmt(decl.body.stmts[0])
+        else {
             panic!("expected a destructuring `let`")
         };
         assert_eq!(ast.name_of(*struct_name), "P");
