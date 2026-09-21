@@ -76,14 +76,14 @@ struct Rational {
 
 // -------------------------------------------------- generic Result helpers ---
 
-fn is_ok[T](r: Result[T]) -> [] bool {
+fn is_ok[T: val](r: Result[T]) -> [] bool {
     match r {
         Result::Ok(_) => { return true; }
         Result::Err(_) => { return false; }
     }
 }
 
-fn unwrap_or[T](r: Result[T], fallback: T) -> [] T {
+fn unwrap_or[T: val](r: Result[T], fallback: T) -> [] T {
     match r {
         Result::Ok(value) => { return value; }
         Result::Err(_) => { return fallback; }

@@ -199,9 +199,29 @@ and requires every hash to survive.
 > every program gets the benefit. That is
 > [`docs/standard-library.md`](docs/standard-library.md).
 >
-> **Still missing:** a writer abstraction, `Option`/`Result` over
-> resources, and collections beyond a byte buffer — all waiting on mode
-> polymorphism. Do not mistake this for a usable language yet.
+> **And a type parameter can say which modes it works at.** Checking
+> §12's claim that mode polymorphism was "half-answered" turned up a
+> **leak and a double free** underneath it: `val struct Wrap[T]` was
+> *trusted* rather than checked, so `Wrap[Box[int]]` was `val` by
+> assertion — discardable, and copyable. Both compiled; valgrind said
+> *8 bytes definitely lost* and *Invalid free()*.
+>
+> The fix and the missing feature are one mechanism. Declaring an
+> aggregate `val` is a bound on its own parameters, and now functions
+> can write one: `[T: val]` is checked once and enforced at the **call
+> site**, while an unbounded `[T]` is checked as though it were `res` —
+> the stronger obligation, so a body that passes is safe at every
+> instantiation and its errors land on the definition. There is no
+> `[T: res]`, because it would mean what unbounded already means. That
+> is [`docs/mode-polymorphism.md`](docs/mode-polymorphism.md).
+>
+> It also found a second, worse bug: a call resolved its **effect row**
+> and its **types** through two different lookups, so a function calling
+> into C could declare `[]` and compile. Fixed — one resolution.
+>
+> **Still missing:** a writer abstraction, and `Option`/`Result` over
+> resources — neither blocked by the language any more, both wanting a
+> library design. Do not mistake this for a usable language yet.
 
 ## What this is
 
@@ -741,11 +761,33 @@ wrong reason** — `effect_not_propagated.ls` was refused for a missing
 argument rather than for the effect rule it tests, and only the change
 in checking order revealed it.
 
+Mode polymorphism came last, and it is the slice that found the most.
+§12 called it "half-answered" — monomorphisation already makes a generic
+work at both modes — and checking that turned up a **leak and a double
+free** hiding under the half that was answered: a `val` on a generic
+declaration was trusted rather than checked, so `Wrap[Box[int]]` was
+`val` by assertion, discardable and copyable.
+
+The fix is the feature. Declaring an aggregate `val` bounds its own
+parameters, and functions can now write that bound: `[T: val]` is
+checked once and enforced at the call site, while unbounded means
+checked as `res` — so a generic that drops its parameter is refused
+where it is written rather than wherever somebody first used a resource
+type. Four functions in this repository needed the bound, and each
+genuinely only ever worked for copyable types.
+
+It also found a worse bug, and one that modules had introduced: a call
+resolved its **effect row** and its **types** through two separate
+lookups with different precedence, neither module-scoped. A function
+calling into C could take its types from the `extern` and its effects
+from an unrelated same-named function elsewhere — declaring `[]`, and
+compiling. The effect system is the whole point of the language, so that
+is the most serious kind of bug it can have: not a crash, a lie.
+
 **What does not, yet:** a writer abstraction, `Option` and `Result` over
-resource types, collections beyond a byte buffer, flag parsing,
-environment variables, and standard error. The first three wait on mode
-polymorphism; the rest are ordinary work rather than blocked work, which
-is the difference these changes made.
+resource types, flag parsing, environment variables, and standard error.
+None of them is blocked by the language any more — the first two want a
+library design, the rest are ordinary work.
 
 Every example declares what it prints in its own header, and a test walks
 `examples/` and checks them, so an example that stops matching the language
@@ -812,6 +854,7 @@ carry them exists now, while it is cheap.
 | [`docs/standard-input.md`](docs/standard-input.md) | `getchar`, and why reading the console is a second label on `Io` rather than a seventh capability | **settled and built** — `examples/tally.ls` is `wc` over a pipe; the `io` effect label became `io_write` |
 | [`docs/modules.md`](docs/modules.md) | `module`, `import`, `pub` and qualified names — a namespace, not an identity, and not a trust boundary | **settled and built** — the precondition for a standard library; a module reaches no hash, and a test says so |
 | [`docs/standard-library.md`](docs/standard-library.md) | `std.bytes`, `std.io`, `std.math`, `std.buffer`, and `--std` with the source in the binary | **settled and built** — and it found the compiler emitting unreachable code; a program with `--std` and one without now emit byte-identical objects |
+| [`docs/mode-polymorphism.md`](docs/mode-polymorphism.md) | `[T: val]`, and what unbounded means: checked as `res`, so the error lands on the definition | **settled and built** — and it found a leak, a double free, and an effect row that could come from the wrong function |
 | `docs/memory-model.md` | Regions, escape, the escape hatches and their cost | not written — §5 and §6 settled and built regions and escape, and `sharing.md` has now settled §9's hatches. Nothing is left that a document of its own would say |
 | [`docs/defined-behaviour.md`](docs/defined-behaviour.md) | Every place C and Rust leave behaviour open, and what we define it to | **written and enforced** — overflow traps, evaluation order is left to right, and §9 names the fixture behind each rule |
 | [`docs/strings.md`](docs/strings.md) | What a string is: bytes rather than an encoding, `byte` as storage rather than arithmetic, packed layout, literals and the static region | **settled and built** — gated M3's last item; §9's must-reject suite is enforced |

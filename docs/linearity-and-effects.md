@@ -1099,7 +1099,15 @@ push if something here feels wrong.
 - **Capability release at `main`.** Four `release` calls in §8.3 is ceremony.
   Letting the runtime reclaim `World`'s parts is convenient and is *exactly*
   the affine hole §4 refuses elsewhere.
-- **Mode polymorphism.** *Half-answered by §3.1:* monomorphisation does make
+- **Mode polymorphism.** *Answered — see `docs/mode-polymorphism.md`.* The
+  half-answer below was right: monomorphisation does make `fn id[T](x: T) -> T`
+  work at both modes. The signature that says so is `[T: val]`, checked once
+  and enforced at the call site, and an unbounded parameter is checked as
+  `res`. Checking the claim also found a **leak and a double free**: a `val`
+  on a *generic* declaration was trusted rather than checked, so
+  `Wrap[Box[int]]` was `val` by assertion. The original text follows.
+
+  *Half-answered by §3.1:* monomorphisation does make
   `fn id[T](x: T) -> T` work at both modes, because each copy is checked at
   the type it was instantiated at. What is still open is a signature that says
   so and is checked *once* — the part that interacts with every rule here at

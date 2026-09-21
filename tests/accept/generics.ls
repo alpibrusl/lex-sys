@@ -1,6 +1,23 @@
 // Generic structs, enums and functions, monomorphised. `unwrap_or` is
 // instantiated at both `int` and `bool`, and `Option::None` learns its `T`
 // from the annotation on the binding rather than from an argument.
+//
+// Two of these now say which modes they work at
+// (`docs/mode-polymorphism.md` §3.1), and the difference is the point:
+//
+//   * `swap` is **unbounded**, so it is checked as though `A` and `B`
+//     were `res` -- and it passes, because taking the pair apart with a
+//     destructuring `let` consumes it exactly once. It therefore works at
+//     every mode. It used to read `p.second` and `p.first`, which reads a
+//     field out of a value without consuming it and is only legal for a
+//     copyable one; the rewrite is what makes it honestly polymorphic
+//     rather than accidentally val-only.
+//
+//   * `unwrap_or` is `[T: val]`, and that is not a workaround. For a
+//     linear `T` it would have to drop one of two values, which is the
+//     thing this language refuses -- so the bound says out loud what the
+//     function always meant, and a caller reaching for it with a resource
+//     type is refused at the call site rather than inside this file.
 //~ STDOUT 719532
 //~ EXIT 0
 
@@ -13,10 +30,11 @@ fn identity[T](x: T) -> [] T {
 }
 
 fn swap[A, B](p: Pair[A, B]) -> [] Pair[B, A] {
-    return Pair { first: p.second, second: p.first };
+    let Pair { first, second } = p;
+    return Pair { first: second, second: first };
 }
 
-fn unwrap_or[T](o: Option[T], fallback: T) -> [] T {
+fn unwrap_or[T: val](o: Option[T], fallback: T) -> [] T {
     match o {
         Option::None => { return fallback; }
         Option::Some(v) => { return v; }
