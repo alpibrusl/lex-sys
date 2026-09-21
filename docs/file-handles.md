@@ -47,7 +47,7 @@ doubling and best just before one. So the cost is **a constant factor
 under 3, not a factor of six**, which is a weaker argument for handles
 than §9.1 was making. The strong arguments are the next two.
 
-### 1.1 The ceiling is 8 MiB, and the comment says 16
+### 1.1 The ceiling was 8 MiB, and the comment said 16
 
 `sort.ls` reads:
 
@@ -64,11 +64,18 @@ than the capacity to be believed. Measured:
 | 8,388,608 bytes | **exit 2** |
 | 9,000,000 bytes | **exit 2** |
 
-So `examples/sort/` cannot sort a file of 8 MiB or more. Not a design
+So `examples/sort/` could not sort a file of 8 MiB or more. Not a design
 decision — an off-by-one in a comment that nothing checked, in the one
 place a reader would look to find the limit.
 
-### 1.2 Too big is indistinguishable from missing
+**Fixed, and it did not need handles.** Fifteen attempts reach 1 GiB,
+which is past where a sort holding the whole file in memory has worse
+problems; a conformance fixture now sorts 9 MB and fails on the old
+bound. A ceiling still exists rather than growing until something gives,
+because `heap.md` says a failed allocation **traps** — without one, a
+file bigger than memory would abort instead of saying so.
+
+### 1.2 Too big was indistinguishable from missing
 
 Worse than the volume. After eight attempts `read_file` returns `-1`,
 which is the same value it returns when the file could not be opened at
@@ -84,10 +91,21 @@ $ sort /nope/missing.txt ; echo $?
 Silent because there is no standard error to be loud on (`reach.md`
 §6). So §9.1's finding is sharper than §9.1 put it: `fs_read` cannot
 report truncation, **and the workaround cannot report its own failure
-either**. A program that hits the ceiling looks exactly like a typo in a
+either**. A program that hit the ceiling looked exactly like a typo in a
 filename.
 
-That is the argument. Not the 2.75×.
+**Half-fixed, and the other half is why this document exists.**
+`read_file` now answers `-2` for "larger than I can grow to hold"
+against `-1` for "could not read it", and `main` exits **3** rather than
+folding it into the **2** GNU uses for a file that is not there. So the
+two are distinguishable *to a script*.
+
+They are still not distinguishable to a **person**, because neither
+prints anything. That needs standard error, which `reach.md` §6 already
+names as a gap, and no amount of work inside `sort.ls` reaches it. An
+exit status is the whole vocabulary this program has.
+
+That is the argument for handles. Not the 2.75×.
 
 ---
 
@@ -253,4 +271,5 @@ that currently cannot be written correctly at all.
 | What `read`'s effect label is called | §4 settles that the prefix is spent at `open` and that `read` performs *something*. `io_read` is taken, `fs_read(p)` is wrong without a `p`. It wants a name, and a name is worth one slice's argument rather than a guess here |
 | Writing through a handle | Symmetric, and deliberately not designed with the read side. `bulk-io.md` §3.3 declined to design the input half alongside the output half for the same reason, and that turned out right |
 | Whether `End` can be observed twice | Reading past the end: `End` again, or `Failed`? POSIX says a repeat read at EOF answers 0 again. Probably `End`, and it should be a fixture rather than a paragraph |
-| `examples/sort/`'s 8 MiB ceiling | §1.1 is a bug in a shipped example and does not need handles to fix — the loop could simply not stop at eight. Whether to patch it now or let the handle rewrite delete it is a question about how long this doc sits unbuilt |
+| ~~`examples/sort/`'s 8 MiB ceiling~~ | **Done.** §1.1 — fifteen attempts reach 1 GiB, and a fixture past the old bound is in the conformance suite. It never needed handles, which is worth noticing: the bug the design doc was written to motivate turned out to be separable from the design |
+| Telling a person *why* a file failed | §1.2 is half-fixed: a script can tell exit 3 from exit 2, a person cannot tell anything, because there is nothing to print on. `reach.md` §6's standard-error gap is the blocker and it is small — smaller than this document |

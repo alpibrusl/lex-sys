@@ -230,12 +230,17 @@ file again. A 1.2 MB file is therefore read six times.
 > own capacity. The constant factor is under 3 at every size, which is a
 > *weaker* argument than "six times" sounds.
 >
-> The real costs are the two this paragraph missed. The loop gives up at
-> **8 MiB**, not the 16 MiB `sort.ls` claimed, so the example cannot sort
-> a file of 8,388,608 bytes or more (§1.1). And giving up returns the
-> same `-1` as a file that could not be opened, with nothing printed,
-> so hitting the ceiling is indistinguishable from a typo in a filename
-> (§1.2).
+> The real costs were the two this paragraph missed, and **both have
+> since been fixed without handles**. The loop gave up at **8 MiB**, not
+> the 16 MiB `sort.ls` claimed, so the example could not sort a file of
+> 8,388,608 bytes or more (§1.1) — it now reaches 1 GiB, with a fixture
+> past the old bound in the conformance suite. And giving up returned
+> the same `-1` as a file that could not be opened (§1.2) — it now
+> answers `-2` and exits 3.
+>
+> What survives is the part `sort.ls` cannot reach from inside itself:
+> neither failure **prints** anything, because there is no standard
+> error (`reach.md` §6). A script can tell them apart; a person cannot.
 
 That is not a bug and it is the cost of `filesystem.md` §3's own
 position: *"a file handle is a linear resource — it is precisely the

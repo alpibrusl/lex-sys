@@ -2585,6 +2585,31 @@ fn sort_agrees_with_gnu_sort() {
         assert_eq!(ours, theirs, "differs from GNU sort on a file past the first read");
     }
 
+    // Past the ceiling the growth loop used to stop at.
+    //
+    // `read_file` doubles from 64 KiB until a read comes back strictly
+    // shorter than the buffer, because `fs_read` cannot report
+    // truncation (`docs/file-handles.md` §1). It stopped after eight
+    // attempts, so the largest capacity was 8 MiB and *any* file of
+    // 8,388,608 bytes or more was refused — under a comment claiming the
+    // limit was 16 MiB, which is why nothing caught it.
+    //
+    // 9 MB rather than something just over the line, so this keeps
+    // testing the loop rather than an off-by-one: it needs two doublings
+    // past where the old bound was.
+    let past_ceiling: String =
+        (0..300_000).map(|i| format!("{:029}\n", (i * 7919) % 300_000)).collect();
+    assert!(past_ceiling.len() > 8 * 1024 * 1024, "the fixture has to clear the old 8 MiB bound");
+    let huge = scratch.join("past-ceiling.txt");
+    std::fs::write(&huge, &past_ceiling).expect("a writable fixture");
+    let (ours, status) = run(&exe, &[&huge], "");
+    assert_eq!(status, Some(0), "a file past the old 8 MiB ceiling should now sort");
+    assert_eq!(ours.lines().count(), 300_000, "it lost lines past the old ceiling");
+    assert!(
+        ours.lines().collect::<Vec<_>>().windows(2).all(|w| w[0] <= w[1]),
+        "a file past the old ceiling came out unsorted"
+    );
+
     let _ = std::fs::remove_dir_all(&scratch);
 }
 
