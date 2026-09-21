@@ -328,7 +328,15 @@ and it is narrower than the one §4.2 gave up on.
 
 ## 8. The shape where it would be worth real money
 
-`examples/base64/base64.ls`:
+> **Corrected.** This section called `examples/base64/`'s decode table
+> *"the one that pays"* and said the feature that reaches it was the next
+> document. The feature was built (`compile-time-data.md`) and the first
+> thing the measurement found was that **this section overclaimed**: the
+> table is worth 5.7×, and the table was already writable without any
+> language change. §1 of that document is the correction, and what is
+> below is the original observation, which was right about the table.
+
+`examples/base64/base64.ls`, as it was:
 
 ```
 fn value_of(c: int) -> [] int {
@@ -340,8 +348,8 @@ fn value_of(c: int) -> [] int {
 ```
 
 A **linear scan of 64 entries, once per decoded character.** GNU
-`base64` uses a 256-entry lookup table, and the file's own comment says
-why this one does not: *"64 entries of a 256-entry table is a lot of
+`base64` uses a 256-entry lookup table, and the file's own comment said
+why this one did not: *"64 entries of a 256-entry table is a lot of
 source for something a loop settles."*
 
 That is the real-world instance of "the compiler gives up", and it is
@@ -354,11 +362,9 @@ call to `value_of` has a runtime argument, so nothing folds. What reaches
 it is compile-time **data**: a pure function that returns a slice,
 evaluated once at compile time and emitted as static bytes.
 
-That needs compile-time allocation, a way to place the result in the
-binary's read-only data, and an answer to what `&static` means when it
-was not a literal. It is the next document, not this one — but it is
-where the argument ends up, and saying so now is more honest than
-discovering it after the fold pass ships.
+`compile-time-data.md` is that, and it is now built — a `static` item,
+and `examples/base64/` decodes 6.1× faster than it did. What this
+section got wrong is *who* the 5.7× belonged to.
 
 ---
 

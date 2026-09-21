@@ -289,6 +289,34 @@ impl<'a> Emitter<'a> {
         // program has to be reached through a separate binding.
         let program = self.program;
 
+        // Every `static`'s bytes, laid out once (`docs/compile-time-data.md`
+        // §2). Defined before any body is emitted, so a reference from a
+        // function finds a symbol that already exists — and defined once
+        // for the program rather than once per reader, because a table is
+        // not a greeting.
+        for data in &self.program.statics {
+            let stride = match data.element {
+                Type::Byte => 1usize,
+                _ => leaf_count(&data.element, program, pointer) as usize * 8,
+            };
+            // An empty `static` still needs an address, for the reason a
+            // zero-length literal does: a slice is a pointer and a length,
+            // and the pointer has to be *some*thing.
+            let mut bytes = vec![0u8; (data.values.len() * stride).max(1)];
+            for (i, value) in data.values.iter().enumerate() {
+                let at = i * stride;
+                bytes[at..at + stride].copy_from_slice(&value.to_le_bytes()[..stride]);
+            }
+            let mut description = DataDescription::new();
+            description.define(bytes.into_boxed_slice());
+            let name = format!("{PREFIX}static_{}", data.name);
+            let id = self
+                .module
+                .declare_data(&name, Linkage::Local, false, false)
+                .map_err(|e| CodegenError(e.to_string()))?;
+            self.module.define_data(id, &description).map_err(|e| CodegenError(e.to_string()))?;
+        }
+
         // Declare every lex-sys function first: calls are resolved against
         // declarations, so definition order in the file never matters.
         let mut declared: Vec<FuncId> = Vec::with_capacity(self.program.funcs.len());
@@ -1060,6 +1088,29 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
         vec![start, len]
     }
 
+    /// A `static`'s data: a pointer into it and its length
+    /// (`docs/compile-time-data.md` §2).
+    ///
+    /// Declared once per program and referenced by every reader, unlike a
+    /// string literal which is defined per occurrence — a table is bigger
+    /// than a greeting, and two copies of a 512 KB table is a size
+    /// regression nobody asked for.
+    fn static_data(&mut self, index: u32) -> Vec<Value> {
+        let pointer = self.pointer;
+        let data = &self.program.statics[index as usize];
+        let name = format!("{PREFIX}static_{}", data.name);
+        let len = data.values.len() as i64;
+
+        let id = self
+            .module
+            .declare_data(&name, Linkage::Local, false, false)
+            .expect("a static is declared once per program");
+        let value = self.module.declare_data_in_func(id, self.builder.func);
+        let start = self.builder.ins().global_value(pointer, value);
+        let len = self.builder.ins().iconst(types::I64, len);
+        vec![start, len]
+    }
+
     /// `alloc_slice[a](count, fill)` — `count` copies of `fill`, contiguous.
     ///
     /// Returns the two leaves a slice is made of: where it starts and how
@@ -1685,6 +1736,10 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
                 let text = text.clone();
                 self.bytes(&text)
             }
+            // `docs/compile-time-data.md` §2: the same two leaves a
+            // literal is, because that is what it became. The bytes were
+            // computed rather than written, and by here nothing can tell.
+            Expr::Static(index) => self.static_data(*index),
             Expr::FileOp { write, prefix, args } => {
                 let (write, prefix, args) = (*write, prefix.clone(), args.clone());
                 self.file_op(write, &prefix, &args)

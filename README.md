@@ -189,7 +189,9 @@ exact effect rows, capabilities, narrowing, and capability-gated foreign
 calls; arenas, a general heap with recursive types, boxed slices and the
 growable buffers they allow; slices and strings; file IO through a
 path-carrying capability; the console in both directions; the command line;
-programs spread over several files; modules with visibility; and a standard
+programs spread over several files; modules with visibility; `static` items
+whose bodies run during compilation and become read-only data
+([`docs/compile-time-data.md`](docs/compile-time-data.md)); and a standard
 library of ten modules — one of which prints a `float` as the shortest
 decimal that reads back to the same bits, written in lex-sys rather than in
 the compiler ([`docs/float-printing.md`](docs/float-printing.md)).

@@ -18,7 +18,7 @@
 
 use lex_sys_types::Type;
 
-use crate::{BinOp, Callee, Expr, Func, Program, Stmt};
+use crate::{BinOp, Callee, Expr, Func, Place, Program, STATIC_ARENA, Stmt};
 
 /// What an evaluation came to.
 ///
@@ -202,10 +202,37 @@ const FUEL: u32 = 1_000_000;
 /// stack with it.
 const DEPTH: u32 = 128;
 
+/// A value while a `static` is being evaluated
+/// (`docs/compile-time-data.md` §4).
+///
+/// Two shapes and no more: a scalar, which is the `Expr` the folder
+/// already traffics in, and a **handle** into the store — a run of
+/// elements, which is exactly what a slice is at run time as well.
+#[derive(Clone, Debug)]
+enum Val {
+    Scalar(Expr),
+    /// `at` is where the run starts in the store and `len` is how long it
+    /// is, so `s[a..b]` is arithmetic on a handle and copies nothing —
+    /// the same property `slicing.md` §1 gives the runtime one.
+    Slice {
+        at: usize,
+        len: usize,
+    },
+}
+
+impl Val {
+    fn scalar(self) -> Result<Expr, Stop> {
+        match self {
+            Val::Scalar(e) => Ok(e),
+            Val::Slice { .. } => Err(Stop::Give),
+        }
+    }
+}
+
 #[derive(Debug)]
 enum Stop {
     /// The function returned.
-    Returned(Expr),
+    Returned(Val),
     /// The evaluator declined — an unsupported construct, a call it could
     /// not see into, or the fuel ran out. Never an error (§5).
     Give,
@@ -219,6 +246,20 @@ struct Machine<'p> {
     program: &'p Program,
     fuel: u32,
     depth: u32,
+    /// Everything `alloc_slice[static]` has handed out, one element per
+    /// entry, in allocation order. A `static` body's whole memory.
+    store: Vec<Expr>,
+    /// The `static`s already evaluated, so a later one can read an
+    /// earlier one (§2).
+    done: &'p [Vec<i64>],
+}
+
+impl Machine<'_> {
+    /// A machine for folding a call: no memory, because
+    /// `compile-time.md` §3.1 keeps memory out of that half.
+    fn folding(program: &Program) -> Machine<'_> {
+        Machine { program, fuel: FUEL, depth: DEPTH, store: Vec::new(), done: &[] }
+    }
 }
 
 /// Replace every call to a pure function on constant arguments with its
@@ -346,9 +387,14 @@ fn fold_in(e: &mut Expr, program: &Program, tally: &mut Tally) {
             let func = program.func(*id);
             if func.is_pure() {
                 was_call = true;
-                let mut machine = Machine { program, fuel: FUEL, depth: DEPTH };
-                match machine.call(func, args.clone()) {
-                    Stop::Returned(v) if constant(&v) => Some(v),
+                let mut machine = Machine::folding(program);
+                let values = args.iter().cloned().map(Val::Scalar).collect();
+                match machine.call(func, values) {
+                    // A call that answers a *slice* is not folded: there
+                    // is nowhere to put the bytes at a call site, which is
+                    // the whole reason a `static` is an item
+                    // (`docs/compile-time-data.md` §2).
+                    Stop::Returned(Val::Scalar(v)) if constant(&v) => Some(v),
                     _ => None,
                 }
             } else {
@@ -378,14 +424,14 @@ impl Machine<'_> {
         }
     }
 
-    fn call(&mut self, func: &Func, args: Vec<Expr>) -> Stop {
+    fn call(&mut self, func: &Func, args: Vec<Val>) -> Stop {
         if self.depth == 0 {
             return Stop::Give;
         }
         // One slot per local, parameters first. `None` is "not written
         // yet", which a well-formed body never reads -- and if one did,
         // the evaluator gives up rather than inventing a zero.
-        let mut slots: Vec<Option<Expr>> = vec![None; func.slots.len()];
+        let mut slots: Vec<Option<Val>> = vec![None; func.slots.len()];
         for (i, a) in args.into_iter().enumerate() {
             slots[i] = Some(a);
         }
@@ -402,20 +448,45 @@ impl Machine<'_> {
     }
 
     /// `None` means the block finished without returning.
-    fn block(&mut self, body: &[Stmt], slots: &mut Vec<Option<Expr>>) -> Option<Stop> {
+    fn block(&mut self, body: &[Stmt], slots: &mut Vec<Option<Val>>) -> Option<Stop> {
         for stmt in body {
             if !self.spend() {
                 return Some(Stop::Give);
             }
             match stmt {
-                Stmt::Store { place: crate::Place::Slot(slot), value } => {
-                    match self.eval(value, slots) {
-                        Ok(v) => slots[slot.0 as usize] = Some(v),
+                Stmt::Store { place: Place::Slot(slot), value } => match self.eval(value, slots) {
+                    Ok(v) => slots[slot.0 as usize] = Some(v),
+                    Err(stop) => return Some(stop),
+                },
+                // `s[i] = v` — the one write through memory a `static`
+                // body needs (`docs/compile-time-data.md` §4). The bounds
+                // check is the runtime's, and failing it is a **compile
+                // error**, because a trap the evaluator reaches is one the
+                // program would reach every time (`compile-time.md` §4).
+                Stmt::Store { place: Place::Element { base, index, .. }, value } => {
+                    let target = match self.eval(base, slots) {
+                        Ok(v) => v,
                         Err(stop) => return Some(stop),
+                    };
+                    let at = match self.eval(index, slots).and_then(Val::scalar) {
+                        Ok(Expr::Int(n)) => n,
+                        Ok(_) => return Some(Stop::Give),
+                        Err(stop) => return Some(stop),
+                    };
+                    let value = match self.eval(value, slots).and_then(Val::scalar) {
+                        Ok(v) => v,
+                        Err(stop) => return Some(stop),
+                    };
+                    let Val::Slice { at: start, len } = target else {
+                        return Some(Stop::Give);
+                    };
+                    if at < 0 || at as usize >= len {
+                        return Some(Stop::Trapped);
                     }
+                    self.store[start + at as usize] = value;
                 }
-                // Any other place writes through a reference or into
-                // memory, which this evaluator has none of.
+                // Any other place writes through a reference or into a
+                // struct field, which this evaluator has neither of.
                 Stmt::Store { .. } => return Some(Stop::Give),
                 Stmt::Eval(value) => {
                     if let Err(stop) = self.eval(value, slots) {
@@ -429,7 +500,7 @@ impl Machine<'_> {
                     });
                 }
                 Stmt::If { cond, then_body, else_body } => {
-                    let taken = match self.eval(cond, slots) {
+                    let taken = match self.eval(cond, slots).and_then(Val::scalar) {
                         Ok(Expr::Bool(b)) => b,
                         Ok(_) => return Some(Stop::Give),
                         Err(stop) => return Some(stop),
@@ -443,7 +514,7 @@ impl Machine<'_> {
                     if !self.spend() {
                         return Some(Stop::Give);
                     }
-                    match self.eval(cond, slots) {
+                    match self.eval(cond, slots).and_then(Val::scalar) {
                         Ok(Expr::Bool(true)) => {}
                         Ok(Expr::Bool(false)) => break,
                         Ok(_) => return Some(Stop::Give),
@@ -454,9 +525,9 @@ impl Machine<'_> {
                     }
                 },
                 // A `region` holds an arena and a `borrow` holds a
-                // reference; both are memory, and §3.1 keeps memory out
-                // of compile-time evaluation until there is a document
-                // for compile-time data.
+                // reference; a `static` needs neither, because its own
+                // allocations go straight to the store. `match` wants
+                // enums, which §6 keeps out.
                 Stmt::Borrow { .. } | Stmt::Region { .. } | Stmt::Match { .. } => {
                     return Some(Stop::Give);
                 }
@@ -465,15 +536,100 @@ impl Machine<'_> {
         None
     }
 
-    fn eval(&mut self, e: &Expr, slots: &mut Vec<Option<Expr>>) -> Result<Expr, Stop> {
+    /// Put a run of elements in the store and answer a handle to it.
+    fn allocate(&mut self, values: impl IntoIterator<Item = Expr>) -> Val {
+        let at = self.store.len();
+        self.store.extend(values);
+        Val::Slice { at, len: self.store.len() - at }
+    }
+
+    fn eval(&mut self, e: &Expr, slots: &mut Vec<Option<Val>>) -> Result<Val, Stop> {
         if !self.spend() {
             return Err(Stop::Give);
         }
         match e {
-            Expr::Int(_) | Expr::Bool(_) | Expr::Float(_) => Ok(e.clone()),
+            Expr::Int(_) | Expr::Bool(_) | Expr::Float(_) => Ok(Val::Scalar(e.clone())),
             Expr::Load(slot) => slots[slot.0 as usize].clone().ok_or(Stop::Give),
+            // A string literal is a run of bytes, so it becomes one: the
+            // same handle an `alloc_slice` hands back, and `len` and
+            // indexing then need no second code path.
+            Expr::Bytes(text) => {
+                let bytes: Vec<Expr> =
+                    text.as_bytes().iter().map(|b| Expr::Int(i64::from(*b))).collect();
+                if !self.spend_many(bytes.len()) {
+                    return Err(Stop::Give);
+                }
+                Ok(self.allocate(bytes))
+            }
+            // A `static` declared earlier, read as the data it became.
+            Expr::Static(index) => {
+                let Some(values) = self.done.get(*index as usize) else {
+                    return Err(Stop::Give);
+                };
+                if !self.spend_many(values.len()) {
+                    return Err(Stop::Give);
+                }
+                let values: Vec<Expr> = values.iter().map(|v| Expr::Int(*v)).collect();
+                Ok(self.allocate(values))
+            }
+            // §2.1's allocation, and the only one there is. A runtime
+            // arena never reaches here: `region` gives up above.
+            Expr::AllocSlice { arena, count, fill, .. } if *arena == STATIC_ARENA => {
+                let count = match self.eval(count, slots).and_then(Val::scalar)? {
+                    Expr::Int(n) => n,
+                    _ => return Err(Stop::Give),
+                };
+                let fill = self.eval(fill, slots).and_then(Val::scalar)?;
+                // A negative length traps at run time
+                // (`defined-behaviour.md` §4), so it is a diagnostic here.
+                if count < 0 {
+                    return Err(Stop::Trapped);
+                }
+                if !self.spend_many(count as usize) {
+                    return Err(Stop::Give);
+                }
+                Ok(self.allocate(std::iter::repeat_n(fill, count as usize)))
+            }
+            Expr::Len(inner) => match self.eval(inner, slots)? {
+                Val::Slice { len, .. } => Ok(Val::Scalar(Expr::Int(len as i64))),
+                Val::Scalar(_) => Err(Stop::Give),
+            },
+            Expr::Index { base, index, .. } => {
+                let target = self.eval(base, slots)?;
+                let at = match self.eval(index, slots).and_then(Val::scalar)? {
+                    Expr::Int(n) => n,
+                    _ => return Err(Stop::Give),
+                };
+                let Val::Slice { at: start, len } = target else {
+                    return Err(Stop::Give);
+                };
+                if at < 0 || at as usize >= len {
+                    return Err(Stop::Trapped);
+                }
+                Ok(Val::Scalar(self.store[start + at as usize].clone()))
+            }
+            // `s[a..b]` is arithmetic on a handle and copies nothing, the
+            // same property the runtime one has (`slicing.md` §1).
+            Expr::Subslice { base, start, end, .. } => {
+                let target = self.eval(base, slots)?;
+                let from = match self.eval(start, slots).and_then(Val::scalar)? {
+                    Expr::Int(n) => n,
+                    _ => return Err(Stop::Give),
+                };
+                let to = match self.eval(end, slots).and_then(Val::scalar)? {
+                    Expr::Int(n) => n,
+                    _ => return Err(Stop::Give),
+                };
+                let Val::Slice { at, len } = target else {
+                    return Err(Stop::Give);
+                };
+                if from < 0 || to < from || to as usize > len {
+                    return Err(Stop::Trapped);
+                }
+                Ok(Val::Slice { at: at + from as usize, len: (to - from) as usize })
+            }
             Expr::Neg(a) => {
-                let v = self.eval(a, slots)?;
+                let v = self.eval(a, slots).and_then(Val::scalar)?;
                 // The type is not in hand here, so it comes from the
                 // value: a literal is an `int` or a `float` and nothing
                 // else can be negated.
@@ -481,11 +637,11 @@ impl Machine<'_> {
                 self.settle(negate(&v, &ty))
             }
             Expr::Not(a) => {
-                let v = self.eval(a, slots)?;
+                let v = self.eval(a, slots).and_then(Val::scalar)?;
                 self.settle(not(&v))
             }
             Expr::BitNot(a) => {
-                let v = self.eval(a, slots)?;
+                let v = self.eval(a, slots).and_then(Val::scalar)?;
                 self.settle(bit_not(&v))
             }
             Expr::Bin { op, lhs, rhs } => {
@@ -493,20 +649,20 @@ impl Machine<'_> {
                 // be the thing that would trap, so they are evaluated as
                 // control flow here exactly as the backend lowers them.
                 if matches!(op, BinOp::And | BinOp::Or) {
-                    let left = match self.eval(lhs, slots)? {
+                    let left = match self.eval(lhs, slots).and_then(Val::scalar)? {
                         Expr::Bool(b) => b,
                         _ => return Err(Stop::Give),
                     };
                     if (*op == BinOp::And && !left) || (*op == BinOp::Or && left) {
-                        return Ok(Expr::Bool(left));
+                        return Ok(Val::Scalar(Expr::Bool(left)));
                     }
-                    return match self.eval(rhs, slots)? {
-                        Expr::Bool(b) => Ok(Expr::Bool(b)),
+                    return match self.eval(rhs, slots).and_then(Val::scalar)? {
+                        Expr::Bool(b) => Ok(Val::Scalar(Expr::Bool(b))),
                         _ => Err(Stop::Give),
                     };
                 }
-                let l = self.eval(lhs, slots)?;
-                let r = self.eval(rhs, slots)?;
+                let l = self.eval(lhs, slots).and_then(Val::scalar)?;
+                let r = self.eval(rhs, slots).and_then(Val::scalar)?;
                 self.settle(bin(*op, &l, &r))
             }
             Expr::Call { callee: Callee::Fn(id), args } => {
@@ -523,18 +679,107 @@ impl Machine<'_> {
                     other => Err(other),
                 }
             }
-            // Builtins, foreign calls, memory, aggregates: everything
-            // else gives up. §3.1 -- an evaluator that declines is
-            // invisible, and one that guesses is not.
+            // `byte_of` and `int_of` are the two builtins a table build
+            // cannot do without: the alphabet is `[byte]` and the table
+            // is `[int]`, so every entry crosses between them.
+            Expr::Call { callee: Callee::Builtin(b), args } if args.len() == 1 => {
+                let v = self.eval(&args[0], slots).and_then(Val::scalar)?;
+                match (b.name(), v) {
+                    ("int_of", Expr::Int(n)) => Ok(Val::Scalar(Expr::Int(n))),
+                    ("byte_of", Expr::Int(n)) => {
+                        // Out of range traps (`strings.md` §2), so it is a
+                        // diagnostic here.
+                        if !(0..256).contains(&n) {
+                            return Err(Stop::Trapped);
+                        }
+                        Ok(Val::Scalar(Expr::Int(n)))
+                    }
+                    _ => Err(Stop::Give),
+                }
+            }
+            // Foreign calls, the heap, aggregates: everything else gives
+            // up. §6 — an evaluator that declines is invisible, and one
+            // that guesses is not.
             _ => Err(Stop::Give),
         }
     }
 
-    fn settle(&mut self, folded: Folded) -> Result<Expr, Stop> {
+    /// Charge for a bulk operation, so a huge `alloc_slice` costs what it
+    /// takes rather than one step.
+    fn spend_many(&mut self, n: usize) -> bool {
+        let n = u32::try_from(n).unwrap_or(u32::MAX);
+        match self.fuel.checked_sub(n) {
+            Some(left) => {
+                self.fuel = left;
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn settle(&mut self, folded: Folded) -> Result<Val, Stop> {
         match folded {
-            Folded::Value(v) => Ok(v),
+            Folded::Value(v) => Ok(Val::Scalar(v)),
             Folded::Trapped(_) => Err(Stop::Trapped),
             Folded::Unknown => Err(Stop::Give),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------
+// Statics
+// ---------------------------------------------------------------------
+
+/// How many steps one `static` may spend (`docs/compile-time-data.md` §3).
+///
+/// Twenty times the budget a folded call gets, and the reason is in §3: a
+/// table is built once and read for the life of the program, so it is
+/// worth more compile time than an expression that saves a few
+/// instructions. It is also the budget whose exhaustion is *visible* —
+/// a `static` that needs more does not compile — so it is set where a
+/// table someone would plausibly write fits inside it.
+const STATIC_FUEL: u32 = 20_000_000;
+
+/// Run a `static`'s body and answer its elements
+/// (`docs/compile-time-data.md` §3).
+///
+/// `Err` is a sentence for a diagnostic rather than a `Diagnostic`,
+/// because the span belongs to the item and this module does not have it.
+/// There is no `Ok(None)`: a `static` has no runtime fallback, so
+/// declining is refusing — *refuse, don't downgrade*.
+pub fn evaluate_static(
+    program: &Program,
+    body: &Func,
+    done: &[Vec<i64>],
+) -> Result<Vec<i64>, String> {
+    let mut machine = Machine { program, fuel: STATIC_FUEL, depth: DEPTH, store: Vec::new(), done };
+    match machine.call(body, Vec::new()) {
+        Stop::Returned(Val::Slice { at, len }) => {
+            let mut values = Vec::with_capacity(len);
+            for cell in &machine.store[at..at + len] {
+                match cell {
+                    Expr::Int(n) => values.push(*n),
+                    Expr::Bool(b) => values.push(i64::from(*b)),
+                    Expr::Float(bits) => values.push(*bits as i64),
+                    // Every write into the store goes through
+                    // `Val::scalar`, so this is unreachable rather than
+                    // merely unlikely -- and a wrong guess here would put
+                    // the wrong bytes in the binary.
+                    _ => return Err("its elements are not all scalars".to_owned()),
+                }
+            }
+            Ok(values)
+        }
+        Stop::Returned(Val::Scalar(_)) => {
+            Err("it answers a scalar, and a `static` holds a slice".to_owned())
+        }
+        Stop::Trapped => Err("it traps: the operation has no value, and a `static` \
+                              that cannot be computed cannot be compiled"
+            .to_owned()),
+        Stop::Give => {
+            Err("the evaluator cannot run it: either it needs more than the compile-time budget, \
+             or it reaches something a `static` may not (`docs/compile-time-data.md` §6)"
+                .to_owned())
         }
     }
 }

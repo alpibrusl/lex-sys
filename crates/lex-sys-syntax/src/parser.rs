@@ -172,6 +172,15 @@ impl<'a> Parser<'a> {
             // `pub` is a prefix on a declaration and nothing else, so it is
             // read here and handed down rather than parsed three times.
             let public = self.eat(TokenKind::Pub);
+            // `static` is a **contextual** keyword: it is an ordinary
+            // identifier everywhere else, because `&static [byte]` has
+            // named the region since M3 and making it a token would have
+            // to be undone in every type position
+            // (`docs/compile-time-data.md` §2).
+            if self.peek().kind == TokenKind::Ident && self.text(self.peek()) == "static" {
+                self.static_decl(public)?;
+                continue;
+            }
             match self.peek().kind {
                 TokenKind::Fn => self.fn_decl(public)?,
                 TokenKind::Extern => self.extern_decl()?,
@@ -198,7 +207,7 @@ impl<'a> Parser<'a> {
                 }
                 other => {
                     return Err(self.err(format!(
-                        "expected `fn`, `extern`, `struct` or `enum`, found {}",
+                        "expected `fn`, `extern`, `struct`, `enum` or `static`, found {}",
                         other.describe()
                     )));
                 }
@@ -262,6 +271,22 @@ impl<'a> Parser<'a> {
             }),
             start.to(end),
         ))
+    }
+
+    /// `static decode_table: [int] { .. }` (`docs/compile-time-data.md` §2).
+    ///
+    /// A name, a referent type and a body. No parameters, because a
+    /// `static` is not called; no effect row, because it performs nothing
+    /// by construction and a row nothing performs is decoration
+    /// (`linearity-and-effects.md` §7.3); no generics, because there is
+    /// nothing to instantiate it at.
+    fn static_decl(&mut self, public: bool) -> Result<ItemId, Diagnostic> {
+        let start = self.bump().span;
+        let name = self.ident()?;
+        self.expect(TokenKind::Colon)?;
+        let ty = self.type_expr()?;
+        let (body, end) = self.block()?;
+        Ok(self.push_decl(Item::Static(StaticDecl { name, public, ty, body }), start.to(end)))
     }
 
     /// `extern fn abs(f: &!r Ffi("libc"), n: int) -> [ffi("libc")] int;`
@@ -1309,7 +1334,7 @@ mod tests {
             .iter()
             .find_map(|item| match item {
                 Item::Fn(decl) => Some(decl.clone()),
-                Item::Struct(_) | Item::Enum(_) | Item::Extern(_) => None,
+                Item::Struct(_) | Item::Enum(_) | Item::Extern(_) | Item::Static(_) => None,
             })
             .expect("a function");
         (ast, decl)

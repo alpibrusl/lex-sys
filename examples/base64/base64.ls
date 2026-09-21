@@ -32,22 +32,39 @@ fn alphabet() -> [] &static [byte] {
     return "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 }
 
-// The inverse, computed rather than tabulated: 64 entries of a 256-entry
-// table is a lot of source for something a loop settles, and the loop is
-// checked by the round trip.
+// The inverse, as a 256-entry table — **built by the loop, at compile
+// time** (`docs/compile-time-data.md`).
 //
-// Returns -1 for anything that is not in the alphabet, which is how the
-// decoder tells padding and whitespace from a character it must refuse.
-fn value_of(c: int) -> [] int {
-    let table = alphabet();
+// This used to be the loop itself, run once per decoded character, and
+// the comment here used to explain why: 64 entries of a 256-entry table
+// is a lot of source for something a loop settles. Both halves of that
+// are still true, and now neither costs anything, because the loop runs
+// during compilation and the table is in the binary.
+//
+// It was worth 5.7× on 5.4 MB (§1 of that document), which makes it the
+// largest single change to this program since it was ported.
+static decode_table: [int] {
+    let table = alloc_slice[static](256, 0 - 1);
+    let alpha = alphabet();
     var i = 0;
-    while i < len(table) {
-        if int_of(table[i]) == c {
-            return i;
-        }
+    while i < len(alpha) {
+        table[int_of(alpha[i])] = i;
         i = i + 1;
     }
-    return 0 - 1;
+    return table;
+}
+
+// Returns -1 for anything that is not in the alphabet, which is how the
+// decoder tells padding and whitespace from a character it must refuse.
+//
+// Still pure, and `lex-sys authority` still says so: reading a `static`
+// needs no parameter, which is the difference between this and passing
+// the table down from `main` (§1.1).
+fn value_of(c: int) -> [] int {
+    if c < 0 || c >= len(decode_table) {
+        return 0 - 1;
+    }
+    return decode_table[c];
 }
 
 // ---------------------------------------------------------------------
