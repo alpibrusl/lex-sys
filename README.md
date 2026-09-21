@@ -111,6 +111,15 @@ and requires every hash to survive.
 > claim since M0 and until now had no files to be tested across. That is
 > [`docs/many-files.md`](docs/many-files.md).
 >
+> **And a run of values can live on the heap.** `Box[[T]]` is the second
+> shape a box comes in — a pointer *and* a length — and it is what every
+> collection needs: an arena slice is bounded by its block and an ordinary
+> box holds one sized value, so until now a buffer that grows could not
+> exist. The language has no `grow`, `push` or `realloc`; growing is
+> allocate-copy-end, and `examples/buffer/` writes it down in sixty lines
+> so the doubling policy belongs to the program. That is
+> [`docs/boxed-slices.md`](docs/boxed-slices.md).
+>
 > **Still missing:** sharing — §9's `Rc` and `Gen` — and a standard
 > library. Both are now unblocked rather than impossible. Do not mistake
 > this for a usable language yet.
@@ -265,6 +274,19 @@ arbitrary paths without opening the body. A tool that *did* know its
 directory would narrow, and its row would say so instead. The type tells
 the truth either way.
 
+`examples/buffer/` is a growable byte buffer, written as a library. It is
+worth reading for `reserve`, which is the *entire* implementation of
+"growing": a bigger box, a copy, and the old one ended. The language has
+no `realloc` — which would also hide which of two very different things
+happened — so the doubling policy is in this repository rather than in the
+compiler, and the cost is countable: building 31 bytes from a one-byte
+buffer is three allocations, which is what valgrind reports.
+
+```sh
+cargo run -p lex-sys -- run examples/buffer/main.ls examples/buffer/buffer.ls
+# counting: 1 4 9 16 25 36 49 64
+```
+
 `examples/wordfreq/` is the capstone, and the only example that is three
 files: `text.ls` holds byte helpers, `counts.ls` holds the tally, and
 `main.ls` is the program. Every capability is in it doing real work —
@@ -303,9 +325,9 @@ bindings, structs, enums with exhaustive `match`, generics over both,
 shared and unique borrows with lexical regions, exact effect rows,
 capabilities, narrowing, capability-gated foreign calls, arenas, checked
 arithmetic, slices, strings, file IO through a path-carrying capability, a
-general heap with recursive types, reading through references — `*r` and
-`match` on a reference — the command line, and programs spread over
-several files.
+general heap with recursive types, boxed slices and the growable buffers
+they allow, reading through references — `*r` and `match` on a reference —
+the command line, and programs spread over several files.
 
 ```
 res struct Ticket { serial: int }
@@ -569,6 +591,7 @@ carry them exists now, while it is cheap.
 | [`docs/linearity-and-effects.md`](docs/linearity-and-effects.md) | The M2 gate: linear ownership, capability-typed effects, how they unify, and 23 must-reject fixtures written out as the conformance suite | settled; §3 through §8 implemented |
 | [`docs/bootstrap.md`](docs/bootstrap.md) | What M0 settled: bootstrap host (Rust), extension (`.ls`), the M0 surface, what is scaffolding and what replaces it | written |
 | [`docs/canonical-ast.md`](docs/canonical-ast.md) | Canonicalisation rules and per-unit identity: what is hashed, and what a hash is allowed to change with | written, implemented |
+| [`docs/boxed-slices.md`](docs/boxed-slices.md) | `Box[[T]]`: a pointer *and* a length, and the three operations a run of heap values needs | **settled and built** — the foundation every collection wants; `examples/buffer/` is the growable buffer |
 | [`docs/many-files.md`](docs/many-files.md) | A program in more than one file: flat namespace, identity by content, global spans | **settled and built** — the precondition for a library of any kind |
 | [`docs/arguments.md`](docs/arguments.md) | The `Args` capability, `arg_count` / `arg`, and why reading argv is an effect | **settled and built** — the "command-line" half of M3's acceptance criterion; §7's must-reject suite is enforced |
 | [`docs/reading-references.md`](docs/reading-references.md) | `*r`, and `match` on a reference binding payloads as references | **settled and built** — closed the two limits the heap slice left open; §7's must-reject suite is enforced |

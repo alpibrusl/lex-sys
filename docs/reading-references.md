@@ -51,6 +51,31 @@ binds as a *borrow* of that `res`, so no obligation is created, nothing is
 consumed, and the scrutinee is exactly as owned after the match as before
 it.
 
+### 2.0 The same rule, for field access
+
+Stated here for `match`, and it holds for the other way to reach into a
+value. **Field access is not an exception**, and for a while it was one.
+
+`h.field` through a reference *copies* a `val` field out, which costs the
+referent nothing and is what a reference is for. A `res` field cannot be
+copied — that is what `res` means — so reading one would produce a second
+owner of a value the referent still owns: two obligations where one is
+owed. It is refused, and `res_field_read_through_reference.ls` is the
+fixture.
+
+That fixture exists because it was **not** refused until `boxed-slices.md`
+was built, and the hole was real rather than theoretical: a `res` field
+read through a *shared* reference and then consumed gave an `Invalid
+free()` under valgrind, from ordinary code, with no `unsafe` anywhere —
+which this language does not have. It contradicted `heap.md` §3.1's
+"a double free is unexpressible", and that section is only true with this
+check in place.
+
+Reaching a `res` field therefore means owning the value: take it apart,
+use the parts, put it back together. `examples/buffer/` does exactly that,
+and its `write_buffer` takes a `Buffer` by value and hands it back for
+this reason rather than as a matter of taste.
+
 ### 2.1 Why not Rust's binding modes
 
 Rust infers whether a pattern binding is a move, a copy, a `&` or a `&mut`,
@@ -159,6 +184,7 @@ three times, then freed once.
 | Nested patterns | Orthogonal; this rule composes with them unchanged |
 | `match` on a slice | Needs patterns over lengths, which is a different feature |
 | Moving out of a unique reference | Would need the referent marked as moved-from; a real feature, and not one anything needs yet |
+| Reading a `res` field *as a borrow* | §2.0 refuses the move. Handing back `&r Field` instead would be useful, and is exactly the binding-mode question §2.1 declines |
 | `*r` on a `res` behind a *unique* reference | A swap, not a read: it would have to put something back. Wants its own operation |
 
 ---
@@ -172,6 +198,7 @@ three times, then freed once.
 | `write_through_shared_deref.ls` | `*r = v` needs a unique reference | 3 |
 | `match_reference_binding_escapes.ls` | A binding from a matched reference dies with the region | 2 |
 | `match_reference_payload_consumed.ls` | A `res` payload bound by reference may not be consumed | 2 |
+| `res_field_read_through_reference.ls` | The same rule for field access — the hole §2.0 records | 2.0 |
 
 And the accepting counterparts:
 

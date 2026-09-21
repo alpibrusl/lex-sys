@@ -278,6 +278,20 @@ pub enum Builtin {
     /// box that has been freed -- `unbox` consumes, and §5 already refuses a
     /// reference that outlives its borrow.
     Contents,
+    /// `box_slice(h, count, fill) -> [heap] Box[[T]]` — a run of values on
+    /// the heap (`docs/boxed-slices.md` §3).
+    ///
+    /// The second shape a box comes in: a pointer *and* a length, where an
+    /// ordinary box is a pointer alone, because nothing else knows how many
+    /// elements there are.
+    BoxSlice,
+    /// `unbox_slice(h, b) -> [heap] int` — free it, and answer how many.
+    ///
+    /// A different operation from `unbox`, and it has to be: `unbox` hands
+    /// back what the box held, and `[T]` is unsized so there is nothing to
+    /// hand back. It is still the *only* consumer a boxed slice has, so
+    /// `heap.md` §3.1 holds unchanged.
+    UnboxSlice,
     /// `arg_count(a) -> [args] int` — `argc`, exactly as the runtime gave it.
     ///
     /// `docs/arguments.md` §3. A builtin rather than an `extern fn` for the
@@ -319,6 +333,8 @@ impl Builtin {
         Builtin::Contents,
         Builtin::ArgCount,
         Builtin::Arg,
+        Builtin::BoxSlice,
+        Builtin::UnboxSlice,
     ];
 
     pub fn name(self) -> &'static str {
@@ -340,6 +356,8 @@ impl Builtin {
             Builtin::Contents => "contents",
             Builtin::ArgCount => "arg_count",
             Builtin::Arg => "arg",
+            Builtin::BoxSlice => "box_slice",
+            Builtin::UnboxSlice => "unbox_slice",
         }
     }
 
@@ -415,7 +433,11 @@ impl Builtin {
             Builtin::FsRead | Builtin::FsWrite => (Vec::new(), Type::Unit),
             // All three depend on the type being boxed, which a fixed
             // signature has no parameter to name (`docs/heap.md` §3).
-            Builtin::Box | Builtin::Unbox | Builtin::Contents => (Vec::new(), Type::Unit),
+            Builtin::Box
+            | Builtin::Unbox
+            | Builtin::Contents
+            | Builtin::BoxSlice
+            | Builtin::UnboxSlice => (Vec::new(), Type::Unit),
             // `docs/arguments.md` §3. Written out rather than checked at
             // the call site, because neither depends on a type the caller
             // chose: an argument is always `&static [byte]`.
@@ -464,7 +486,9 @@ impl Builtin {
             Builtin::PutChar => Effects::plain(["io"]),
             // `docs/heap.md` §2. Both reach the allocator, so both perform
             // `heap`; `contents` is a load and performs nothing.
-            Builtin::Box | Builtin::Unbox => Effects::plain(["heap"]),
+            Builtin::Box | Builtin::Unbox | Builtin::BoxSlice | Builtin::UnboxSlice => {
+                Effects::plain(["heap"])
+            }
             // §2: reading the command line is an effect, because a
             // function whose behaviour depends on it should say so.
             Builtin::ArgCount | Builtin::Arg => Effects::plain(["args"]),
@@ -629,12 +653,29 @@ pub enum Expr {
         ty: Type,
         value: Box<Expr>,
     },
-    /// `contents(b)` (§3): the dereference, which is one load.
+    /// `box_slice(h, count, fill)` (`docs/boxed-slices.md` §3): one
+    /// `malloc`, then the fill written into every element.
+    BoxedSlice {
+        element: Type,
+        count: Box<Expr>,
+        fill: Box<Expr>,
+    },
+    /// `unbox_slice(h, b)` (§3): one `free`, and the element count back.
+    UnboxedSlice {
+        value: Box<Expr>,
+    },
+    /// `contents(b)` (§3): the dereference, which is one load — or two.
     ///
-    /// No type is needed. A reference to a box is a pointer to where the
-    /// box's own pointer lives, so this reads that pointer and *is* the
-    /// reference to what the box holds.
-    Contents(Box<Expr>),
+    /// A reference to a box is a pointer to where the box's own leaves
+    /// live, so this reads them and *is* the reference to what the box
+    /// holds. `ty` is what the box holds, which is how the backend knows
+    /// how many leaves that is: one for an ordinary box, and two for a
+    /// boxed *slice*, which carries a length as well
+    /// (`docs/boxed-slices.md` §2).
+    Contents {
+        ty: Type,
+        value: Box<Expr>,
+    },
     /// A struct value. Fields are in *declaration* order whatever order they
     /// were written in, so the backend never has to consult a name.
     Struct {
@@ -1814,7 +1855,16 @@ fn settle_expr(expr: &mut Expr, unifier: &Unifier) {
             *ty = unifier.resolve(ty);
             settle_expr(value, unifier);
         }
-        Expr::Contents(inner) => settle_expr(inner, unifier),
+        Expr::Contents { ty, value } => {
+            *ty = unifier.resolve(ty);
+            settle_expr(value, unifier);
+        }
+        Expr::BoxedSlice { element, count, fill } => {
+            *element = unifier.resolve(element);
+            settle_expr(count, unifier);
+            settle_expr(fill, unifier);
+        }
+        Expr::UnboxedSlice { value } => settle_expr(value, unifier),
         Expr::Deref { ty, value } => {
             *ty = unifier.resolve(ty);
             settle_expr(value, unifier);
@@ -2213,9 +2263,17 @@ fn resolve_type_at(
     let (written_name, written_args) = (*written_name, written_args.clone());
     let name = ast.name_of(written_name);
 
+    // `Box[[T]]` is the one place an unsized referent may stand as a type
+    // argument (`docs/boxed-slices.md` §2). Everywhere else `[T]` has no
+    // size of its own and only a reference may point at one; a box is a
+    // pointer *and* a length precisely so that it can hold one.
+    let boxed = defs
+        .iter()
+        .find(|d| d.name == written_name)
+        .is_some_and(|d| d.def.0 as usize == PRELUDE_BOX);
     let args = written_args
         .iter()
-        .map(|arg| resolve_type(ast, defs, generics, regions, *arg))
+        .map(|arg| resolve_type_at(ast, defs, generics, regions, *arg, boxed))
         .collect::<Result<Vec<_>, _>>()?;
 
     if let Some(index) = generics.iter().position(|g| *g == written_name) {
@@ -3373,8 +3431,23 @@ impl<'a> FnLowering<'a> {
         let wanted = Type::Named(DefId(PRELUDE_BOX as u32), vec![inner.clone()]);
         self.expect_type(&wanted, &ty, boxed_span)?;
 
-        self.performed.union(&Effects::plain(["heap"]));
         let inner = self.unifier.resolve(&inner);
+        // `docs/boxed-slices.md` §3: the two operations are different and
+        // have to be. `unbox` hands back what the box held, and `[T]` is
+        // unsized -- there is nothing to hand back and no type to hand it
+        // back as. Without this the backend received a `Slice` and its own
+        // assertion fired, which is a worse way to find out.
+        if matches!(inner, Type::Slice(_)) {
+            return Err(Diagnostic::new(
+                format!(
+                    "`{}` is unsized, so `unbox` has nothing to hand back; `unbox_slice` frees a boxed slice and answers how many elements it freed",
+                    self.unifier.display(&inner)
+                ),
+                boxed_span,
+            ));
+        }
+
+        self.performed.union(&Effects::plain(["heap"]));
         Ok((Expr::Unboxed { ty: inner.clone(), value: Box::new(lowered) }, inner))
     }
 
@@ -3399,13 +3472,10 @@ impl<'a> FnLowering<'a> {
             && def.0 as usize == PRELUDE_BOX
             && let Some(element) = args.first()
         {
+            let element = self.unifier.resolve(element);
             return Ok((
-                Expr::Contents(Box::new(lowered)),
-                Type::Ref {
-                    unique: *unique,
-                    region: *region,
-                    inner: Box::new(self.unifier.resolve(element)),
-                },
+                Expr::Contents { ty: element.clone(), value: Box::new(lowered) },
+                Type::Ref { unique: *unique, region: *region, inner: Box::new(element) },
             ));
         }
         Err(Diagnostic::new(
@@ -3445,6 +3515,75 @@ impl<'a> FnLowering<'a> {
             ));
         }
         Ok((Expr::Deref { ty: referent.clone(), value: Box::new(inner) }, referent))
+    }
+
+    /// `box_slice(h, count, fill)` — a run of values on the heap
+    /// (`docs/boxed-slices.md` §3).
+    fn boxed_slice(&mut self, args: &[ExprId], span: Span) -> Result<(Expr, Type), Diagnostic> {
+        let [heap, count, fill] = args else {
+            return Err(Diagnostic::new(
+                format!(
+                    "`box_slice` takes 3 arguments -- the heap, the count and the fill -- but {} were given",
+                    args.len()
+                ),
+                span,
+            ));
+        };
+        self.expect_heap(*heap)?;
+
+        let count_span = self.ast.expr_span(*count);
+        let (count_expr, count_ty) = self.expr(*count)?;
+        self.expect_type(&Type::Int, &count_ty, count_span)?;
+
+        let fill_span = self.ast.expr_span(*fill);
+        let (fill_expr, element) = self.expr(*fill)?;
+        let element = self.unifier.resolve(&element);
+        // §2.1: the same rule an arena has, for the same reason. Ending a
+        // boxed slice frees memory and runs nothing, so a linear obligation
+        // inside would be dropped rather than discharged -- and the fill is
+        // copied into every element, which a linear value cannot be at all.
+        if mode_of(self.defs, self.unifier, &element) == Mode::Res {
+            return Err(Diagnostic::new(
+                format!(
+                    "`{}` is `res`, and a boxed slice holds `val` data only: the fill is copied into every element, and a linear value cannot be copied at all",
+                    self.unifier.display(&element)
+                ),
+                fill_span,
+            ));
+        }
+
+        self.performed.union(&Effects::plain(["heap"]));
+        let slice = Type::Slice(Box::new(element.clone()));
+        Ok((
+            Expr::BoxedSlice { element, count: Box::new(count_expr), fill: Box::new(fill_expr) },
+            Type::Named(DefId(PRELUDE_BOX as u32), vec![slice]),
+        ))
+    }
+
+    /// `unbox_slice(h, b)` — free it, and answer how many elements (§3).
+    ///
+    /// The only consumer a boxed slice has, which is what keeps
+    /// `heap.md` §3.1 true of it: never reaching here is a compile error.
+    fn unboxed_slice(&mut self, args: &[ExprId], span: Span) -> Result<(Expr, Type), Diagnostic> {
+        let [heap, boxed] = args else {
+            return Err(Diagnostic::new(
+                format!(
+                    "`unbox_slice` takes 2 arguments -- the heap and the box -- but {} were given",
+                    args.len()
+                ),
+                span,
+            ));
+        };
+        self.expect_heap(*heap)?;
+
+        let boxed_span = self.ast.expr_span(*boxed);
+        let (lowered, ty) = self.expr(*boxed)?;
+        let element = self.unifier.fresh();
+        let wanted = Type::Named(DefId(PRELUDE_BOX as u32), vec![Type::Slice(Box::new(element))]);
+        self.expect_type(&wanted, &ty, boxed_span)?;
+
+        self.performed.union(&Effects::plain(["heap"]));
+        Ok((Expr::UnboxedSlice { value: Box::new(lowered) }, Type::Int))
     }
 
     /// The `&!x Heap` a heap operation is reached through (§2).
@@ -4018,6 +4157,29 @@ impl<'a> FnLowering<'a> {
                 };
                 let ty = fields[index].1.substitute(&type_args, &[]);
                 if through_reference {
+                    // `docs/reading-references.md` §2: **nothing moves out
+                    // of a reference, ever.** That rule was stated for
+                    // `match` and field access is the other way to reach
+                    // into a value, so it holds here too -- and until this
+                    // check existed it did not.
+                    //
+                    // A `val` field is *copied* out, which is what a
+                    // reference is for and costs the referent nothing. A
+                    // `res` field cannot be copied, so reading one here
+                    // would produce a second owner of a value the referent
+                    // still owns: two obligations where one is owed, and a
+                    // double free at the end of it. That was reachable from
+                    // ordinary code with no `unsafe` anywhere, which this
+                    // language does not have.
+                    if mode_of(self.defs, self.unifier, &ty) == Mode::Res {
+                        return Err(Diagnostic::new(
+                            format!(
+                                "`{}` is `res`, and nothing moves out of a reference: reading it here would leave two owners of one value. Take the whole value apart instead, or reach the field on an owner",
+                                self.unifier.display(&ty)
+                            ),
+                            span,
+                        ));
+                    }
                     // Reading through a reference is what a reference is
                     // *for*, so no `Read` event: the referent is frozen for
                     // the whole region and nothing is being moved.
@@ -4233,6 +4395,12 @@ impl<'a> FnLowering<'a> {
                 }
                 if Builtin::from_name(text) == Some(Builtin::Contents) {
                     return self.contents(args, span);
+                }
+                if Builtin::from_name(text) == Some(Builtin::BoxSlice) {
+                    return self.boxed_slice(args, span);
+                }
+                if Builtin::from_name(text) == Some(Builtin::UnboxSlice) {
+                    return self.unboxed_slice(args, span);
                 }
                 let (params, ret) = if let Some(builtin) = Builtin::from_name(text) {
                     // A builtin's region parameters are instantiated exactly
@@ -6837,6 +7005,64 @@ mod linearity_tests {
                 builtin.regions()
             );
         }
+    }
+
+    #[test]
+    fn a_res_field_cannot_be_read_through_a_reference() {
+        // `docs/reading-references.md` §2.0, and the unit test for a real
+        // soundness hole: this compiled until the check existed, and gave
+        // a double free under valgrind.
+        let message = refused(
+            "res struct Holder { f: File } \
+             fn steal[&r](h: &r Holder) -> [] int { let taken = h.f; return close(taken); } \
+             fn main() -> [] int { return 0; }",
+        );
+        assert!(message.contains("nothing moves out of a reference"), "{message}");
+    }
+
+    #[test]
+    fn a_val_field_is_still_read_through_a_reference() {
+        // The other half: copying a `val` field costs the referent
+        // nothing, which is what a reference is for.
+        assert!(
+            check(
+                "struct Point { x: int, y: int } \
+                 fn sum[&r](p: &r Point) -> [] int { return p.x + p.y; } \
+                 fn main() -> [] int { return 0; }",
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_boxed_slice_holds_val_elements() {
+        // `docs/boxed-slices.md` §2.1: the arena's rule, in the second
+        // place it applies.
+        let message = refused(
+            "fn main(world: World) -> [] int { \
+             let Split { io, ffi, fs, heap, args } = split(world); \
+             release(args); release(fs); release(ffi); release(io); \
+             var n = 0; \
+             borrow mut heap as &!h in { let b = box_slice(h, 2, open(1)); n = unbox_slice(h, b); } \
+             release(heap); return n; }",
+        );
+        assert!(message.contains("a boxed slice holds `val` data only"), "{message}");
+    }
+
+    #[test]
+    fn unbox_refuses_an_unsized_referent() {
+        // §3: `unbox` hands back what the box held, and `[T]` is unsized.
+        // Without this the backend's own assertion fired instead, which is
+        // a worse way to find out.
+        let message = refused(
+            "fn main(world: World) -> [] int { \
+             let Split { io, ffi, fs, heap, args } = split(world); \
+             release(args); release(fs); release(ffi); release(io); \
+             var n = 0; \
+             borrow mut heap as &!h in { let b = box_slice(h, 2, 0); let back = unbox(h, b); n = 0; } \
+             release(heap); return n; }",
+        );
+        assert!(message.contains("`unbox` has nothing to hand back"), "{message}");
     }
 
     #[test]
