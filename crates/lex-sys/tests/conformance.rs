@@ -2597,8 +2597,15 @@ fn sort_agrees_with_gnu_sort() {
     // 9 MB rather than something just over the line, so this keeps
     // testing the loop rather than an off-by-one: it needs two doublings
     // past where the old bound was.
+    //
+    // `u64` and not the inferred `i32`: 300_000 * 7919 is 2.4 billion,
+    // which overflows an `i32`. The first version of this line did not
+    // say so, passed under `cargo test --release` where an overflow
+    // wraps, and failed on CI, which runs `cargo test` with the checks
+    // on. A test for a language whose whole position is that overflow
+    // must not wrap silently is a poor place to let one.
     let past_ceiling: String =
-        (0..300_000).map(|i| format!("{:029}\n", (i * 7919) % 300_000)).collect();
+        (0..300_000u64).map(|i| format!("{:029}\n", (i * 7919) % 300_000)).collect();
     assert!(past_ceiling.len() > 8 * 1024 * 1024, "the fixture has to clear the old 8 MiB bound");
     let huge = scratch.join("past-ceiling.txt");
     std::fs::write(&huge, &past_ceiling).expect("a writable fixture");
