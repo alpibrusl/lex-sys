@@ -54,10 +54,11 @@ reasoning — this table is the index, not the argument.
 | [#43](https://github.com/alpibrusl/lex-sys/pull/43) | [Bits](bitwise.md), and [a port](porting.md) | The first program here that **already existed**: coreutils `base64`, byte-for-byte on both directions. It needed the bit operators and hex literals and *nothing else* — no capability, no library, no change to linearity or rows. And running the suite under load for an unrelated reason found a real bug in `examples/serve/`: one `read` returns what arrived, not what was sent |
 | [#44](https://github.com/alpibrusl/lex-sys/pull/44) | [A port with resources](porting.md#9-the-second-port-sort) | `LC_ALL=C sort`, five owned resources on the heap, checked against GNU. Answered §6's four untested things: the move loop costs three tokens rather than difficulty, effects concentrate at the edges (four of eight rows are `[]`), and `borrow mut` never got in the way — five nested blocks did. Found **four** missing library functions, every one absent because nothing had asked |
 | [#45](https://github.com/alpibrusl/lex-sys/pull/45) | [Against C and Rust](against-c-and-rust.md) | The measurement `overflow-cost.md` §4 said was owed: **1.6× at equal semantics**, on both a compute-bound and a memory-bound kernel, with Rust within 4% of C — so the gap is the backend, not ownership. And the numerical row: f64 is **17% slower** than the fixed point lex-sys is forced into, so the missing `float` costs precision (10 orders of magnitude) rather than speed |
+| [#46](https://github.com/alpibrusl/lex-sys/pull/46) | [What a checked row is worth](purity.md) | The answer to *is there anything it does better?* — **yes, exactly one thing**: the row is a checked purity proof, which C can only promise unchecked and Rust cannot state. 35% of functions here qualify; worth **1.94×** as CSE and **158×** with hoisting. Collected by nothing: Cranelift has no call attribute, and an own optimiser is a non-goal — now an *informed* one |
 
 ### The pattern, if there is one
 
-Fifteen of these twenty-three slices found a bug, falsified a claim the
+Sixteen of these twenty-four slices found a bug, falsified a claim the
 project had already written down, or both — and three of those were
 soundness bugs reachable from ordinary code. That is not an accident of luck: each
 slice is built by writing the thing the previous document said was
@@ -86,6 +87,7 @@ caught before the project did.
 
 | Next | Why it is next |
 |---|---|
+| An LLVM backend | `purity.md` §4.1 changed what this is for. It was "make the 1.6× smaller"; it is now the only way to spend the one fact this language has that C cannot check and Rust cannot say — `readnone` is exactly the row, and `willreturn` is §6's second predicate |
 | `float` | `against-c-and-rust.md` §4 turned this from a gap into an argued one: it buys **expressiveness, not speed** — f64 was 17% slower than fixed point on the kernel measured — and what it costs today is ten orders of magnitude of precision. The design question left is which of IEEE-754's corners this language defines rather than inherits |
 | File handles | `porting.md` §9.1 put a program behind `filesystem.md` §3's own deferral. Reading a file of unknown size currently means reading it repeatedly — 1.2 MB is read six times — because `fs_read` cannot report truncation and there is nothing to hold open. §3 says a handle is "a milestone, not a paragraph", and it is the milestone a real program is now waiting on |
 | Effect polymorphism | A function generic over the *row* it performs. Named nowhere yet, and much larger than anything above |

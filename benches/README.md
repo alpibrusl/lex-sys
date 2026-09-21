@@ -65,6 +65,25 @@ fixed point lex-sys is forced into, while being ten orders of magnitude
 more precise. The missing `float` is an expressiveness gap, not a speed
 one.
 
+### `three/purity.*` — the fact only one of them can check
+
+The odd one out, and the reason to read `docs/purity.md`. The same pure
+function is called twice in a hot loop across a **compilation boundary**,
+which is where declaring purity stops being redundant with inlining:
+
+```
+lex-sys      knows, cannot spend      0.2854s
+C     -O2    knows nothing            0.1878s
+Rust  -O     cannot be told           0.1847s
+C     -O2    __attribute__((const))   0.0012s   151x faster
+```
+
+lex-sys computes that fact and proves it; C can only promise it, with
+nothing checking; Rust has no way to say it. Today nothing consumes it —
+Cranelift has no call attribute for "no side effects" — so the 151×
+sits unspent, and `docs/purity.md` §3 is honest about how much of it a
+*trapping* language could ever claim.
+
 ## Reading a number
 
 The script interleaves the two halves and reports the minimum of nine

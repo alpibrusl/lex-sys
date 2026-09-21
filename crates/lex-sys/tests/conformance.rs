@@ -2612,9 +2612,12 @@ fn the_three_language_benchmarks_agree() {
     let have_rustc = which("rustc");
 
     // (lex-sys source, C source, Rust source, extra C flags)
-    let groups: [(&str, &str, &str, &[&str]); 2] = [
+    let groups: [(&str, &str, &str, &[&str]); 3] = [
         ("mandelbrot.ls", "mandelbrot.c", "mandelbrot.rs", &["-DCHECKED=1"]),
         ("sieve.ls", "sieve.c", "sieve.rs", &[]),
+        // Two files per language, because the boundary is the point
+        // (`docs/purity.md` §1). The C half is linked below.
+        ("purity.ls", "purity.c", "purity.rs", &["-DPROMISED=0"]),
     ];
 
     for (index, (ours, in_c, in_rust, flags)) in groups.iter().enumerate() {
@@ -2637,12 +2640,21 @@ fn the_three_language_benchmarks_agree() {
         let expected = checksum(&exe);
         assert!(!expected.is_empty(), "`{ours}` printed no checksum");
 
+        // A benchmark split across a compilation boundary has its other
+        // half beside it, named `<stem>_lib.<extension>`.
+        let library = |source: &str| -> Option<PathBuf> {
+            let (stem, extension) = source.rsplit_once('.').expect("a source file has a suffix");
+            let candidate = dir.join(format!("{stem}_lib.{extension}"));
+            candidate.exists().then_some(candidate)
+        };
+
         if let Some(cc) = cc {
             let exe = scratch.join(format!("c{index}"));
             let build = Command::new(cc)
                 .args(["-O2"])
                 .args(*flags)
                 .arg(dir.join(in_c))
+                .args(library(in_c))
                 .arg("-o")
                 .arg(&exe)
                 .output()
@@ -2657,9 +2669,32 @@ fn the_three_language_benchmarks_agree() {
 
         if have_rustc {
             let exe = scratch.join(format!("rs{index}"));
+            let mut link: Vec<String> = Vec::new();
+            if let Some(half) = library(in_rust) {
+                let archive = scratch.join(format!("librs{index}.a"));
+                assert!(
+                    Command::new("rustc")
+                        .args(["-O", "--crate-type=staticlib"])
+                        .arg(&half)
+                        .arg("-o")
+                        .arg(&archive)
+                        .status()
+                        .expect("rustc runs")
+                        .success(),
+                    "`{}` should compile",
+                    half.display()
+                );
+                link = vec![
+                    "-L".into(),
+                    scratch.display().to_string(),
+                    "-l".into(),
+                    format!("static=rs{index}"),
+                ];
+            }
             let build = Command::new("rustc")
                 .args(["-O", "-Coverflow-checks=on"])
                 .arg(dir.join(in_rust))
+                .args(&link)
                 .arg("-o")
                 .arg(&exe)
                 .output()
@@ -2712,4 +2747,112 @@ fn the_three_language_benchmarks_agree() {
 fn which(name: &str) -> bool {
     std::env::var_os("PATH")
         .is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join(name).is_file()))
+}
+
+/// `docs/purity.md` §2 — the predicate, checked against cases chosen to
+/// break it.
+///
+/// The interesting rows are the ones that are *not* pure despite a `[]`
+/// row: `poke` writes through a unique reference, which is `std.vec`'s
+/// `set` exactly, and is the whole reason the predicate is two conditions
+/// rather than one.
+///
+/// Each case is a whole program, because pass 2 emits what `main`
+/// reaches and nothing else (`standard-library.md` §5.2) — a function
+/// nobody calls is not in `Program::funcs` to ask about.
+#[test]
+fn purity_is_the_row_plus_what_a_reference_may_do() {
+    // (program, function name, is it pure)
+    let cases: [(&str, &str, bool); 6] = [
+        (
+            "fn double(x: int) -> [] int { return x + x; }\n\
+             fn main(world: World) -> [] int {\n\
+             \x20   let Split { io, ffi, fs, heap, args } = split(world);\n\
+             \x20   release(args); release(heap); release(fs); release(ffi); release(io);\n\
+             \x20   return double(0);\n\
+             }\n",
+            "double",
+            true,
+        ),
+        // A shared reference is read-only, so reading through one is pure.
+        (
+            "fn first[&r](s: &r [byte]) -> [] int { return int_of(s[0]); }\n\
+             fn main(world: World) -> [] int {\n\
+             \x20   let Split { io, ffi, fs, heap, args } = split(world);\n\
+             \x20   release(args); release(heap); release(fs); release(ffi); release(io);\n\
+             \x20   return first(\"a\") - 97;\n\
+             }\n",
+            "first",
+            true,
+        ),
+        // A `[]` row and a unique reference: `std.vec`'s `set` exactly.
+        (
+            "fn poke[&r](s: &!r [byte]) -> [] int { s[0] = byte_of(1); return 0; }\n\
+             fn main(world: World) -> [] int {\n\
+             \x20   let Split { io, ffi, fs, heap, args } = split(world);\n\
+             \x20   release(args); release(heap); release(fs); release(ffi); release(io);\n\
+             \x20   var out = 0;\n\
+             \x20   region a { let s = alloc_slice[a](2, byte_of(0)); out = poke(s); }\n\
+             \x20   return out;\n\
+             }\n",
+            "poke",
+            false,
+        ),
+        // A unique reference inside a tuple still writes.
+        (
+            "fn pair[&r](t: (int, &!r [byte])) -> [] int { return t.0; }\n\
+             fn main(world: World) -> [] int {\n\
+             \x20   let Split { io, ffi, fs, heap, args } = split(world);\n\
+             \x20   release(args); release(heap); release(fs); release(ffi); release(io);\n\
+             \x20   var out = 0;\n\
+             \x20   region a { let s = alloc_slice[a](2, byte_of(0)); out = pair((0, s)); }\n\
+             \x20   return out;\n\
+             }\n",
+            "pair",
+            false,
+        ),
+        // Effects are not pure, however local they look.
+        (
+            "fn shout[&i](io: &!i Io) -> [io_write] int { putchar(io, 10); return 0; }\n\
+             fn main(world: World) -> [] int {\n\
+             \x20   let Split { io, ffi, fs, heap, args } = split(world);\n\
+             \x20   release(args); release(heap); release(fs); release(ffi);\n\
+             \x20   var out = 0;\n\
+             \x20   borrow mut io as &!i in { out = shout(i); }\n\
+             \x20   release(io);\n\
+             \x20   return out;\n\
+             }\n",
+            "shout",
+            false,
+        ),
+        // A local arena is invisible from outside, so it does not count.
+        (
+            "fn scratch(n: int) -> [] int {\n\
+             \x20   var total = 0;\n\
+             \x20   region a { let s = alloc_slice[a](n, byte_of(1)); total = len(s); }\n\
+             \x20   return total;\n\
+             }\n\
+             fn main(world: World) -> [] int {\n\
+             \x20   let Split { io, ffi, fs, heap, args } = split(world);\n\
+             \x20   release(args); release(heap); release(fs); release(ffi); release(io);\n\
+             \x20   return scratch(4) - 4;\n\
+             }\n",
+            "scratch",
+            true,
+        ),
+    ];
+
+    for (source, name, expected) in cases {
+        let ast = lex_sys_syntax::parse(source)
+            .unwrap_or_else(|d| panic!("`{name}` should parse: {}", d.message));
+        let program = lex_sys_ir::lower(&ast)
+            .unwrap_or_else(|d| panic!("`{name}` should check: {}", d.message));
+        let id = program.find(name).unwrap_or_else(|| panic!("`{name}` should be emitted"));
+        assert_eq!(
+            program.func(id).is_pure(),
+            expected,
+            "`{name}` should {}be pure",
+            if expected { "" } else { "not " }
+        );
+    }
 }

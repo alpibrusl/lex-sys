@@ -46,6 +46,19 @@ def shell(command: list[str]) -> None:
         sys.exit(f"{command[0]} failed:\n{run.stderr}")
 
 
+def library(source: str) -> str | None:
+    """The other half of a two-file benchmark, if there is one.
+
+    `purity` is split across a compilation boundary on purpose: a
+    declared purity fact is only worth anything where the optimiser
+    cannot see the body (`docs/purity.md` §1).
+    """
+    stem = source.rsplit(".", 1)[0]
+    extension = source.rsplit(".", 1)[1]
+    candidate = f"{stem}_lib.{extension}"
+    return candidate if (THREE / candidate).exists() else None
+
+
 def timed(exe: pathlib.Path, rounds: int) -> tuple[float, str]:
     """Minimum wall clock, and what the program printed."""
     best, output = None, None
@@ -91,6 +104,15 @@ def main() -> None:
                 ("C     -O2    f64", "mandelbrot_f64.c", [cc, "-O2"]),
                 ("Rust  -O     f64", "mandelbrot_f64.rs", [rustc, "-O"]),
             ],
+            # `docs/purity.md`: the one fact this language has that the
+            # other two cannot check. Two-file builds, because the point
+            # is a boundary the optimiser will not cross.
+            "purity (a pure call, twice, across a compilation boundary)": [
+                ("lex-sys      knows", "purity.ls", None),
+                ("C     -O2    blind", "purity.c", [cc, "-O2", "-DPROMISED=0"]),
+                ("Rust  -O     mute", "purity.rs", [rustc, "-O"]),
+                ("C     -O2    told", "purity.c", [cc, "-O2", "-DPROMISED=1"]),
+            ],
             "sieve (memory-bound, all trapping)": [
                 ("lex-sys      traps", "sieve.ls", None),
                 ("C     -O2    traps", "sieve.c", [cc, "-O2"]),
@@ -110,9 +132,23 @@ def main() -> None:
                     # kernel rather than on printing an integer.
                     shell([str(compiler()), "build", str(path), "--std", "-o", str(exe)])
                 elif how[0] == rustc:
-                    shell(how + [str(path), "-o", str(exe)])
+                    # `purity.rs` calls into its own crate, so the library
+                    # half is built first and linked -- which is the whole
+                    # point of that benchmark, not an accident of layout.
+                    extra = []
+                    if library(source) is not None:
+                        archive = scratch / "libpurity.a"
+                        if not archive.exists():
+                            shell(
+                                how[:1]
+                                + ["-O", "--crate-type=staticlib", str(THREE / library(source))]
+                                + ["-o", str(archive)]
+                            )
+                        extra = ["-L", str(scratch), "-l", "static=purity"]
+                    shell(how + [str(path), "-o", str(exe)] + extra)
                 else:
-                    shell(how + [str(path), "-o", str(exe)])
+                    extra = [str(THREE / library(source))] if library(source) else []
+                    shell(how + [str(path)] + extra + ["-o", str(exe)])
                 seconds, printed = timed(exe, args.rounds)
                 results.append((label, seconds))
                 checksums.add(printed)
@@ -120,14 +156,19 @@ def main() -> None:
             if len(checksums) > 1:
                 sys.exit(f"the builds disagree: {sorted(checksums)}")
 
-            # Against the C build with the same semantics, which is the
-            # first C row in every group.
+            # Against the first C row in the group, which is the one
+            # written to match lex-sys: trapping where that is the axis,
+            # and uninformed where purity is.
             reference = next(
-                (s for label, s in results if label.startswith("C") and "traps" in label),
+                (s for label, s in results if label.startswith("C")),
                 results[0][1],
             )
             for label, seconds in results:
-                print(f"{label:20s} {seconds:8.4f}s   {seconds / reference:5.2f}x C")
+                ratio = seconds / reference
+                # A 158x speedup reads as `0.01x`, which buries the
+                # result. Print the direction that is legible.
+                shown = f"{ratio:5.2f}x C" if ratio >= 0.1 else f"{1 / ratio:5.0f}x faster"
+                print(f"{label:20s} {seconds:8.4f}s   {shown}")
             print(f"{'':20s} {'':8s}   checksum {checksums.pop()}")
     finally:
         shutil.rmtree(scratch, ignore_errors=True)

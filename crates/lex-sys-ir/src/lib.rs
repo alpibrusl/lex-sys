@@ -941,6 +941,45 @@ impl Func {
     pub fn n_slots(&self) -> u32 {
         self.slots.len() as u32
     }
+
+    /// **Provably pure**: calling it twice with the same arguments gives
+    /// the same answer and changes nothing a caller can see.
+    ///
+    /// Two conditions, and `docs/purity.md` §2 is why they are the whole
+    /// list:
+    ///
+    /// 1. `performs` is empty — no console, filesystem, foreign call,
+    ///    heap or command line. The *declared* row is the wrong one to
+    ///    read here: `main`'s is `[]` however much it does, because
+    ///    owning discharges (`authority.md` §2).
+    /// 2. No parameter reaches a **unique** reference. A row of `[]` does
+    ///    not mean pure on its own — `std.vec`'s `set` declares `[]` and
+    ///    writes through `&!v Vec[T]`, which is exactly the case this
+    ///    second condition exists for.
+    ///
+    /// Nothing else can leak: `alloc` only works inside a `region r { .. }`
+    /// block that is lexically open, so a function cannot allocate into a
+    /// caller's arena, and an owned `res` argument cannot be supplied
+    /// twice because linearity forbids it.
+    ///
+    /// **This is not "safe to hoist".** A pure function may still trap,
+    /// and moving a trap out of a loop that runs zero times invents one.
+    /// Purity licenses common-subexpression elimination where the call
+    /// already happens; speculative motion needs "does not trap" as well,
+    /// which this does not claim (`docs/purity.md` §3).
+    pub fn is_pure(&self) -> bool {
+        fn writes_through(ty: &Type) -> bool {
+            match ty {
+                Type::Ref { unique, inner, .. } => *unique || writes_through(inner),
+                Type::Slice(element) => writes_through(element),
+                Type::Tuple(parts) => parts.iter().any(writes_through),
+                Type::Named(_, args) => args.iter().any(writes_through),
+                _ => false,
+            }
+        }
+
+        self.performs.is_pure() && !self.slots[..self.n_params as usize].iter().any(writes_through)
+    }
 }
 
 /// A declared type, as the backend needs it: names for diagnostics and member
