@@ -14,23 +14,30 @@
 //
 // The residual also does not reach zero, which is the honest part. √2 is
 // not representable in binary64, so the iteration settles on the nearest
-// value that is, and `x * x - 2` bottoms out at 4.44e-16 — about one
-// unit in the last place near 2.0. A method that *converged* and a
-// method that reached the answer are different things, and floating
-// point is where the difference becomes visible.
+// value that is, and `x * x - 2` bottoms out at about one unit in the
+// last place near 2.0. A method that *converged* and a method that
+// reached the answer are different things, and floating point is where
+// the difference becomes visible.
 //
-// Reported through `truncate` and a scale factor, because printing a
-// float is `floating-point.md` §7's open question. That is awkward and
-// the document says so rather than pretending otherwise.
-//~ STDOUT step 1 residual*1e18 250000000000000000
-//~ STDOUT step 2 residual*1e18 6944444444444198
-//~ STDOUT step 3 residual*1e18 6007304882427
-//~ STDOUT step 4 residual*1e18 4510614
-//~ STDOUT step 5 residual*1e18 444
-//~ STDOUT q16-16 floor*1e18 15258789062500
+// Every number below is printed by `std.fmt.float_into`
+// (`float-printing.md`): the shortest decimal that reads back to the
+// same bits, written in lex-sys rather than by the compiler. An earlier
+// version of this file reported everything through `truncate` and a
+// scale factor of 1e18, which was fixed point with extra steps — and the
+// residuals it could show stopped at the point where the scale factor
+// ran out, not where the method did: step 3's residual printed as
+// `6007304882427` there and is `6.007304882427178e-6` here, and the
+// three digits in the difference were the scale factor's fault.
+//~ STDOUT step 1 x 1.5e0 residual 2.5e-1
+//~ STDOUT step 2 x 1.4166666666666665e0 residual 6.944444444444198e-3
+//~ STDOUT step 3 x 1.4142156862745097e0 residual 6.007304882427178e-6
+//~ STDOUT step 4 x 1.4142135623746899e0 residual 4.510614104447086e-12
+//~ STDOUT step 5 x 1.414213562373095e0 residual 4.440892098500626e-16
+//~ STDOUT q16-16 floor 1.52587890625e-5
 //~ STDOUT steps below that floor 3
 //~ EXIT 0
 
+import std.fmt;
 import std.io;
 
 // |x| without a `std.math` to take it from (`floating-point.md` §7).
@@ -51,6 +58,18 @@ fn step(a: float, x: float) -> [] float {
 // method converged rather than merely stopped moving.
 fn residual(a: float, x: float) -> [] float {
     return magnitude(x * x - a);
+}
+
+// Print one float. The buffer is 24 bytes because `float-printing.md` §6
+// says that is always enough, and it lives in a `region` because this
+// program released its `Heap` before the first number existed.
+fn show[&i](i: &!i Io, x: float) -> [io_write] int {
+    region a {
+        let out = alloc_slice[a](24, byte_of(0));
+        let n = fmt.float_into(out, x);
+        io.write_all(i, out[0..n]);
+    }
+    return 0;
 }
 
 fn main(world: World) -> [] int {
@@ -75,11 +94,10 @@ fn main(world: World) -> [] int {
             x = step(a, x);
             io.write_all(i, "step ");
             io.print_int(i, n);
-            io.write_all(i, " residual*1e18 ");
-            // Scaled and truncated, which is the only way to show a float
-            // today. 1e18 keeps the smallest residual a whole number and
-            // the largest inside `int`.
-            io.print_int(i, truncate(residual(a, x) * 1.0e18));
+            io.write_all(i, " x ");
+            show(i, x);
+            io.write_all(i, " residual ");
+            show(i, residual(a, x));
             io.newline(i);
             if residual(a, x) < floor {
                 below = below + 1;
@@ -89,8 +107,8 @@ fn main(world: World) -> [] int {
 
         // The floor Q16.16 would have hit: one unit in its last place is
         // 1/65536. Three of the five steps above finished under it.
-        io.write_all(i, "q16-16 floor*1e18 ");
-        io.print_int(i, truncate(floor * 1.0e18));
+        io.write_all(i, "q16-16 floor ");
+        show(i, floor);
         io.newline(i);
         io.write_all(i, "steps below that floor ");
         io.print_int(i, below);

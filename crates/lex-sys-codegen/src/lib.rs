@@ -1928,6 +1928,12 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
                     Callee::Builtin(Builtin::Truncate) => {
                         vec![self.builder.ins().fcvt_to_sint(types::I64, args[0])]
                     }
+                    // A reinterpretation, so `bitcast` and no arithmetic
+                    // (`docs/float-printing.md` §2). The bits are the
+                    // same sixty-four; only the type changes.
+                    Callee::Builtin(Builtin::BitsOf) => {
+                        vec![self.builder.ins().bitcast(types::I64, MemFlags::new(), args[0])]
+                    }
                     // `x != x`, which is true for NaN and nothing else.
                     // A riddle as an expression (§5), which is why it has
                     // a name.

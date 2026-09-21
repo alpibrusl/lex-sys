@@ -191,6 +191,8 @@ const STD: &[(&str, &str)] = &[
     ("<std>/result.ls", include_str!("../../../std/result.ls")),
     ("<std>/list.ls", include_str!("../../../std/list.ls")),
     ("<std>/vec.ls", include_str!("../../../std/vec.ls")),
+    ("<std>/bignum.ls", include_str!("../../../std/bignum.ls")),
+    ("<std>/fmt.ls", include_str!("../../../std/fmt.ls")),
 ];
 
 /// What a command line asked for.

@@ -156,6 +156,27 @@ The name states the rounding because the rounding is the thing a reader
 needs: `truncate` goes toward zero. Round-to-nearest, floor and ceiling
 belong in `std.math`, where each can say which it is.
 
+### 4.1 And one that converts nothing
+
+```
+bits_of(x: float) -> int          // the same 64 bits, read as an integer
+```
+
+Not a conversion at all: no value changes, only the type that reads it.
+`bits_of(1.0)` is `4607182418800017408`, which is `1.0`'s sign, exponent
+and mantissa laid end to end.
+
+It exists so that **taking a float apart is a program's job rather than
+the compiler's**. The sign, the exponent and the mantissa are what a
+printer needs, and `float-printing.md` is the proof that having them is
+enough: `std.fmt.float_into` is written in lex-sys, on this one
+instruction, and nothing else about floats had to move into the compiler
+to make it possible.
+
+The inverse, `float_of_bits`, is **not** here. Adding it would be a line
+of code; nothing has needed it, and a builtin with no caller is a
+builtin nobody has checked.
+
 ---
 
 ## 5. NaN breaks comparison, and this document is not going to hide it
@@ -201,9 +222,15 @@ the wrong side when the coordinate itself is only good to 1.5 × 10⁻⁵.
 
 ## 7. Open
 
+> **Printing is no longer here.** It was the first row of this table and
+> the one called *"what makes `float` awkward rather than incomplete"*.
+> `float-printing.md` closes it: `std.fmt.float_into` writes the shortest
+> decimal that reads back to the same bits, in lex-sys rather than in the
+> compiler, on one new builtin (`bits_of`). What is left below is the
+> rest.
+
 | Question | Why it waits |
 |---|---|
-| Printing a `float` | Shortest round-trip decimal (Ryū, Grisu) is a paper each, and the wrong version prints `0.1` as `0.1000000000000000055511151231257827`. Until then a program formats through `truncate`, which is honest about being fixed point. This is the one that makes `float` awkward rather than incomplete |
 | `std.math` over floats | `sqrt`, `sin`, `exp`. Each is either a libc call — gated by `Ffi`, which would make arithmetic need a capability — or an implementation with its own error analysis. The capability question has to be settled first |
 | A total order | §5. IEEE-754 §5.10 defines `totalOrder`; the question is whether `std.math` should carry it or whether sorting floats should simply be documented as the caller's problem |
 | `f32` | §1. A second width drags conversion rules behind it, and nothing has asked |
@@ -226,5 +253,5 @@ the wrong side when the coordinate itself is only good to 1.5 × 10⁻⁵.
 
 | Accepting | Shows |
 |---|---|
-| `floating_point.ls` | Literals, arithmetic, comparison, both conversions, and `is_nan` |
-| `examples/integrate.ls` | §6: a numerical method that Q16.16 could not carry |
+| `floating_point.ls` | Literals, arithmetic, comparison, both conversions, `is_nan`, and §4.1's `bits_of` — including that `-0.0` keeps its sign where `==` cannot see it |
+| `examples/newton.ls` | §6: a numerical method that Q16.16 could not carry, now printing its residuals as floats (`float-printing.md`) |
