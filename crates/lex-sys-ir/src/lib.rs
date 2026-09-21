@@ -2370,6 +2370,7 @@ fn lower_function(
         region_outlives: signature.outlives.clone(),
         blocks: Vec::new(),
         open_blocks: Vec::new(),
+        defers: Vec::new(),
         arenas: Vec::new(),
         slot_scope: Vec::new(),
         slot_origin: Vec::new(),
@@ -2919,6 +2920,13 @@ struct FnLowering<'a> {
     blocks: Vec<BorrowBlock>,
     /// The ids of the blocks open right now, outermost first.
     open_blocks: Vec<u32>,
+    /// Deferred expressions, one frame per block being lowered, in the order
+    /// they were written (`docs/defer.md`).
+    ///
+    /// A frame is expanded at every exit from its block: falling off the end,
+    /// and every `return` in it or under it. In reverse, because a later
+    /// `defer` may depend on what an earlier one acquired.
+    defers: Vec<Vec<ExprId>>,
     /// The block ids that are *arenas* (§6), in the order they opened. A
     /// block's position here is the number an `alloc` inside it carries to
     /// the backend, and membership is what tells an arena from a borrow's
@@ -3433,6 +3441,21 @@ impl<'a> FnLowering<'a> {
     }
 
     fn stmts(&mut self, ids: &[StmtId]) -> Result<Vec<Stmt>, Diagnostic> {
+        self.defers.push(Vec::new());
+        let lowered = self.stmts_in_block(ids);
+        let frame = self.defers.pop().expect("pushed above");
+        let mut out = lowered?;
+        // Falling off the end is an exit, so the frame runs here -- unless
+        // the block ended with a `return`, which already ran it on its way
+        // out (`docs/defer.md` §2).
+        if !terminates(&out) && !frame.is_empty() {
+            let expanded = self.expand_defers(&frame)?;
+            out.extend(expanded);
+        }
+        Ok(out)
+    }
+
+    fn stmts_in_block(&mut self, ids: &[StmtId]) -> Result<Vec<Stmt>, Diagnostic> {
         let mut out: Vec<Stmt> = Vec::new();
         for (i, &id) in ids.iter().enumerate() {
             if i > 0 && terminates(&out) {
@@ -3455,7 +3478,107 @@ impl<'a> FnLowering<'a> {
         if let AstStmt::DestructureTuple { .. } = self.ast.stmt(id) {
             return self.destructure_tuple(id);
         }
+        // `defer E;` (`docs/defer.md`) — nothing is lowered *here*. The
+        // expression is recorded against this block and expanded at each of
+        // its exits, which is what makes this sugar rather than a second set
+        // of rules: what the checker and the backend see is the statement a
+        // program would have written by hand.
+        if let AstStmt::Defer(e) = self.ast.stmt(id) {
+            let e = *e;
+            self.defers.last_mut().expect("a block is always open").push(e);
+            return Ok(Vec::new());
+        }
+        // A `return` is an exit from *every* block it sits inside, so it runs
+        // all the pending frames, innermost first (`docs/defer.md` §2).
+        if matches!(self.ast.stmt(id), AstStmt::Return(_))
+            && self.defers.iter().any(|frame| !frame.is_empty())
+        {
+            return self.return_through_defers(id);
+        }
         Ok(vec![self.simple_stmt(id)?])
+    }
+
+    /// The value of a `return`, checked but **not** yet marked as returned.
+    ///
+    /// Split out because a pending `defer` runs *between* evaluating this
+    /// and the function actually returning, and the trace has to see the
+    /// three in that order: the value's reads, then the defers'
+    /// consumptions, then the return (`docs/defer.md` §2).
+    fn return_value(&mut self, e: ExprId) -> Result<Expr, Diagnostic> {
+        let (value, found) = self.expr(e)?;
+        // §5 rule 4, at the one place a value can leave a region: a return
+        // type names only the function's own region parameters, so a
+        // reference into a `borrow` block here is an escape. Checked before
+        // the types are compared, because "`r` does not outlive `q`" is a
+        // worse way to say it.
+        let mut mentioned = Vec::new();
+        self.unifier.resolve(&found).regions_into(&mut mentioned);
+        if let Some(Region::Block(id)) =
+            mentioned.into_iter().find(|r| matches!(r, Region::Block(_)))
+        {
+            let kind = if self.arenas.contains(&id) { "an arena" } else { "a `borrow` block" };
+            return Err(Diagnostic::new(
+                format!(
+                    "this returns a reference into `{}`, which is {kind} in this function; a reference may not outlive its region",
+                    self.ast.name_of(self.blocks[id as usize].name)
+                ),
+                self.ast.expr_span(e),
+            ));
+        }
+        let ret = self.ret.clone();
+        self.expect_type(&ret, &found, self.ast.expr_span(e))?;
+        Ok(value)
+    }
+
+    /// `return E;` where a `defer` is pending (`docs/defer.md` §2).
+    ///
+    /// The value is evaluated **first**, into an unnamed slot, and only then
+    /// do the defers run. That order is forced rather than chosen: a
+    /// `defer close(f)` alongside `return fd_of(f)` has to read `f` before
+    /// the close, and the other order would make every such function
+    /// unwritable.
+    fn return_through_defers(&mut self, id: StmtId) -> Result<Vec<Stmt>, Diagnostic> {
+        let span = self.ast.stmt_span(id);
+        let AstStmt::Return(e) = self.ast.stmt(id) else {
+            unreachable!("only called for a return");
+        };
+        let value = self.return_value(*e)?;
+
+        // Into an unnamed slot, so the defers below run after the value has
+        // been computed and cannot change what comes back.
+        let ty = self.ret.clone();
+        let slot = self.temp(ty);
+        let mut out = vec![Stmt::Store { place: Place::Slot(slot), value }];
+
+        let frames: Vec<Vec<ExprId>> = self.defers.iter().rev().cloned().collect();
+        for frame in frames {
+            let expanded = self.expand_defers(&frame)?;
+            out.extend(expanded);
+        }
+        self.trace.emit(Event::Return { span });
+        out.push(Stmt::Return(Expr::Load(slot)));
+        Ok(out)
+    }
+
+    /// Expand one frame of deferred expressions, latest first.
+    ///
+    /// Each is lowered afresh rather than cloned, because a trace is a
+    /// record of what happened on *this* path: lowering it again is what
+    /// emits the consumption events on the path being walked, and what makes
+    /// a second consumption of the same value the ordinary "already
+    /// consumed" error rather than a special case.
+    fn expand_defers(&mut self, frame: &[ExprId]) -> Result<Vec<Stmt>, Diagnostic> {
+        let mut out = Vec::new();
+        for id in frame.iter().rev() {
+            let (value, found) = self.expr(*id)?;
+            self.trace.emit(Event::Discard {
+                ty: found,
+                what: "the value this `defer` produced",
+                span: self.ast.expr_span(*id),
+            });
+            out.push(Stmt::Eval(value));
+        }
+        Ok(out)
     }
 
     fn simple_stmt(&mut self, id: StmtId) -> Result<Stmt, Diagnostic> {
@@ -3539,32 +3662,11 @@ impl<'a> FnLowering<'a> {
             }
             AstStmt::Region { region, body } => self.region_stmt(*region, body)?,
             AstStmt::Return(e) => {
-                let (value, found) = self.expr(*e)?;
-                // §5 rule 4, at the one place a value can leave a region: a
-                // return type names only the function's own region
-                // parameters, so a reference into a `borrow` block here is an
-                // escape. Checked before the types are compared, because
-                // "`r` does not outlive `q`" is a worse way to say it.
-                let mut mentioned = Vec::new();
-                self.unifier.resolve(&found).regions_into(&mut mentioned);
-                if let Some(Region::Block(id)) =
-                    mentioned.into_iter().find(|r| matches!(r, Region::Block(_)))
-                {
-                    let kind =
-                        if self.arenas.contains(&id) { "an arena" } else { "a `borrow` block" };
-                    return Err(Diagnostic::new(
-                        format!(
-                            "this returns a reference into `{}`, which is {kind} in this function; a reference may not outlive its region",
-                            self.ast.name_of(self.blocks[id as usize].name)
-                        ),
-                        self.ast.expr_span(*e),
-                    ));
-                }
-                let ret = self.ret.clone();
-                self.expect_type(&ret, &found, self.ast.expr_span(*e))?;
+                let value = self.return_value(*e)?;
                 self.trace.emit(Event::Return { span });
                 Stmt::Return(value)
             }
+            AstStmt::Defer(_) => unreachable!("handled before the match"),
             AstStmt::Destructure { .. } | AstStmt::DestructureTuple { .. } => {
                 unreachable!("handled before the match")
             }
@@ -7457,6 +7559,48 @@ mod linearity_tests {
              fn main() -> [] int { return 0; }",
         );
         assert!(message.contains("its type arguments are `val` too"), "{message}");
+    }
+
+    /// `docs/defer.md` §2: the expansion is real, so the exactly-once
+    /// rule is enforced on every exit path.
+    #[test]
+    fn a_defer_consumes_on_every_path() {
+        // The shape §4.2 of `linearity-and-effects.md` calls verbose:
+        // one resource, several exits, and no repetition now.
+        accepted(
+            "fn take(flag: bool) -> [] int { \
+             let f = open(7); defer close(f); \
+             if flag { return 2; } return 4; } \
+             fn main() -> [] int { return 0; }",
+        );
+
+        // And it is the *same* rule underneath: consuming by hand as well
+        // is the ordinary double consumption.
+        let message = refused(
+            "fn twice() -> [] int { let f = open(7); defer close(f); return close(f); } \
+             fn main() -> [] int { return 0; }",
+        );
+        assert!(message.contains("has already been consumed"), "{message}");
+
+        // A `defer` that produces a resource leaks it, exactly as the
+        // expression statement it becomes would.
+        let leaked = refused(
+            "fn leak() -> [] int { defer open(1); return 0; } \
+             fn main() -> [] int { return 0; }",
+        );
+        assert!(leaked.contains("cannot be discarded"), "{leaked}");
+    }
+
+    /// §2.1: block scope, so a `defer` inside a `borrow` runs while the
+    /// referent is still frozen.
+    #[test]
+    fn a_defer_runs_inside_the_block_it_was_written_in() {
+        let message = refused(
+            "fn frozen() -> [] int { var f = open(7); \
+             borrow f as &r in { defer close(f); } return close(f); } \
+             fn main() -> [] int { return 0; }",
+        );
+        assert!(message.contains("frozen by an enclosing `borrow`"), "{message}");
     }
 
     #[test]

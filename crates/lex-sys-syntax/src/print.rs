@@ -367,6 +367,10 @@ impl Printer<'_> {
                 let text = format!("return {};", self.expr(*value));
                 self.line(&text);
             }
+            Stmt::Defer(value) => {
+                let text = format!("defer {};", self.expr(*value));
+                self.line(&text);
+            }
         }
     }
 

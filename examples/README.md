@@ -24,6 +24,7 @@ cargo run -p lex-sys -- run examples/tour.ls
 | [`wordcount.ls`](wordcount.ls) | `wc` over an embedded document, and the before-and-after for `std` |
 | [`rational.ls`](rational.ls) | 250 lines of exact rational arithmetic; the M1 language still compiling unchanged |
 | [`queue.ls`](queue.ls) | A work queue whose jobs **own** memory, held in a collection |
+| [`pipeline_checks.ls`](pipeline_checks.ls) | A fallible pipeline: four exits, one `defer` |
 | [`buffer/`](buffer/) | A growable byte buffer, written as a library |
 | [`slab/`](slab/) | Shared ownership, as far as this language reaches |
 | [`modular/`](modular/) | Two modules and a root |
@@ -167,6 +168,26 @@ moves jobs and never ends one, because a generic function does not know
 what ending a `T` means; a job never finished does not compile; and the
 tally beside it is a `Vec[int]` rather than a list, because an array
 cannot hold a resource at all. [`collections.md`](../docs/collections.md).
+
+### `pipeline_checks.ls` — four exits, one `defer`
+
+```sh
+cargo run -p lex-sys -- run examples/pipeline_checks.ls --std
+# ok: fine
+# empty
+# bad prefix
+# 3 checked
+```
+
+The program `docs/defer.md` §4 is about, and the reason it is an example
+rather than a fixture is that the case for `defer` is not the code that
+exists — it is the code nobody wrote. Without it, each of the four
+bail-out paths repeats the buffer's drop, tangled into its own return
+expression.
+
+Both halves are checked rather than asserted: take the `defer` out and
+the function stops compiling at the first early return, and with it in,
+valgrind reports 4 allocs and 4 frees.
 
 ### `rational.ls` — the M1 language, still standing
 

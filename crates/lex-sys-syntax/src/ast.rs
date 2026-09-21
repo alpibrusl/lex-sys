@@ -379,6 +379,15 @@ pub enum Stmt {
         arms: Vec<MatchArm>,
     },
     Return(ExprId),
+    /// `defer E;` — run `E` at every exit from the block it is written in
+    /// (`docs/defer.md`).
+    ///
+    /// Sugar, and deliberately shallow: it is expanded during lowering into
+    /// the statement it stands for, once per exit path, so the linear
+    /// checker and the backend see the consumptions a program would have
+    /// written by hand. Nothing downstream of lowering knows `defer`
+    /// exists, which is what keeps it from being a second set of rules.
+    Defer(ExprId),
 }
 
 /// One label in an effect row, with the value it was narrowed to.
