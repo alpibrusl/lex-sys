@@ -100,6 +100,19 @@ pub enum Type {
     /// (regions, outlives, the escape check, the unique-to-shared
     /// coercion) applies to a slice without a second mechanism.
     Slice(Box<Type>),
+    /// `(A, B)` — an anonymous aggregate with positional components
+    /// (`docs/tuples.md`).
+    ///
+    /// The one **structural** type here: every other aggregate is a
+    /// `DefId` into a table of declarations, so two declarations with
+    /// identical fields are two types, while `(int, bool)` is one type
+    /// wherever it is written. That is what lets two files agree on a
+    /// type with neither declaring it (§2.2).
+    ///
+    /// Two components or more, always. There is no one-tuple, because
+    /// `(e)` is grouping, and no `()`, because whether a function may
+    /// return nothing is a different question (§2.1).
+    Tuple(Vec<Type>),
     /// A type indexed by a literal: the `"libc"` in `Ffi("libc")` (§7.4).
     ///
     /// A singleton — it unifies with itself and nothing else — which is what
@@ -116,7 +129,7 @@ impl Type {
     pub fn occurs(&self, var: TyVar) -> bool {
         match self {
             Type::Var(v) => *v == var,
-            Type::Named(_, args) => args.iter().any(|a| a.occurs(var)),
+            Type::Named(_, args) | Type::Tuple(args) => args.iter().any(|a| a.occurs(var)),
             Type::Ref { inner, .. } | Type::Slice(inner) => inner.occurs(var),
             _ => false,
         }
@@ -129,7 +142,7 @@ impl Type {
     /// type, which cannot diverge because a type is finite.
     pub fn mentions(&self, region: Region) -> bool {
         match self {
-            Type::Named(_, args) => args.iter().any(|a| a.mentions(region)),
+            Type::Named(_, args) | Type::Tuple(args) => args.iter().any(|a| a.mentions(region)),
             Type::Ref { region: r, inner, .. } => *r == region || inner.mentions(region),
             Type::Slice(inner) => inner.mentions(region),
             _ => false,
@@ -139,7 +152,9 @@ impl Type {
     /// Every region this type mentions, outermost occurrence first.
     pub fn regions_into(&self, out: &mut Vec<Region>) {
         match self {
-            Type::Named(_, args) => args.iter().for_each(|a| a.regions_into(out)),
+            Type::Named(_, args) | Type::Tuple(args) => {
+                args.iter().for_each(|a| a.regions_into(out))
+            }
             Type::Ref { region, inner, .. } => {
                 out.push(*region);
                 inner.regions_into(out);
@@ -157,7 +172,7 @@ impl Type {
     pub fn has_var(&self) -> bool {
         match self {
             Type::Var(_) => true,
-            Type::Named(_, args) => args.iter().any(Type::has_var),
+            Type::Named(_, args) | Type::Tuple(args) => args.iter().any(Type::has_var),
             Type::Ref { inner, .. } | Type::Slice(inner) => inner.has_var(),
             _ => false,
         }
@@ -178,6 +193,9 @@ impl Type {
                 .unwrap_or_else(|| panic!("no argument for type parameter {i}")),
             Type::Named(def, inner) => {
                 Type::Named(*def, inner.iter().map(|t| t.substitute(types, regions)).collect())
+            }
+            Type::Tuple(parts) => {
+                Type::Tuple(parts.iter().map(|t| t.substitute(types, regions)).collect())
             }
             Type::Ref { unique, region, inner } => Type::Ref {
                 unique: *unique,
@@ -338,6 +356,7 @@ impl Unifier {
             Type::Named(def, args) => {
                 Type::Named(def, args.iter().map(|a| self.resolve(a)).collect())
             }
+            Type::Tuple(parts) => Type::Tuple(parts.iter().map(|p| self.resolve(p)).collect()),
             Type::Ref { unique, region, inner } => Type::Ref {
                 unique,
                 region: self.resolve_region(region),
@@ -383,6 +402,16 @@ impl Unifier {
             // referent is: `[T]` is what a reference points at, and "`T`
             // never changes" does not stop being true one level down.
             (Type::Slice(a), Type::Slice(b)) => self.unify(&a, &b),
+            // `docs/tuples.md` §2.2: a tuple is structural, so two of them
+            // are the same type when their components are. Arity is part of
+            // that -- `(int, bool)` and `(int, bool, int)` mismatch rather
+            // than unifying the prefix.
+            (Type::Tuple(a), Type::Tuple(b)) if a.len() == b.len() => {
+                for (x, y) in a.iter().zip(b.iter()) {
+                    self.unify(x, y)?;
+                }
+                Ok(())
+            }
             (x, y) if x == y => Ok(()),
             (x, y) => {
                 Err(UnifyError::Mismatch { expected: self.resolve(&x), found: self.resolve(&y) })
@@ -403,6 +432,10 @@ impl Unifier {
             Type::Var(v) => format!("?{}", v.0),
             Type::Lit(text) => format!("\"{text}\""),
             Type::Slice(inner) => format!("[{}]", self.display(&inner)),
+            Type::Tuple(parts) => {
+                let inner: Vec<String> = parts.iter().map(|p| self.display(p)).collect();
+                format!("({})", inner.join(", "))
+            }
             Type::Named(def, args) if args.is_empty() => self.name_of(def).to_owned(),
             // A literal argument is written the way the source writes it:
             // `Ffi("libc")`, not `Ffi["libc"]`. What a capability is

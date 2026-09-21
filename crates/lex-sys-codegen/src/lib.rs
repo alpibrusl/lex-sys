@@ -83,6 +83,14 @@ fn leaves_into(ty: &Type, program: &Program, pointer: types::Type, out: &mut Vec
                 out.push(types::I64);
             }
         }
+        // `docs/tuples.md` §5: a tuple's leaves are its components' leaves
+        // in order -- a struct's layout with the names removed. No tag, no
+        // new padding question, and nothing a `DefId` was needed for.
+        Type::Tuple(parts) => {
+            for part in parts {
+                leaves_into(part, program, pointer, out);
+            }
+        }
         Type::Named(def, args) => match program.type_info(*def) {
             TypeInfo::Struct { fields, .. } => {
                 for (_, field) in fields {
@@ -1315,6 +1323,20 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
 
     /// Where a variant's payload starts among an enum's leaves, and how many
     /// leaves each payload position occupies.
+    /// Where component `index` of a tuple sits, in leaves: its start and
+    /// its width (`docs/tuples.md` §5).
+    ///
+    /// The same sum a struct field needs, without a substitution step: a
+    /// tuple's components are types already, not members written in terms
+    /// of parameters that have to be filled in first.
+    fn tuple_slice(&self, components: &[Type], index: u32) -> (u32, u32) {
+        let start: u32 = components[..index as usize]
+            .iter()
+            .map(|ty| leaf_count(ty, self.program, self.pointer))
+            .sum();
+        (start, leaf_count(&components[index as usize], self.program, self.pointer))
+    }
+
     fn variant_layout(&self, def: DefId, args: &[Type], variant: u32) -> (u32, Vec<u32>) {
         let TypeInfo::Enum { variants, .. } = self.program.type_info(def) else {
             unreachable!("a variant of a struct should have been refused");
@@ -1485,6 +1507,15 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
             Expr::Struct { fields, .. } => {
                 fields.iter().flat_map(|field| self.expr(field)).collect()
             }
+            // Positional already, so unlike a struct there is nothing to
+            // reorder: the components arrive in the order they were
+            // written, which is the order they lie in.
+            Expr::Tuple { parts } => parts.iter().flat_map(|part| self.expr(part)).collect(),
+            Expr::TupleField { base, components, index } => {
+                let values = self.expr(base);
+                let (start, len) = self.tuple_slice(components, *index);
+                values[start as usize..(start + len) as usize].to_vec()
+            }
             Expr::Field { base, def, args, index } => {
                 let values = self.expr(base);
                 let TypeInfo::Struct { fields, .. } = self.program.type_info(*def) else {
@@ -1583,6 +1614,23 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
                     self.program,
                     self.pointer,
                 );
+                let offset = start as i32 * RETURN_SLOT_STRIDE;
+                kinds
+                    .iter()
+                    .enumerate()
+                    .map(|(i, kind)| {
+                        let at = offset + i as i32 * RETURN_SLOT_STRIDE;
+                        self.builder.ins().load(*kind, MemFlags::trusted(), address, at)
+                    })
+                    .collect()
+            }
+            // The same arithmetic as `Expr::FieldRef`, over a type with no
+            // declaration to consult: the component types travel with the
+            // node instead.
+            Expr::TupleFieldRef { base, components, index } => {
+                let address = self.scalar(base);
+                let (start, _) = self.tuple_slice(components, *index);
+                let kinds = leaves(&components[*index as usize], self.program, self.pointer);
                 let offset = start as i32 * RETURN_SLOT_STRIDE;
                 kinds
                     .iter()

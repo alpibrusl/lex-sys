@@ -227,6 +227,11 @@ impl Printer<'_> {
                 );
                 self.line(&text);
             }
+            Stmt::DestructureTuple { names, value } => {
+                let written: Vec<&str> = names.iter().map(|n| self.name(*n)).collect();
+                let text = format!("let ({}) = {};", written.join(", "), self.expr(*value));
+                self.line(&text);
+            }
             Stmt::Borrow { value, unique, region, body } => {
                 let text = format!(
                     "borrow {}{} as &{}{} in {{",
@@ -337,6 +342,10 @@ impl Printer<'_> {
                 self.ty(*inner)
             ),
             TypeExpr::Slice(inner) => format!("[{}]", self.ty(*inner)),
+            TypeExpr::Tuple(parts) => {
+                let written: Vec<String> = parts.iter().map(|p| self.ty(*p)).collect();
+                format!("({})", written.join(", "))
+            }
             TypeExpr::Lit(text) => format!("\"{}\"", escape(text)),
         }
     }
@@ -409,6 +418,15 @@ impl Printer<'_> {
             }
             Expr::Field { base, name } => {
                 format!("{}.{}", self.expr_at(*base, POSTFIX), self.name(*name))
+            }
+            // A tuple's own parentheses bind it, so it prints at any level
+            // without needing the precedence wrapper.
+            Expr::Tuple(parts) => {
+                let written: Vec<String> = parts.iter().map(|p| self.expr(*p)).collect();
+                format!("({})", written.join(", "))
+            }
+            Expr::TupleField { base, index } => {
+                format!("{}.{index}", self.expr_at(*base, POSTFIX))
             }
             Expr::Index { base, index } => {
                 format!("{}[{}]", self.expr_at(*base, POSTFIX), self.expr(*index))

@@ -955,6 +955,85 @@ fn the_growable_buffer_example_builds_and_runs() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// `docs/tuples.md` §5: a tuple is a struct with the names removed, so
+/// replacing one with the other changes no generated code.
+///
+/// Stated that way it is a claim about a compiler, and the strongest form
+/// of it available is the one asserted here: the two programs below differ
+/// only in whether the pair is a declared `res struct` or a tuple, and
+/// their **object files are byte-identical**. Not similar, not the same
+/// size -- the same bytes.
+///
+/// That is what makes tuples an ergonomic feature rather than a
+/// representation choice, and it is why `examples/slab/` could drop two
+/// declared types without anyone having to ask what it cost.
+#[test]
+fn a_tuple_emits_the_same_object_as_the_struct_it_replaces() {
+    const STRUCT: &str = "\
+res struct Pair { held: Box[int], tag: int }
+fn make[&h](heap: &!h Heap, n: int) -> [heap] Pair {
+    return Pair { held: box(heap, n), tag: n + 1 };
+}
+fn main(world: World) -> [] int {
+    let Split { io, ffi, fs, heap, args } = split(world);
+    release(args); release(ffi); release(fs); release(io);
+    var status = 0;
+    borrow mut heap as &!h in {
+        let p = make(h, 41);
+        let Pair { held, tag } = p;
+        status = unbox(h, held) + tag;
+    }
+    release(heap);
+    return status - 83;
+}
+";
+    const TUPLE: &str = "\
+fn make[&h](heap: &!h Heap, n: int) -> [heap] (Box[int], int) {
+    return (box(heap, n), n + 1);
+}
+fn main(world: World) -> [] int {
+    let Split { io, ffi, fs, heap, args } = split(world);
+    release(args); release(ffi); release(fs); release(io);
+    var status = 0;
+    borrow mut heap as &!h in {
+        let p = make(h, 41);
+        let (held, tag) = p;
+        status = unbox(h, held) + tag;
+    }
+    release(heap);
+    return status - 83;
+}
+";
+
+    let dir = scratch("tuple-layout");
+    let mut objects = Vec::new();
+    for (name, source) in [("declared", STRUCT), ("anonymous", TUPLE)] {
+        let path = dir.join(format!("{name}.ls"));
+        std::fs::write(&path, source).expect("a writable fixture");
+        let object = dir.join(format!("{name}.o"));
+        let build = Command::new(BIN)
+            .args([
+                "build".as_ref(),
+                path.as_os_str(),
+                "--emit".as_ref(),
+                "obj".as_ref(),
+                "-o".as_ref(),
+                object.as_os_str(),
+            ])
+            .output()
+            .expect("the compiler runs");
+        assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+        objects.push(std::fs::read(&object).expect("a readable object file"));
+    }
+
+    assert_eq!(
+        objects[0], objects[1],
+        "a tuple and the struct it replaces must emit the same object file"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn the_slab_example_builds_and_runs() {
     // `examples/slab/` is §9's `Gen` hatch, built as `docs/sharing.md` §3

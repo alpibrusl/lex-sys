@@ -692,6 +692,27 @@ pub enum Expr {
         args: Vec<Type>,
         index: u32,
     },
+    /// A tuple value (`docs/tuples.md`). Positional already, so unlike
+    /// [`Expr::Struct`] there is no declaration order to reorder into.
+    Tuple {
+        parts: Vec<Expr>,
+    },
+    /// `base.index` on a tuple. The component types travel with the node
+    /// for the same reason a struct's `args` do: the backend computes the
+    /// leaf offset without re-deriving the base's type, and a tuple has no
+    /// `DefId` to look one up with.
+    TupleField {
+        base: Box<Expr>,
+        components: Vec<Type>,
+        index: u32,
+    },
+    /// The same, where `base` is a *reference* — [`Expr::FieldRef`]'s
+    /// counterpart for a type with no declaration.
+    TupleFieldRef {
+        base: Box<Expr>,
+        components: Vec<Type>,
+        index: u32,
+    },
     /// An enum value: which variant, and its payload.
     Enum {
         def: DefId,
@@ -1038,6 +1059,13 @@ fn reaches(defs: &[TypeDef], from: usize, target: usize, seen: &mut [bool]) -> b
 /// a value, but the refusal landed at each use rather than at the
 /// declaration that was wrong.
 fn reaches_through(defs: &[TypeDef], ty: &Type, target: usize, seen: &mut [bool]) -> bool {
+    // A tuple is an aggregate with no declaration, so it is transparent to
+    // this walk: `struct Node { pair: (int, Node) }` contains itself just as
+    // surely as `struct Node { next: Node }` does, and is refused for the
+    // same reason (`docs/tuples.md` §2).
+    if let Type::Tuple(parts) = ty {
+        return parts.iter().any(|part| reaches_through(defs, part, target, seen));
+    }
     let Type::Named(def, args) = ty else {
         return false;
     };
@@ -1898,6 +1926,18 @@ fn settle_expr(expr: &mut Expr, unifier: &Unifier) {
                 *arg = unifier.resolve(arg);
             }
         }
+        Expr::Tuple { parts } => {
+            for part in parts {
+                settle_expr(part, unifier);
+            }
+        }
+        Expr::TupleField { base, components, .. }
+        | Expr::TupleFieldRef { base, components, .. } => {
+            settle_expr(base, unifier);
+            for component in components.iter_mut() {
+                *component = unifier.resolve(component);
+            }
+        }
         Expr::Enum { args, payload, .. } => {
             for arg in args.iter_mut() {
                 *arg = unifier.resolve(arg);
@@ -2257,8 +2297,28 @@ fn resolve_type_at(
         return Ok(Type::Slice(Box::new(element)));
     }
 
+    // `(A, B)`: structural, so there is nothing to look up here either
+    // (`docs/tuples.md` §2.2). The arity check is the parser's -- it cannot
+    // build a one-tuple, because `(e)` is grouping -- but an empty one is
+    // reachable by writing `()`, and that is refused here rather than
+    // silently becoming a unit type nobody asked for (§2.1).
+    if let TypeExpr::Tuple(parts) = ast.ty(id) {
+        let parts = parts.clone();
+        if parts.len() < 2 {
+            return Err(Diagnostic::new(
+                "a tuple has two components or more; `(T)` is grouping, and there is no `()`",
+                span,
+            ));
+        }
+        let components = parts
+            .iter()
+            .map(|part| resolve_type(ast, defs, generics, regions, *part))
+            .collect::<Result<Vec<_>, _>>()?;
+        return Ok(Type::Tuple(components));
+    }
+
     let TypeExpr::Name { name: written_name, args: written_args } = ast.ty(id) else {
-        unreachable!("a reference, a literal and a slice were handled above");
+        unreachable!("a reference, a literal, a slice and a tuple were handled above");
     };
     let (written_name, written_args) = (*written_name, written_args.clone());
     let name = ast.name_of(written_name);
@@ -2796,6 +2856,9 @@ impl<'a> FnLowering<'a> {
         if let AstStmt::Destructure { .. } = self.ast.stmt(id) {
             return self.destructure(id);
         }
+        if let AstStmt::DestructureTuple { .. } = self.ast.stmt(id) {
+            return self.destructure_tuple(id);
+        }
         Ok(vec![self.simple_stmt(id)?])
     }
 
@@ -2910,7 +2973,9 @@ impl<'a> FnLowering<'a> {
                 self.trace.emit(Event::Return { span });
                 Stmt::Return(value)
             }
-            AstStmt::Destructure { .. } => unreachable!("handled before the match"),
+            AstStmt::Destructure { .. } | AstStmt::DestructureTuple { .. } => {
+                unreachable!("handled before the match")
+            }
         })
     }
 
@@ -3016,6 +3081,89 @@ impl<'a> FnLowering<'a> {
                     base: Box::new(Expr::Load(whole)),
                     def: def_id,
                     args: type_args.clone(),
+                    index: index as u32,
+                },
+            });
+        }
+        Ok(out)
+    }
+
+    /// `let (a, b) = t;` (`docs/tuples.md` §3.2).
+    ///
+    /// The same statement as [`Self::destructure`] against a type with no
+    /// declaration, which changes two things and nothing else:
+    ///
+    /// * The arity comes from the *value*, not from a table. There is no
+    ///   declaration to consult, so the pattern is checked against whatever
+    ///   the initialiser turned out to be — which means the initialiser's
+    ///   type must be known by now, and a bare inference variable is an
+    ///   error rather than something to solve from the pattern. A pattern
+    ///   is not an annotation.
+    /// * The names are the pattern's own. A struct pattern binds field
+    ///   names because the fields have names; a tuple has none to inherit,
+    ///   so this is the one pattern in the language that may call a
+    ///   binding anything — which is `sharing.md` §4's second gap, closed
+    ///   by the feature aimed at its first.
+    fn destructure_tuple(&mut self, id: StmtId) -> Result<Vec<Stmt>, Diagnostic> {
+        let span = self.ast.stmt_span(id);
+        let AstStmt::DestructureTuple { names, value } = self.ast.stmt(id) else {
+            unreachable!("only called for a tuple destructuring `let`");
+        };
+        let (names, value_id) = (names.clone(), *value);
+        let value_span = self.ast.expr_span(value_id);
+        let (value, found) = self.expr(value_id)?;
+
+        let resolved = self.unifier.resolve(&found);
+        let Type::Tuple(components) = resolved else {
+            return Err(Diagnostic::new(
+                format!(
+                    "`{}` is not a tuple, so it is not taken apart with `let (..)`",
+                    self.unifier.display(&found)
+                ),
+                value_span,
+            ));
+        };
+
+        if names.len() != components.len() {
+            return Err(Diagnostic::new(
+                format!(
+                    "this tuple has {} components, but the pattern names {}; destructuring takes the whole value apart",
+                    components.len(),
+                    names.len()
+                ),
+                span,
+            ));
+        }
+
+        for (position, name) in names.iter().enumerate() {
+            let text = self.ast.name_of(*name);
+            if self.declared_in_current_scope(*name) {
+                return Err(Diagnostic::new(
+                    format!(
+                        "`{text}` is already bound in this block (shadowing is only allowed in an inner block)"
+                    ),
+                    span,
+                ));
+            }
+            if names[..position].contains(name) {
+                return Err(Diagnostic::new(
+                    format!("`{text}` is bound twice in this pattern"),
+                    span,
+                ));
+            }
+        }
+
+        // Evaluated once into an unnamed slot, so `let (a, b) = make();`
+        // calls `make` once however many components it has.
+        let whole = self.temp(Type::Tuple(components.clone()));
+        let mut out = vec![Stmt::Store { place: Place::Slot(whole), value }];
+        for (index, name) in names.iter().enumerate() {
+            let slot = self.declare(*name, components[index].clone(), false, span);
+            out.push(Stmt::Store {
+                place: Place::Slot(slot),
+                value: Expr::TupleField {
+                    base: Box::new(Expr::Load(whole)),
+                    components: components.clone(),
                     index: index as u32,
                 },
             });
@@ -4115,6 +4263,83 @@ impl<'a> FnLowering<'a> {
                     },
                     Type::Named(def_id, type_args),
                 )
+            }
+            // `(a, b)` (`docs/tuples.md`). Components evaluate left to
+            // right, which is not a choice made here -- it is
+            // `defined-behaviour.md` §3, and lowering in order is how every
+            // other argument list gets it.
+            AstExpr::Tuple(parts) => {
+                let parts = parts.clone();
+                if parts.len() < 2 {
+                    return Err(Diagnostic::new(
+                        "a tuple has two components or more; `(e)` is grouping, and there is no `()`",
+                        span,
+                    ));
+                }
+                let mut lowered = Vec::with_capacity(parts.len());
+                let mut components = Vec::with_capacity(parts.len());
+                for part in parts {
+                    let (expr, ty) = self.expr(part)?;
+                    lowered.push(expr);
+                    components.push(ty);
+                }
+                (Expr::Tuple { parts: lowered }, Type::Tuple(components))
+            }
+            // `t.0` (§3.1). Every rule below is `p.x`'s rule with a number
+            // in place of a name, which is the point: a tuple is an
+            // anonymous struct, so it had better not need its own ideas
+            // about reading a component.
+            AstExpr::TupleField { base, index } => {
+                let (base_id, index) = (*base, *index);
+                let base_span = self.ast.expr_span(base_id);
+                let (lowered, base_ty) = self.expr(base_id)?;
+                let mut resolved = self.unifier.resolve(&base_ty);
+                let through_reference = matches!(resolved, Type::Ref { .. });
+                if let Type::Ref { inner, .. } = resolved {
+                    resolved = *inner;
+                }
+                let Type::Tuple(components) = resolved else {
+                    return Err(Diagnostic::new(
+                        format!(
+                            "`{}` is not a tuple, so it has no component `{index}`",
+                            self.unifier.display(&resolved)
+                        ),
+                        base_span,
+                    ));
+                };
+                let Some(ty) = components.get(index as usize).cloned() else {
+                    return Err(Diagnostic::new(
+                        format!(
+                            "this tuple has {} components, so there is no `.{index}`; they are numbered from 0",
+                            components.len()
+                        ),
+                        span,
+                    ));
+                };
+                if through_reference {
+                    // `docs/reading-references.md` §2, in the place tuples
+                    // add. A `val` component is copied out, which costs the
+                    // referent nothing; a `res` one cannot be copied, so
+                    // reading it here would leave two owners of one value.
+                    // Enforced from the start this time -- the last place
+                    // this rule was missing cost a double free to find.
+                    if mode_of(self.defs, self.unifier, &ty) == Mode::Res {
+                        return Err(Diagnostic::new(
+                            format!(
+                                "`{}` is `res`, and nothing moves out of a reference: reading it here would leave two owners of one value. Take the whole value apart instead, or reach the component on an owner",
+                                self.unifier.display(&ty)
+                            ),
+                            span,
+                        ));
+                    }
+                    return Ok((
+                        Expr::TupleFieldRef { base: Box::new(lowered), components, index },
+                        ty,
+                    ));
+                }
+                self.trace
+                    .emit(Event::Read { ty: Type::Tuple(components.clone()), span: base_span });
+                (Expr::TupleField { base: Box::new(lowered), components, index }, ty)
             }
             AstExpr::Field { base, name } => {
                 let base_span = self.ast.expr_span(*base);
@@ -7063,6 +7288,126 @@ mod linearity_tests {
              release(heap); return n; }",
         );
         assert!(message.contains("`unbox` has nothing to hand back"), "{message}");
+    }
+
+    // ---- tuples (`docs/tuples.md`) -------------------------------------
+
+    /// `docs/tuples.md` §2.3: the mode is read off the components, because
+    /// there is nowhere to declare one.
+    ///
+    /// The unit test rather than only a fixture, because this is the claim
+    /// the whole feature rests on -- a tuple with no `res` written anywhere
+    /// near it still carries every obligation `res` carries.
+    #[test]
+    fn a_tuple_is_res_exactly_when_a_component_is() {
+        let leaked = refused(
+            "fn main(world: World) -> [] int { \
+             let Split { io, ffi, fs, heap, args } = split(world); \
+             release(args); release(ffi); release(fs); release(io); \
+             borrow mut heap as &!h in { let pair = (box(h, 1), 2); } \
+             release(heap); return 0; }",
+        );
+        assert!(leaked.contains("still live at the end"), "{leaked}");
+
+        // And the same shape with no `res` component is an ordinary value:
+        // nothing consumes it and nothing has to.
+        accepted(
+            "fn main(world: World) -> [] int { \
+             let Split { io, ffi, fs, heap, args } = split(world); \
+             release(args); release(ffi); release(fs); release(heap); release(io); \
+             let pair = (1, 2); return pair.0 + pair.1; }",
+        );
+    }
+
+    /// §3.1, both reference cases in one test, because the rule is that
+    /// they are *one* rule seen from two sides.
+    ///
+    /// A `val` component copies out of a reference and costs the referent
+    /// nothing. A `res` one cannot copy, so reading it would leave two
+    /// owners of one value -- `reading-references.md` §2, enforced for
+    /// tuples from the start rather than after a double free found it
+    /// missing, which is how it was found for struct fields.
+    #[test]
+    fn a_res_component_does_not_move_out_of_a_reference_and_a_val_one_copies() {
+        let message = refused(
+            "fn peek[&p](pair: &p (Box[int], int)) -> [] int { let held = pair.0; return 0; } \
+             fn main(world: World) -> [] int { \
+             let Split { io, ffi, fs, heap, args } = split(world); \
+             release(args); release(ffi); release(fs); release(heap); release(io); return 0; }",
+        );
+        assert!(message.contains("nothing moves out of a reference"), "{message}");
+
+        accepted(
+            "fn peek[&p](pair: &p (int, int)) -> [] int { return pair.0 + pair.1; } \
+             fn main(world: World) -> [] int { \
+             let Split { io, ffi, fs, heap, args } = split(world); \
+             release(args); release(ffi); release(fs); release(heap); release(io); return 0; }",
+        );
+    }
+
+    /// §2.2: structural, and exactly structural. Arity is part of the
+    /// match, so there is no prefix rule and no reordering.
+    #[test]
+    fn two_tuples_are_the_same_type_when_their_components_are() {
+        accepted(
+            "fn id(pair: (int, bool)) -> [] (int, bool) { return pair; } \
+             fn main(world: World) -> [] int { \
+             let Split { io, ffi, fs, heap, args } = split(world); \
+             release(args); release(ffi); release(fs); release(heap); release(io); \
+             let p = id((1, true)); return p.0; }",
+        );
+
+        let reordered = refused(
+            "fn id(pair: (int, bool)) -> [] (int, bool) { return pair; } \
+             fn main(world: World) -> [] int { \
+             let Split { io, ffi, fs, heap, args } = split(world); \
+             release(args); release(ffi); release(fs); release(heap); release(io); \
+             let p = id((true, 1)); return p.0; }",
+        );
+        assert!(reordered.contains("expected `int`, found `bool`"), "{reordered}");
+
+        let longer = refused(
+            "fn id(pair: (int, bool)) -> [] (int, bool) { return pair; } \
+             fn main(world: World) -> [] int { \
+             let Split { io, ffi, fs, heap, args } = split(world); \
+             release(args); release(ffi); release(fs); release(heap); release(io); \
+             let p = id((1, true, 1)); return p.0; }",
+        );
+        assert!(longer.contains("expected"), "{longer}");
+    }
+
+    /// §2: a tuple is an aggregate with no declaration, so the acyclicity
+    /// walk has to see through it. `struct Node { pair: (int, Node) }` has
+    /// no more finite a size than `struct Node { next: Node }`.
+    ///
+    /// The walk follows member types and their *type arguments*; a tuple is
+    /// neither, so it needed a case of its own and would have been a hole
+    /// without one.
+    #[test]
+    fn a_type_cannot_contain_itself_through_a_tuple() {
+        let message =
+            refused("struct Node { pair: (int, Node) } fn main() -> [] int { return 0; }");
+        assert!(message.contains("contains itself"), "{message}");
+
+        // Through a `Box`, it terminates -- the hole `heap.md` §4 opened on
+        // purpose, and a tuple does not close it by accident.
+        accepted("struct Node { pair: (int, Box[Node]) } fn main() -> [] int { return 0; }");
+    }
+
+    /// §3.2: a pattern is not an annotation.
+    ///
+    /// The arity comes from the value, so taking apart something that is
+    /// not a tuple says so rather than solving an inference variable from
+    /// the pattern and inventing a type nobody wrote.
+    #[test]
+    fn a_tuple_pattern_is_checked_against_the_value_not_the_other_way() {
+        let message = refused(
+            "fn main(world: World) -> [] int { \
+             let Split { io, ffi, fs, heap, args } = split(world); \
+             release(args); release(ffi); release(fs); release(heap); release(io); \
+             let (a, b) = 1; return a; }",
+        );
+        assert!(message.contains("is not a tuple"), "{message}");
     }
 
     #[test]
