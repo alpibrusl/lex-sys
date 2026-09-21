@@ -3516,3 +3516,78 @@ fn main(world: World) -> [] int {
     assert_eq!(run.status.code(), Some(0), "`table[3]` is 9, computed during compilation");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `docs/layout.md` §4 — the report agrees with what the backend emits.
+///
+/// The check that matters is `stride`, because that is the number a
+/// program can *observe*: an arena is a fixed 64 KiB and exhausting it
+/// traps, so how many elements fit is exactly `65536 / stride`. A report
+/// that drifted from the emitter would disagree with where the trap
+/// lands, and this finds it by walking the boundary from both sides.
+#[test]
+fn the_layout_report_says_what_a_type_costs() {
+    let dir = scratch("layout-report");
+    let source = "\
+struct Rgb { r: byte, g: byte, b: byte }
+fn main(world: World) -> [] int {
+    let Split { io, ffi, fs, heap, args } = split(world);
+    release(args); release(heap); release(fs); release(ffi); release(io);
+    region a {
+        let s = alloc_slice[a](COUNT, Rgb { r: byte_of(1), g: byte_of(2), b: byte_of(3) });
+        if len(s) == 0 { return 1; }
+    }
+    return 0;
+}
+";
+    let path = dir.join("rgb.ls");
+    std::fs::write(&path, source.replace("COUNT", "1")).expect("a writable fixture");
+
+    let report = Command::new(BIN)
+        .args(["layout".as_ref(), path.as_os_str()])
+        .output()
+        .expect("the compiler runs");
+    assert!(report.status.success(), "{}", String::from_utf8_lossy(&report.stderr));
+    let text = String::from_utf8_lossy(&report.stdout);
+
+    let row = text
+        .lines()
+        .find(|l| l.starts_with("Rgb"))
+        .unwrap_or_else(|| panic!("no `Rgb` row in:\n{text}"));
+    let columns: Vec<u32> =
+        row.split_whitespace().skip(1).map(|n| n.parse().expect("a number")).collect();
+    assert_eq!(columns[0], 3, "three leaves:\n{text}");
+    assert_eq!(columns[1], 24, "eight bytes each today:\n{text}");
+    assert_eq!(columns[2], 3, "one byte each packed — §2's whole point:\n{text}");
+    let stride = columns[3];
+    assert_eq!(stride, 24, "and the stride is what a traversal pays:\n{text}");
+
+    // Now the observable half: an arena is 64 KiB, so `65536 / stride`
+    // elements fit and one more does not.
+    let fits = 65536 / stride;
+    for (count, should_run) in [(fits, true), (fits + 1, false)] {
+        let path = dir.join(format!("rgb{count}.ls"));
+        std::fs::write(&path, source.replace("COUNT", &count.to_string()))
+            .expect("a writable fixture");
+        let exe = dir.join(format!("rgb{count}"));
+        let build = Command::new(BIN)
+            .args(["build".as_ref(), path.as_os_str(), "-o".as_ref(), exe.as_os_str()])
+            .output()
+            .expect("the compiler runs");
+        assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+        let run = Command::new(&exe).output().expect("the program runs");
+        if should_run {
+            assert_eq!(
+                run.status.code(),
+                Some(0),
+                "{count} × {stride} bytes is exactly one arena, so it fits"
+            );
+        } else {
+            assert_eq!(
+                run.status.code(),
+                None,
+                "one element past the arena traps, which is how the stride is observable"
+            );
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
