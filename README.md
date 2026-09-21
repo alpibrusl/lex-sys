@@ -145,9 +145,20 @@ and requires every hash to survive.
 > by a design — `examples/slab/` asked for it, and has since lost two
 > types and a whole function.
 >
-> **Still missing:** a standard library, and one ergonomic gap that
-> survived — no shadowing within a block. Do not mistake this for a
-> usable language yet.
+> **And a name can be rebound.** Shadowing within a block was refused
+> outright, and that was not arbitrary: `let held = ...` twice would put
+> the first allocation out of reach with its obligation undischarged,
+> which is the leak affine types drop silently. But the refusal was
+> broader than the hazard. The rule now is **a binding may be shadowed
+> exactly when it is dead** — which is the rule assignment already had,
+> so it is one rule with two syntaxes rather than a new one. It is
+> checked at replay rather than in the parser, because whether a binding
+> is dead is a fact about the trace and not about the source. That is
+> [`docs/shadowing.md`](docs/shadowing.md), and it finishes
+> `sharing.md` §4's list.
+>
+> **Still missing:** standard input, and a standard library. Do not
+> mistake this for a usable language yet.
 
 ## What this is
 
@@ -319,12 +330,13 @@ line worth watching is the last one — a handle whose slot was removed
 comes back `Missing`, which is a **value the program decides what to do
 about** rather than a dangling pointer it gets no say in.
 
-It is also the before-and-after for tuples. Writing it is what found the
-gap: `insert` and `look` each had to answer with a slab *and* something
-else, so each declared a `res struct` that was not a concept in the
-library, and one function had to be split in two because a struct
-pattern cannot rename what it binds. Both are gone, and the object file
-did not change.
+It is also the before-and-after for tuples and shadowing. Writing it is
+what found both gaps. `insert` and `look` each had to answer with a slab
+*and* something else, so each declared a `res struct` that was not a
+concept in the library; one function had to be split in two because a
+struct pattern cannot rename what it binds; and `run` had eight names
+for one slab because a name could not be rebound. All three are gone,
+no rule was weakened, and the object file did not change.
 
 ```sh
 cargo run -p lex-sys -- run examples/slab/main.ls examples/slab/slab.ls
@@ -599,11 +611,19 @@ and there is a test that says so. A tuple is also the first structural
 type here — no declaration, so its identity is its components and two
 files can agree on one with neither declaring anything.
 
-**What does not, yet:** a standard library, `import`, namespaces and
-visibility, flag parsing, environment variables, standard input — and
-one ergonomic gap that survived the tuple slice: no shadowing within a
-block. All of them are now ordinary work rather than blocked work, which
-is the difference these changes made.
+Shadowing came after that and finished the list. It is the one slice
+where the restriction turned out to be a real rule stated too bluntly:
+rebinding a name that still holds a `res` value strands that value, and
+that is a leak. So the rule is now the one assignment already had — a
+binding may be shadowed exactly when it is dead — and the refusal
+survives for the program that was actually dangerous. It is checked at
+replay rather than in the parser, because whether a binding is dead is a
+fact about the trace. One must-reject fixture was retired to it.
+
+**What does not, yet:** standard input, a standard library, `import`,
+namespaces and visibility, flag parsing, and environment variables. All
+of them are now ordinary work rather than blocked work, which is the
+difference these changes made.
 
 Every example declares what it prints in its own header, and a test walks
 `examples/` and checks them, so an example that stops matching the language
@@ -666,6 +686,7 @@ carry them exists now, while it is cheap.
 | [`docs/filesystem.md`](docs/filesystem.md) | The `Fs(prefix)` capability, why the operations are builtins rather than `extern fn`, the runtime path check and why `..` is refused | **settled and built** — the last mile to M3's acceptance criterion; §7's must-reject suite is enforced |
 | [`docs/sharing.md`](docs/sharing.md) | §9's escape hatches as built: why `Rc` needs a copyable pointer this language does not have, why `Gen` does not, and what a linear library costs to write | **settled and built, and it corrects `linearity-and-effects.md` §9** — three reject fixtures for the three ways `Rc` fails; `examples/slab/` is the one that works |
 | [`docs/tuples.md`](docs/tuples.md) | `(A, B)`: an anonymous struct with positional components, the first structural type here, and a computed rather than declared mode | **settled and built** — the first feature whose case was made by a library; a tuple and the struct it replaces emit byte-identical objects |
+| [`docs/shadowing.md`](docs/shadowing.md) | Rebinding a name in one block: why it was refused, and the liveness rule that replaces the refusal | **settled and built** — the last of `sharing.md` §4's three gaps, and one rule where there were two |
 | `docs/memory-model.md` | Regions, escape, the escape hatches and their cost | not written — §5 and §6 settled and built regions and escape, and `sharing.md` has now settled §9's hatches. Nothing is left that a document of its own would say |
 | [`docs/defined-behaviour.md`](docs/defined-behaviour.md) | Every place C and Rust leave behaviour open, and what we define it to | **written and enforced** — overflow traps, evaluation order is left to right, and §9 names the fixture behind each rule |
 | [`docs/strings.md`](docs/strings.md) | What a string is: bytes rather than an encoding, `byte` as storage rather than arithmetic, packed layout, literals and the static region | **settled and built** — gated M3's last item; §9's must-reject suite is enforced |

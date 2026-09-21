@@ -12,11 +12,13 @@
 // are three fixtures in `tests/reject/`, each refused by a different rule
 // that was not written with `Rc` in mind.
 //
-// This file is also the before-and-after for `docs/tuples.md`. Two of the
-// three ergonomic gaps `sharing.md` §4 found while writing it are closed:
-// `insert` and `look` hand back tuples rather than structs declared for
-// the purpose, and `run` is one function again rather than two. The third
-// — no shadowing within a block — is still here, and still visible.
+// This file is also the before-and-after for `docs/tuples.md` and
+// `docs/shadowing.md`. All three ergonomic gaps `sharing.md` §4 found
+// while writing it are now closed: `insert` and `look` hand back tuples
+// rather than structs declared for the purpose, `run` is one function
+// rather than two, and it threads one `slab` rather than eight names for
+// one slab. None of that weakened a rule — `run` still consumes the slab
+// at every step, and rebinding it over a live one is still refused.
 //
 // `Gen` works precisely because a handle **points at nothing**: two plain
 // `int`s, `val`, copied like any other. The slab owns every value.
@@ -61,13 +63,6 @@ fn show[&i](io: &!i Io, f: Found) -> [io] int {
 }
 
 // Look one handle up, say what came back, and hand the slab on.
-//
-// Several names for one slab below (`fresh`, `filled`, `emptied`,
-// `checked`, ...) rather than reassigning one: this language has no
-// shadowing within a block. That is the one ergonomic gap `sharing.md`
-// §4 recorded that tuples did **not** close, and it is left visible here
-// rather than worked around, because a library is a better test of a
-// language than a test suite is.
 fn probe[&i](io: &!i Io, s: Slab, g: Gen, label: &static [byte]) -> [io] Slab {
     write_all(io, label);
     let (slab, found) = look(s, g);
@@ -76,33 +71,44 @@ fn probe[&i](io: &!i Io, s: Slab, g: Gen, label: &static [byte]) -> [io] Slab {
     return slab;
 }
 
+// One slab, threaded.
+//
+// This function is the whole of `sharing.md` §4 answered. It was once
+// two functions and eight names for one slab — `fresh`, `filled`,
+// `live`, `emptied`, `checked`, `refilled`, `reused`, `stale` — none of
+// which was a different thing from the last. Tuples took the two
+// declared structs and the split; shadowing took the seven extra names.
+//
+// The rule that makes it safe is the one that made the old version
+// verbose: `slab` may be rebound only because each step *consumed* the
+// one before it. Rebinding it over a live slab is still a leak and still
+// refused (`docs/shadowing.md` §3.3). The linearity is unchanged; only
+// the names are gone.
 fn run[&h, &i](heap: &!h Heap, io: &!i Io) -> [heap, io] int {
-    let fresh = new_slab(heap, 4);
+    let slab = new_slab(heap, 4);
 
-    let (filled, first) = insert(fresh, 7);
-    let live = probe(io, filled, first, "live handle:  ");
+    let (slab, first) = insert(slab, 7);
+    let slab = probe(io, slab, first, "live handle:  ");
 
     // Free the slot. One increment of its generation makes every
     // outstanding handle to it stale at once — including this one, which
     // `remove` never saw.
-    let emptied = remove(live, first);
-    let checked = probe(io, emptied, first, "after remove: ");
+    let slab = remove(slab, first);
+    let slab = probe(io, slab, first, "after remove: ");
 
     // A *new* handle to the same index, with the next generation — so the
     // old handle stays `Missing` while the new one works. That is the
     // whole point of a generation, and the reason a stale handle is safe
     // rather than merely unlikely to be reused.
     //
-    // This used to be a second function. `insert` returned a struct that
-    // bound `slab` and `handle` by *field name*, and a struct pattern
-    // cannot rename, so one scope could not take two of them apart — the
-    // gap `sharing.md` §4 recorded second. A tuple pattern names its own
-    // bindings (`docs/tuples.md` §1), so `first` and `second` are two
-    // handles in one scope and the split is gone.
-    let (refilled, second) = insert(checked, 9);
-    let reused = probe(io, refilled, second, "new handle:   ");
-    let stale = probe(io, reused, Gen { index: 0, generation: 0 }, "old handle:   ");
-    return drop_slab(heap, stale);
+    // `first` and `second` are two handles alive in one scope, which a
+    // struct pattern could not have given: it binds field names, and
+    // `insert` used to return one. A tuple pattern names its own
+    // bindings (`docs/tuples.md` §1).
+    let (slab, second) = insert(slab, 9);
+    let slab = probe(io, slab, second, "new handle:   ");
+    let slab = probe(io, slab, Gen { index: 0, generation: 0 }, "old handle:   ");
+    return drop_slab(heap, slab);
 }
 
 fn main(world: World) -> [] int {

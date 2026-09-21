@@ -89,7 +89,14 @@ pub(crate) fn mode_of(defs: &[TypeDef], unifier: &Unifier, ty: &Type) -> Mode {
 pub(crate) enum Event {
     /// A binding entered scope. Its name and span are here so a diagnostic
     /// can point at the declaration rather than at the function.
-    Declare { slot: Slot, name: String, span: Span },
+    ///
+    /// `shadows` is the binding of the same name this one replaced in the
+    /// same block, if there was one (`docs/shadowing.md` §3). Lowering
+    /// records the *link* and the checker reads the liveness, because
+    /// whether a binding is dead is a fact about the trace and lowering
+    /// cannot know it -- the same reason modes are decided here rather
+    /// than where a type is first written.
+    Declare { slot: Slot, name: String, span: Span, shadows: Option<Slot> },
     /// A slot was read. In M2 slice 1 there is no borrowing yet (§5), so
     /// every read of a `res` slot is a move.
     Use { slot: Slot, span: Span },
@@ -228,7 +235,23 @@ impl Check<'_> {
         let mut diverged = false;
         for event in events {
             match event {
-                Event::Declare { slot, name, span } => {
+                Event::Declare { slot, name, span, shadows } => {
+                    // `docs/shadowing.md` §3: shadowing is allowed exactly
+                    // when the shadowed binding is dead. That is the rule
+                    // `Event::Assign` applies a few arms down, and it is
+                    // the same rule for the same reason -- a live `res`
+                    // value put out of reach is a leak, which is the case
+                    // affine types drop silently.
+                    if let Some(old) = shadows {
+                        if self.state[old.0 as usize] == State::Live {
+                            return Err(Diagnostic::new(
+                                format!(
+                                    "`{name}` still holds a `res` value; shadowing it here would put that value out of reach with its obligation undischarged. Consume it first"
+                                ),
+                                *span,
+                            ));
+                        }
+                    }
                     self.names[slot.0 as usize] = Some((name.clone(), *span));
                     self.state[slot.0 as usize] =
                         if self.is_res(*slot) { State::Live } else { State::Untracked };
