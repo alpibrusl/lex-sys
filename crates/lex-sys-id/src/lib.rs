@@ -130,6 +130,10 @@ mod tag {
     /// an extra operand: an index yields an element and a range yields a
     /// slice, so they are two operations and must be two encodings.
     pub const SUBSLICE: u8 = 0x70;
+    /// `defer E;` (`docs/defer.md`). Its own tag rather than the statement
+    /// it expands to: `defer close(f);` and `close(f);` run at different
+    /// points, so they are two programs.
+    pub const DEFER: u8 = 0x71;
 
     /// The tag for a declared mode. Written out rather than cast from the
     /// enum, so adding a mode cannot silently renumber the others.
@@ -822,6 +826,10 @@ impl BodyHasher<'_> {
                 self.encoder.tag(tag::RETURN);
                 self.expr(*value);
             }
+            Stmt::Defer(value) => {
+                self.encoder.tag(tag::DEFER);
+                self.expr(*value);
+            }
         }
     }
 
@@ -1016,6 +1024,30 @@ mod tests {
     }
 
     // ---- what must not change a hash -----------------------------------
+
+    /// `docs/defer.md` §3.1: `defer E;` and `E;` run at different points,
+    /// so they are different programs.
+    ///
+    /// The tag is the statement's own rather than the expansion's, which
+    /// matters because the expansion is what the checker and the backend
+    /// see — encoding the sugar as what it desugars to would make two
+    /// programs that behave differently share a `BodyId`.
+    #[test]
+    fn a_defer_is_not_the_statement_it_expands_to() {
+        let deferred = "fn f[&i](io: &!i Io) -> [io_write] int { \
+                        defer putchar(io, 65); return 0; }";
+        let direct = "fn f[&i](io: &!i Io) -> [io_write] int { \
+                      putchar(io, 65); return 0; }";
+        assert_ne!(body(deferred, "f"), body(direct, "f"));
+
+        // And order is part of it: two defers the other way round run in
+        // the other order, so they are two bodies.
+        let one = "fn f[&i](io: &!i Io) -> [io_write] int { \
+                   defer putchar(io, 65); defer putchar(io, 66); return 0; }";
+        let other = "fn f[&i](io: &!i Io) -> [io_write] int { \
+                     defer putchar(io, 66); defer putchar(io, 65); return 0; }";
+        assert_ne!(body(one, "f"), body(other, "f"));
+    }
 
     /// `docs/slicing.md`: an index and a range are two operations, so they
     /// are two encodings.

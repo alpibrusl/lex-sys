@@ -284,6 +284,11 @@ deliberately *not* in M2: sugar that expands to a consumption on every exit path
 can be added later without changing one rule in this document, and adding it now
 would mean debugging the expansion and the checker at the same time.
 
+> **Built — `docs/defer.md`.** And the prediction held: not one rule in
+> this document changed. `defer` is expanded during lowering into the
+> statement it stands for, once per exit path, so the checker replays
+> exactly the events it would have replayed for the version above.
+
 ### 4.3 Loops
 
 A loop body must leave the live set exactly as it found it. A body that
@@ -1093,9 +1098,13 @@ push if something here feels wrong.
   error, which forbids a signature that anticipates its implementation. Is that
   right for a published library, where widening a row later is a breaking
   change? An explicit opt-out is easy to add and hard to take back.
-- **`defer`.** §4.2 is verbose without it. The expansion is mechanical; the
-  question is whether a consumption the programmer did not write at the point
-  it happens is still "visible".
+- **`defer`.** *Answered — see `docs/defer.md`.* Yes, still visible, and
+  the question turned on what the word means here: not "written on the
+  line where it runs" but **the type says what happened**. The effect is
+  still in the row, the exactly-once rule is still enforced on every
+  path, and the line is still written — one below the acquisition, which
+  is where a reader looks for the pairing. A destructor would have failed
+  that test; `defer` names the function.
 - **Capability release at `main`.** Four `release` calls in §8.3 is ceremony.
   Letting the runtime reclaim `World`'s parts is convenient and is *exactly*
   the affine hole §4 refuses elsewhere.

@@ -629,6 +629,7 @@ impl<'a> Parser<'a> {
         match self.peek().kind {
             TokenKind::Let | TokenKind::Var => self.let_stmt(),
             TokenKind::Return => self.return_stmt(),
+            TokenKind::Defer => self.defer_stmt(),
             TokenKind::If => self.if_stmt(),
             TokenKind::While => self.while_stmt(),
             TokenKind::Match => self.match_stmt(),
@@ -755,6 +756,17 @@ impl<'a> Parser<'a> {
         let value = self.expr()?;
         let end = self.expect(TokenKind::Semi)?.span;
         Ok(self.ast.push_stmt(Stmt::Return(value), kw.span.to(end)))
+    }
+
+    /// `defer E;` (`docs/defer.md`).
+    ///
+    /// One expression, exactly like an expression statement -- because that
+    /// is what it becomes, at every exit from this block instead of here.
+    fn defer_stmt(&mut self) -> Result<StmtId, Diagnostic> {
+        let kw = self.bump();
+        let value = self.expr()?;
+        let end = self.expect(TokenKind::Semi)?.span;
+        Ok(self.ast.push_stmt(Stmt::Defer(value), kw.span.to(end)))
     }
 
     /// An `if`/`while` condition: an expression that may not be a bare struct

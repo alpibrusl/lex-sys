@@ -46,10 +46,11 @@ reasoning — this table is the index, not the argument.
 | [#35](https://github.com/alpibrusl/lex-sys/pull/35) | The README | Not a language change: the README had grown a paragraph per slice in three places at once, so the history moved here and the per-example prose moved to `examples/` |
 | [#36](https://github.com/alpibrusl/lex-sys/pull/36) | [A borrowed field](reading-references.md) | The double free was never about **reading**, it was about **owning**. A `res` field through a reference is a borrow, and the refusal that used to guard it was doing work the type rule already does |
 | [#37](https://github.com/alpibrusl/lex-sys/pull/37) | [Slicing](slicing.md) | `s[a..b]`, and the answer to "a writer abstraction": there should not be one, because a function taking a `Writer` must declare the **union** of what every destination could do, and a union row is not an exact row. The abstraction is the buffer |
+| [#38](https://github.com/alpibrusl/lex-sys/pull/38) | [`defer`](defer.md) | Sugar that **stays** sugar: expanded during lowering, so the checker replays the same events the hand-written version would, and there is one set of linearity rules rather than two. §12's question answered — "visible" here means *the type says what happened*, not "written on the line where it runs" |
 
 ### The pattern, if there is one
 
-Nine of these fifteen slices found a bug, falsified a claim the project
+Nine of these sixteen slices found a bug, falsified a claim the project
 had already written down, or both — and three of those were soundness
 bugs reachable from ordinary code. That is not an accident of luck: each
 slice is built by writing the thing the previous document said was
@@ -72,7 +73,6 @@ for.
 
 | Next | Why it is next |
 |---|---|
-| `defer` | [`linearity-and-effects.md`](linearity-and-effects.md) §4.2 is verbose without it. The expansion is mechanical; the question is whether a consumption the programmer did not write at the point it happens is still "visible" |
 | Capability release at `main` | Four `release` calls is ceremony. Letting the runtime reclaim `World`'s parts is convenient and is *exactly* the affine hole §4 refuses everywhere else |
 | `[budget]` | Carried over from Lex and not specified here. Plainly a capability carrying an integer; what it costs at runtime, and whether it is checked or merely accounted, is unanswered |
 | Effect polymorphism | A function generic over the *row* it performs. Named nowhere yet, and much larger than anything above |
