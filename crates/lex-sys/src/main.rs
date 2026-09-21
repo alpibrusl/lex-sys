@@ -30,6 +30,7 @@ usage:
     lex-sys check <file.ls>... [--std]
     lex-sys run   <file.ls>... [--std]
     lex-sys ids   <file.ls>... [--std]
+    lex-sys authority <file.ls>... [--std]
     lex-sys print <file.ls>
     lex-sys --version
 
@@ -136,6 +137,11 @@ fn run(args: &[String]) -> Result<ExitCode, Failure> {
         "ids" => {
             let (inputs, _, _, with_std) = parse_args(&args[1..], false)?;
             print_ids(&inputs, with_std)?;
+            Ok(ExitCode::SUCCESS)
+        }
+        "authority" => {
+            let (inputs, _, _, with_std) = parse_args(&args[1..], false)?;
+            print_authority(&inputs, with_std)?;
             Ok(ExitCode::SUCCESS)
         }
         "build" => {
@@ -308,6 +314,93 @@ fn compile_to_ir(inputs: &[PathBuf], with_std: bool) -> Result<lex_sys_ir::Progr
 ///
 /// The program is checked first: hashing something that does not compile would
 /// hand out an identity for a thing that is not a program.
+/// `lex-sys authority <file>` — what a program can do
+/// (`docs/authority.md`).
+///
+/// The surface is the union of the declared rows of everything `main`
+/// reaches, and that needs no new analysis: pass 2 already emits exactly
+/// what `main` reaches (`standard-library.md` §5.2), so `Program::funcs`
+/// *is* the reachable set and every `Func` carries its row. The same
+/// reachability that decides what goes in the binary decides what the
+/// binary can do, which is the reason these are one number rather than
+/// two.
+///
+/// Rows are exact in both directions (§7.3), so this is precise rather
+/// than conservative: a label here is an effect the program performs on
+/// some path, not one it might.
+fn print_authority(inputs: &[PathBuf], with_std: bool) -> Result<(), Failure> {
+    let program = compile_to_ir(inputs, with_std)?;
+
+    let mut labels: Vec<String> = Vec::new();
+    for func in &program.funcs {
+        for label in func.performs.labels() {
+            let rendered = match &label.argument {
+                Some(value) => format!("{}(\"{value}\")", label.name),
+                None => label.name.clone(),
+            };
+            if !labels.contains(&rendered) {
+                labels.push(rendered);
+            }
+        }
+    }
+    labels.sort();
+
+    let mut symbols: Vec<&str> =
+        program.externs.iter().map(|declared| declared.symbol.as_str()).collect();
+    symbols.sort_unstable();
+    symbols.dedup();
+
+    let stdout = io::stdout();
+    let mut out = stdout.lock();
+    let written = (|| -> io::Result<()> {
+        if labels.is_empty() {
+            writeln!(out, "performs nothing")?;
+        } else {
+            writeln!(out, "performs")?;
+            for label in &labels {
+                writeln!(out, "    {label}")?;
+            }
+        }
+        // The negative half, which is the one a capability language is for:
+        // a reader wants to know what a program *cannot* do, and an absent
+        // label is exactly that.
+        let untouched: Vec<&str> = [
+            ("the console", ["io_read", "io_write"].as_slice()),
+            ("the filesystem", ["fs_read", "fs_write"].as_slice()),
+            ("the heap", ["heap"].as_slice()),
+            ("the command line", ["args"].as_slice()),
+            ("foreign code", ["ffi"].as_slice()),
+        ]
+        .into_iter()
+        .filter(|(_, names)| {
+            !names.iter().any(|name| {
+                labels.iter().any(|label| label == name || label.starts_with(&format!("{name}(")))
+            })
+        })
+        .map(|(what, _)| what)
+        .collect();
+        if !untouched.is_empty() {
+            writeln!(out, "never touches")?;
+            for what in untouched {
+                writeln!(out, "    {what}")?;
+            }
+        }
+        if !symbols.is_empty() {
+            writeln!(out, "foreign symbols")?;
+            for symbol in symbols {
+                writeln!(out, "    {symbol}")?;
+            }
+        }
+        out.flush()
+    })();
+
+    match written {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::BrokenPipe => Ok(()),
+        Err(e) => Err(environment(format!("cannot write to stdout: {e}"))),
+    }
+}
+
 fn print_ids(inputs: &[PathBuf], with_std: bool) -> Result<(), Failure> {
     let (ast, map) = parse_program(inputs, with_std)?;
     lex_sys_ir::lower(&ast).map_err(|d| refused(d.render_in(&map)))?;

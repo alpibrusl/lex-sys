@@ -1105,9 +1105,14 @@ push if something here feels wrong.
   path, and the line is still written — one below the acquisition, which
   is where a reader looks for the pairing. A destructor would have failed
   that test; `defer` names the function.
-- **Capability release at `main`.** Four `release` calls in §8.3 is ceremony.
-  Letting the runtime reclaim `World`'s parts is convenient and is *exactly*
-  the affine hole §4 refuses elsewhere.
+- **Capability release at `main`.** *Answered `no` — see
+  `docs/authority.md`.* The affine-hole argument holds, and it is not the
+  interesting one: even if reclaiming were safe it would be wrong, because
+  those four lines are the only place a program's authority surface is
+  written down. `main` owns rather than borrows, so its row is `[]` and
+  every entry point in this repository has the same signature — the
+  releases are the declaration, not ceremony around it. What the tooling
+  owed was to *read* them, which `lex-sys authority` now does.
 - **Mode polymorphism.** *Answered — see `docs/mode-polymorphism.md`.* The
   half-answer below was right: monomorphisation does make `fn id[T](x: T) -> T`
   work at both modes. The signature that says so is `[T: val]`, checked once
