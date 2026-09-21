@@ -73,6 +73,11 @@ pub enum Type {
     /// intact: a type you cannot add to never asks whether adding traps.
     Byte,
     Bool,
+    /// IEEE-754 binary64 (`docs/floating-point.md`). One floating type,
+    /// named for what it is rather than how wide it is, exactly as `int`
+    /// is — a second width would drag a second set of conversion rules
+    /// behind it, which `defined-behaviour.md` §8 still defers.
+    Float,
     /// The type of an expression that yields nothing, such as a call used as a
     /// statement. Not writable in source.
     Unit,
@@ -425,6 +430,7 @@ impl Unifier {
             Type::Int => "int".to_owned(),
             Type::Byte => "byte".to_owned(),
             Type::Bool => "bool".to_owned(),
+            Type::Float => "float".to_owned(),
             Type::Unit => "()".to_owned(),
             Type::Param(i) => {
                 self.param_names.get(i as usize).cloned().unwrap_or_else(|| format!("T{i}"))

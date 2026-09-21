@@ -10,7 +10,7 @@
 
 use std::fmt;
 
-use cranelift_codegen::ir::condcodes::IntCC;
+use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
 use cranelift_codegen::ir::{
     AbiParam, InstBuilder, MemFlags, StackSlotData, StackSlotKind, TrapCode, Value, types,
 };
@@ -59,6 +59,9 @@ fn crosses_to_c(ty: &Type) -> bool {
 fn leaves_into(ty: &Type, program: &Program, pointer: types::Type, out: &mut Vec<types::Type>) {
     match ty {
         Type::Int => out.push(types::I64),
+        // `docs/floating-point.md` §1: binary64, which is `F64` and
+        // nothing else. A `float` is one leaf, like an `int`.
+        Type::Float => out.push(types::F64),
         // A byte and a bool are both one byte wide. That they share a
         // machine type is not an invitation to mix them: the checker keeps
         // them apart, and `byte` has no arithmetic to mix *with*.
@@ -618,7 +621,7 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
         for (index, ty) in func.slots.iter().enumerate().skip(func.n_params as usize) {
             let base = self.slot_base[index];
             for (offset, leaf) in leaves(ty, self.program, self.pointer).into_iter().enumerate() {
-                let zero = self.builder.ins().iconst(leaf, 0);
+                let zero = self.zero(leaf);
                 self.builder.def_var(Variable::from_u32(base + offset as u32), zero);
             }
         }
@@ -631,11 +634,26 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
         }
     }
 
+    /// A zero of a leaf's machine type.
+    ///
+    /// `iconst` is an *integer* instruction, and its verifier rejects a
+    /// floating control type -- so a `float` leaf needs `f64const`. That
+    /// is the whole of the difference, and it is the one place adding a
+    /// second machine class to the language was not free
+    /// (`docs/floating-point.md` §1).
+    fn zero(&mut self, leaf: types::Type) -> Value {
+        if leaf == types::F64 {
+            self.builder.ins().f64const(0.0)
+        } else {
+            self.builder.ins().iconst(leaf, 0)
+        }
+    }
+
     /// Return a zero of the function's return type, however many leaves it has.
     fn return_zero(&mut self) {
         let zeros: Vec<Value> = leaves(&self.func.ret, self.program, self.pointer)
             .into_iter()
-            .map(|leaf| self.builder.ins().iconst(leaf, 0))
+            .map(|leaf| self.zero(leaf))
             .collect();
         self.emit_return(zeros);
     }
@@ -1557,6 +1575,12 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
     fn expr(&mut self, expr: &Expr) -> Vec<Value> {
         match expr {
             Expr::Int(v) => vec![self.builder.ins().iconst(types::I64, *v)],
+            // From bits rather than from a decimal string, so the constant
+            // in the object file is the one the parser read
+            // (`docs/floating-point.md` §1).
+            Expr::Float(bits) => {
+                vec![self.builder.ins().f64const(f64::from_bits(*bits))]
+            }
             Expr::Bool(v) => vec![self.builder.ins().iconst(types::I8, i64::from(*v))],
             Expr::Load(slot) => {
                 let base = self.slot_base[slot.0 as usize];
@@ -1766,6 +1790,13 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
                 // from zero rather than an `ineg` that would quietly hand
                 // back `int::MIN` again.
                 let v = self.scalar(inner);
+                // A `float` has no such place: IEEE negation flips the
+                // sign bit and is total, including on NaN and on zero,
+                // where it is what produces `-0.0`
+                // (`docs/floating-point.md` §2).
+                if self.builder.func.dfg.value_type(v) == types::F64 {
+                    return vec![self.builder.ins().fneg(v)];
+                }
                 let zero = self.builder.ins().iconst(types::I64, 0);
                 let (value, overflowed) = self.builder.ins().ssub_overflow(zero, v);
                 self.builder.ins().trapnz(overflowed, TrapCode::INTEGER_OVERFLOW);
@@ -1879,6 +1910,30 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
                     // its argument's element type is what decides it.
                     Callee::Builtin(Builtin::Len) => {
                         unreachable!("`len` is lowered as `Expr::Len`")
+                    }
+                    // `docs/floating-point.md` §4: round-to-nearest-even,
+                    // which is what `fcvt_from_sint` does. No check,
+                    // because every `int` has a nearest `float`.
+                    Callee::Builtin(Builtin::FloatOf) => {
+                        vec![self.builder.ins().fcvt_from_sint(types::F64, args[0])]
+                    }
+                    // Toward zero, trapping on NaN, ±infinity and any
+                    // magnitude at or past `2^63` -- exactly the inputs C
+                    // leaves undefined (§4).
+                    //
+                    // Cranelift has both forms: `fcvt_to_sint` traps on
+                    // precisely those, and `fcvt_to_sint_sat` saturates.
+                    // Saturating is the silently wrong answer here, so the
+                    // trapping one is the one that belongs.
+                    Callee::Builtin(Builtin::Truncate) => {
+                        vec![self.builder.ins().fcvt_to_sint(types::I64, args[0])]
+                    }
+                    // `x != x`, which is true for NaN and nothing else.
+                    // A riddle as an expression (§5), which is why it has
+                    // a name.
+                    Callee::Builtin(Builtin::IsNan) => {
+                        let x = args[0];
+                        vec![self.builder.ins().fcmp(FloatCC::NotEqual, x, x)]
                     }
                     // §2: narrow or trap. Truncation is the silently wrong
                     // answer `defined-behaviour.md` §2.1 already refused.
@@ -2010,7 +2065,40 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
         self.builder.use_var(result)
     }
 
+    /// The IEEE-754 half of [`Self::binary`].
+    ///
+    /// No checks anywhere, which is the whole of §2.1's argument in code:
+    /// `1.0 / 0.0` is infinity and `0.0 / 0.0` is NaN, both of them
+    /// defined answers rather than the silently wrong ones wrapping
+    /// arithmetic would hand back. The comparisons are the *ordered*
+    /// forms, so every one of them is false when either side is NaN,
+    /// which is what makes trichotomy fail (§5).
+    fn float_binary(&mut self, op: BinOp, a: Value, b: Value) -> Value {
+        let cc = match op {
+            BinOp::Add => return self.builder.ins().fadd(a, b),
+            BinOp::Sub => return self.builder.ins().fsub(a, b),
+            BinOp::Mul => return self.builder.ins().fmul(a, b),
+            BinOp::Div => return self.builder.ins().fdiv(a, b),
+            BinOp::Eq => FloatCC::Equal,
+            BinOp::Ne => FloatCC::NotEqual,
+            BinOp::Lt => FloatCC::LessThan,
+            BinOp::Le => FloatCC::LessThanOrEqual,
+            BinOp::Gt => FloatCC::GreaterThan,
+            BinOp::Ge => FloatCC::GreaterThanOrEqual,
+            other => unreachable!("the checker refuses `{other:?}` on `float`"),
+        };
+        // `fcmp` already yields the `i8` a `bool` is here, exactly as
+        // `icmp` does at the end of `binary` -- no widening.
+        self.builder.ins().fcmp(cc, a, b)
+    }
+
     fn binary(&mut self, op: BinOp, a: Value, b: Value) -> Value {
+        // `docs/floating-point.md` §2: IEEE-754 binary64, which is a
+        // different instruction for every operator. The checker has
+        // already agreed the two sides, so one of them decides.
+        if self.builder.func.dfg.value_type(a) == types::F64 {
+            return self.float_binary(op, a, b);
+        }
         let cc = match op {
             // `int` is 64-bit two's complement and arithmetic on it is
             // *checked*: a result that does not fit traps rather than

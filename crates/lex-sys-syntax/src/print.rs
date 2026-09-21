@@ -472,6 +472,7 @@ impl Printer<'_> {
             Expr::Int(value) => value.to_string(),
             Expr::Bool(value) => value.to_string(),
             Expr::Str(text) => format!("\"{}\"", escape(text)),
+            Expr::Float(bits) => float_literal(*bits),
             Expr::Name(name) => self.name(*name).to_owned(),
             Expr::StructLit { name, qualifier, fields } => {
                 let head = self.qualified(*qualifier, *name);
@@ -613,6 +614,20 @@ fn operator(op: BinOp) -> &'static str {
 
 fn parenthesise(text: String, context: u8, own: u8) -> String {
     if own < context { format!("({text})") } else { text }
+}
+
+/// Render a float literal so it parses back to the same bits.
+///
+/// Rust's `Display` for `f64` is the shortest decimal that round-trips,
+/// which is exactly the contract a canonical form needs. It prints `1`
+/// for `1.0` though, and `1` is an *integer* literal here — so a value
+/// with no `.` and no `e` gets `.0` appended. The sign is handled by the
+/// parser, which reads `-1.5` as one literal
+/// (`docs/floating-point.md` §1).
+fn float_literal(bits: u64) -> String {
+    let value = f64::from_bits(bits);
+    let rendered = format!("{value}");
+    if rendered.contains(['.', 'e', 'E']) { rendered } else { format!("{rendered}.0") }
 }
 
 /// Put a literal's escapes back.

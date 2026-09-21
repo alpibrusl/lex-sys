@@ -1,4 +1,4 @@
-//~ ERROR expected `int`, found `byte`
+//~ ERROR `byte` has no arithmetic (`int` and `float` do)
 
 // `docs/strings.md` §2: a `byte` is *storage*, not arithmetic.
 //

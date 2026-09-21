@@ -2856,3 +2856,67 @@ fn purity_is_the_row_plus_what_a_reference_may_do() {
         );
     }
 }
+
+/// `docs/floating-point.md` §4 — `truncate` traps exactly where C is
+/// undefined.
+///
+/// NaN, both infinities, and any magnitude at or past `2^63`. C says the
+/// behaviour is undefined; this says the process stops, which is §2.1's
+/// rule applying where it belongs — the result would be a number, and
+/// there is no number it could honestly be.
+///
+/// Not reject fixtures, for `slicing.md` §8's reason: a trapping program
+/// is one that compiled.
+#[test]
+fn truncate_traps_where_c_is_undefined() {
+    let scratch = scratch("float-truncate");
+    // (expression, does it trap)
+    let cases = [
+        ("0.0 / 0.0", true),
+        ("1.0 / 0.0", true),
+        ("0.0 - 1.0 / 0.0", true),
+        ("1.0e30", true),
+        ("-1.0e30", true),
+        // `2^63` is about 9.223e18, so this is inside and that is not.
+        ("9.0e18", false),
+        ("1.0e19", true),
+        ("0.0", false),
+        ("-2.7", false),
+    ];
+
+    for (index, (expression, traps)) in cases.iter().enumerate() {
+        let source = format!(
+            "fn main(world: World) -> [] int {{\n\
+             \x20   let Split {{ io, ffi, fs, heap, args }} = split(world);\n\
+             \x20   release(args); release(heap); release(fs); release(ffi); release(io);\n\
+             \x20   var seen = truncate({expression});\n\
+             \x20   if seen == 12345 {{ seen = 0; }}\n\
+             \x20   return 0;\n\
+             }}\n"
+        );
+        let path = scratch.join(format!("t{index}.ls"));
+        std::fs::write(&path, &source).expect("a writable fixture");
+        let exe = scratch.join(format!("t{index}"));
+        let build = Command::new(BIN)
+            .args(["build".as_ref(), path.as_os_str(), "-o".as_ref(), exe.as_os_str()])
+            .output()
+            .expect("the compiler runs");
+        assert!(
+            build.status.success(),
+            "`truncate({expression})` should compile — the value is a runtime one:\n{}",
+            String::from_utf8_lossy(&build.stderr)
+        );
+        let run = Command::new(&exe).output().expect("the program runs");
+        if *traps {
+            assert_eq!(
+                run.status.code(),
+                None,
+                "`truncate({expression})` should be killed by a signal, not exit"
+            );
+        } else {
+            assert_eq!(run.status.code(), Some(0), "`truncate({expression})` should not trap");
+        }
+    }
+
+    let _ = std::fs::remove_dir_all(&scratch);
+}

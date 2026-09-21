@@ -192,6 +192,15 @@ pub enum Expr {
     /// An integer literal, already parsed: the AST stores the value, not the
     /// spelling, so `007` and `7` are the same node.
     Int(i64),
+    /// A floating-point literal, stored as its **bits** rather than as an
+    /// `f64` (`docs/floating-point.md` §1).
+    ///
+    /// Two reasons, and either alone would decide it. `f64` is not `Eq`,
+    /// and this tree is compared and hashed. And the bit pattern *is* the
+    /// value a canonical AST should keep (`canonical-ast.md` §3): `0.0`
+    /// and `-0.0` compare equal and behave differently, so they are two
+    /// literals and hash as two.
+    Float(u64),
     Bool(bool),
     /// A string literal, which exists only to be *read by the checker*.
     ///

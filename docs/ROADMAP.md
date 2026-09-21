@@ -55,10 +55,11 @@ reasoning — this table is the index, not the argument.
 | [#44](https://github.com/alpibrusl/lex-sys/pull/44) | [A port with resources](porting.md#9-the-second-port-sort) | `LC_ALL=C sort`, five owned resources on the heap, checked against GNU. Answered §6's four untested things: the move loop costs three tokens rather than difficulty, effects concentrate at the edges (four of eight rows are `[]`), and `borrow mut` never got in the way — five nested blocks did. Found **four** missing library functions, every one absent because nothing had asked |
 | [#45](https://github.com/alpibrusl/lex-sys/pull/45) | [Against C and Rust](against-c-and-rust.md) | The measurement `overflow-cost.md` §4 said was owed: **1.6× at equal semantics**, on both a compute-bound and a memory-bound kernel, with Rust within 4% of C — so the gap is the backend, not ownership. And the numerical row: f64 is **17% slower** than the fixed point lex-sys is forced into, so the missing `float` costs precision (10 orders of magnitude) rather than speed |
 | [#46](https://github.com/alpibrusl/lex-sys/pull/46) | [What a checked row is worth](purity.md) | The answer to *is there anything it does better?* — **yes, exactly one thing**: the row is a checked purity proof, which C can only promise unchecked and Rust cannot state. 35% of functions here qualify; worth **1.94×** as CSE and **158×** with hoisting. Collected by nothing: Cranelift has no call attribute, and an own optimiser is a non-goal — now an *informed* one |
+| [#48](https://github.com/alpibrusl/lex-sys/pull/48) | [Floating point](floating-point.md) | `float`, IEEE-754 binary64 in full. The interesting decision is §2.1: NaN and infinity do **not** trap, because wrapping lies about a value where NaN announces the absence of one — and a per-operation trap would defeat exactly the loops floats are for. `truncate` traps on what C leaves undefined. Writing it found a real collision the design had waved away: `t.0.1` |
 
 ### The pattern, if there is one
 
-Sixteen of these twenty-four slices found a bug, falsified a claim the
+Seventeen of these twenty-five slices found a bug, falsified a claim the
 project had already written down, or both — and three of those were
 soundness bugs reachable from ordinary code. That is not an accident of luck: each
 slice is built by writing the thing the previous document said was
@@ -87,7 +88,8 @@ caught before the project did.
 
 | Next | Why it is next |
 |---|---|
-| `float` | `against-c-and-rust.md` §4 turned this from a gap into an argued one: it buys **expressiveness, not speed** — f64 was 17% slower than fixed point on the kernel measured — and what it costs today is ten orders of magnitude of precision. The design question left is which of IEEE-754's corners this language defines rather than inherits |
+| Printing a `float` | `floating-point.md` §7, and it is what makes the type awkward rather than incomplete: `examples/newton.ls` reports every number through `truncate` and a scale factor. Shortest round-trip decimal is a paper, and the wrong version prints `0.1` as `0.1000000000000000055511151231257827` |
+| `std.math` over floats | `sqrt`, `sin`, `exp` — each either a libc call gated by `Ffi`, which would make arithmetic need a capability, or an implementation with its own error analysis. The capability question comes first |
 | File handles | `porting.md` §9.1 put a program behind `filesystem.md` §3's own deferral. Reading a file of unknown size currently means reading it repeatedly — 1.2 MB is read six times — because `fs_read` cannot report truncation and there is nothing to hold open. §3 says a handle is "a milestone, not a paragraph", and it is the milestone a real program is now waiting on |
 | Effect polymorphism | A function generic over the *row* it performs. Named nowhere yet, and much larger than anything above |
 

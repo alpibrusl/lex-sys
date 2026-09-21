@@ -197,6 +197,26 @@ way on purpose.
 
 ## Libraries
 
+### `newton.ls` — a method fixed point could not carry
+
+Newton's method for √2, five steps, reporting the residual `|x² - 2|`
+after each.
+
+Read the numbers rather than the code. Q16.16 — the fixed point this
+language forced before `float` — resolves 1.526e-5, and **step 3's
+residual is already below that**, so the last three steps are invisible
+to the representation the language used to have.
+
+The honest detail is that the residual stops at 4.44e-16 rather than
+zero: √2 is not representable in binary64, so the iteration settles on
+the nearest value that is. A method that *converged* and a method that
+reached the answer are different things, and this is where the
+difference becomes visible.
+
+It also shows what `floating-point.md` §7 admits is missing: every number
+here is printed through `truncate` and a scale factor, because printing a
+float is still an open question.
+
 ### `base64/` — a program that did not start here
 
 GNU coreutils' `base64`, ported and checked against it: the conformance
