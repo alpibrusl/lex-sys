@@ -280,6 +280,7 @@ fn printing_preserves_every_identity_and_is_idempotent() {
         "benches",
         "examples/base64",
         "examples/sort",
+        "benches/three",
         // The standard library is code, and gets the same contract every
         // other file here gets: printed, reparsed, identical hashes, and
         // a fixed point.
@@ -2579,4 +2580,136 @@ fn sort_agrees_with_gnu_sort() {
     }
 
     let _ = std::fs::remove_dir_all(&scratch);
+}
+
+/// `benches/three/` — every build still computes the same answer.
+///
+/// `docs/against-c-and-rust.md` compares lex-sys to C and Rust on the
+/// same algorithm, and the comparison means nothing unless the three
+/// sources really are the same algorithm. Each prints a checksum; this
+/// checks they agree.
+///
+/// **Not a timing gate.** Wall-clock in CI is noise, and
+/// `scripts/three.py` is where the numbers come from. This runs each
+/// build once, so a drifted translation is a red build rather than a
+/// quietly wrong table.
+///
+/// The C and Rust halves are skipped when their compilers are not on the
+/// path. The lex-sys halves always run.
+#[test]
+fn the_three_language_benchmarks_agree() {
+    let dir = repo_root().join("benches").join("three");
+    let scratch = scratch("three");
+
+    /// Build, run once, and hand back what it printed.
+    fn checksum(exe: &Path) -> String {
+        let run = Command::new(exe).output().expect("the benchmark runs");
+        assert_eq!(run.status.code(), Some(0), "`{}` exited badly", exe.display());
+        String::from_utf8_lossy(&run.stdout).trim().to_owned()
+    }
+
+    let cc = ["cc", "clang", "gcc"].into_iter().find(|c| which(c));
+    let have_rustc = which("rustc");
+
+    // (lex-sys source, C source, Rust source, extra C flags)
+    let groups: [(&str, &str, &str, &[&str]); 2] = [
+        ("mandelbrot.ls", "mandelbrot.c", "mandelbrot.rs", &["-DCHECKED=1"]),
+        ("sieve.ls", "sieve.c", "sieve.rs", &[]),
+    ];
+
+    for (index, (ours, in_c, in_rust, flags)) in groups.iter().enumerate() {
+        let exe = scratch.join(format!("ls{index}"));
+        let build = Command::new(BIN)
+            .args([
+                "build".as_ref(),
+                dir.join(ours).as_os_str(),
+                "--std".as_ref(),
+                "-o".as_ref(),
+                exe.as_os_str(),
+            ])
+            .output()
+            .expect("the compiler runs");
+        assert!(
+            build.status.success(),
+            "`{ours}` should compile, but the compiler said:\n{}",
+            String::from_utf8_lossy(&build.stderr)
+        );
+        let expected = checksum(&exe);
+        assert!(!expected.is_empty(), "`{ours}` printed no checksum");
+
+        if let Some(cc) = cc {
+            let exe = scratch.join(format!("c{index}"));
+            let build = Command::new(cc)
+                .args(["-O2"])
+                .args(*flags)
+                .arg(dir.join(in_c))
+                .arg("-o")
+                .arg(&exe)
+                .output()
+                .expect("the C compiler runs");
+            assert!(
+                build.status.success(),
+                "`{in_c}` should compile:\n{}",
+                String::from_utf8_lossy(&build.stderr)
+            );
+            assert_eq!(checksum(&exe), expected, "`{in_c}` disagrees with `{ours}`");
+        }
+
+        if have_rustc {
+            let exe = scratch.join(format!("rs{index}"));
+            let build = Command::new("rustc")
+                .args(["-O", "-Coverflow-checks=on"])
+                .arg(dir.join(in_rust))
+                .arg("-o")
+                .arg(&exe)
+                .output()
+                .expect("rustc runs");
+            assert!(
+                build.status.success(),
+                "`{in_rust}` should compile:\n{}",
+                String::from_utf8_lossy(&build.stderr)
+            );
+            assert_eq!(checksum(&exe), expected, "`{in_rust}` disagrees with `{ours}`");
+        }
+    }
+
+    // The f64 pair has no lex-sys half — that is §4's whole point — so the
+    // two of them are checked against each other.
+    if let (Some(cc), true) = (cc, have_rustc) {
+        let in_c = scratch.join("cf64");
+        let in_rust = scratch.join("rsf64");
+        assert!(
+            Command::new(cc)
+                .args(["-O2"])
+                .arg(dir.join("mandelbrot_f64.c"))
+                .arg("-o")
+                .arg(&in_c)
+                .status()
+                .expect("the C compiler runs")
+                .success()
+        );
+        assert!(
+            Command::new("rustc")
+                .arg("-O")
+                .arg(dir.join("mandelbrot_f64.rs"))
+                .arg("-o")
+                .arg(&in_rust)
+                .status()
+                .expect("rustc runs")
+                .success()
+        );
+        assert_eq!(
+            checksum(&in_c),
+            checksum(&in_rust),
+            "the two f64 builds disagree, so §4's precision figure is not what it says"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&scratch);
+}
+
+/// Is `name` an executable on `PATH`?
+fn which(name: &str) -> bool {
+    std::env::var_os("PATH")
+        .is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join(name).is_file()))
 }

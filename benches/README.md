@@ -39,6 +39,32 @@ are known to be the same program.
 | `fib` | calls and returns | Arithmetic looks different when the frame pointer is the bottleneck |
 | `reduce.c` | — | The same guarantee given to a mature backend, which is how we know the cost is the semantics rather than Cranelift |
 
+## Against C and Rust
+
+`benches/three/` is a different comparison: the same algorithm written in
+lex-sys, C and Rust, to answer what `docs/overflow-cost.md` §4 said this
+repository owed and had not measured.
+
+```sh
+python3 scripts/three.py
+```
+
+Three rules make it a language comparison rather than an implementation
+one — the same algorithm line for line, the same semantics (Rust is built
+both wrapping and trapping), and the same answer, with the harness
+refusing to report a time for builds whose checksums differ.
+
+[`docs/against-c-and-rust.md`](../docs/against-c-and-rust.md) is the
+result. The short version: **1.6× at equal semantics**, with Rust within
+4% of C — so the gap is Cranelift against LLVM rather than the price of
+ownership or effect rows.
+
+`mandelbrot_f64.{c,rs}` is the row lex-sys cannot enter, and it is there
+for §4: double precision turns out to be **17% slower** than the Q16.16
+fixed point lex-sys is forced into, while being ten orders of magnitude
+more precise. The missing `float` is an expressiveness gap, not a speed
+one.
+
 ## Reading a number
 
 The script interleaves the two halves and reports the minimum of nine
