@@ -297,8 +297,24 @@ which is how we know it is the semantics and not the young backend.
 This is where "the ceiling is Rust's" needs a qualifier, and the qualifier
 is real: Rust's release profile *wraps*, so on arithmetic-bound code the
 ceiling is Rust's only if you are comparing against a Rust build that also
-checks. Everywhere else the claim stands, and any larger gap early on is
-implementation maturity rather than language design.
+checks.
+
+**And the gap today is measured, not asserted**
+([`docs/against-c-and-rust.md`](docs/against-c-and-rust.md)). On the same
+algorithm written three times, at the same semantics:
+
+| | Mandelbrot (compute) | sieve (memory) |
+|---|---|---|
+| lex-sys | **1.69×** | **1.56×** |
+| C `-O2` | 1.00× | 1.00× |
+| Rust `-O` | 1.04× | 0.80× |
+
+Rust carries ownership, bounds checks and monomorphisation and pays
+essentially nothing for them, so **the 1.6× is not the price of safety or
+effect rows — it is Cranelift against LLVM.** That makes "any larger gap
+early on is implementation maturity rather than language design" a claim
+with a falsifier: if an LLVM backend lands and the gap stays at 1.6×, it
+was wrong.
 
 ---
 

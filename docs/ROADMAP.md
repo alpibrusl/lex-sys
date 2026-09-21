@@ -53,10 +53,11 @@ reasoning — this table is the index, not the argument.
 | [#42](https://github.com/alpibrusl/lex-sys/pull/42) | [What the overflow trap costs](overflow-cost.md) | The README's *"low single-digit percent"* had never been measured. Measured: +2.8% call-bound, +3.6% memory-bound, **−9.1%** branch-bound, **+40.5%** arithmetic-bound — so not a percentage but a rule. And the stated reason was wrong: not the never-taken branch, but that **a trap is observable, so the loop cannot vectorise** — clang pays 46% and gcc 74% for the same guarantee. Both documents corrected in place |
 | [#43](https://github.com/alpibrusl/lex-sys/pull/43) | [Bits](bitwise.md), and [a port](porting.md) | The first program here that **already existed**: coreutils `base64`, byte-for-byte on both directions. It needed the bit operators and hex literals and *nothing else* — no capability, no library, no change to linearity or rows. And running the suite under load for an unrelated reason found a real bug in `examples/serve/`: one `read` returns what arrived, not what was sent |
 | [#44](https://github.com/alpibrusl/lex-sys/pull/44) | [A port with resources](porting.md#9-the-second-port-sort) | `LC_ALL=C sort`, five owned resources on the heap, checked against GNU. Answered §6's four untested things: the move loop costs three tokens rather than difficulty, effects concentrate at the edges (four of eight rows are `[]`), and `borrow mut` never got in the way — five nested blocks did. Found **four** missing library functions, every one absent because nothing had asked |
+| [#45](https://github.com/alpibrusl/lex-sys/pull/45) | [Against C and Rust](against-c-and-rust.md) | The measurement `overflow-cost.md` §4 said was owed: **1.6× at equal semantics**, on both a compute-bound and a memory-bound kernel, with Rust within 4% of C — so the gap is the backend, not ownership. And the numerical row: f64 is **17% slower** than the fixed point lex-sys is forced into, so the missing `float` costs precision (10 orders of magnitude) rather than speed |
 
 ### The pattern, if there is one
 
-Fourteen of these twenty-two slices found a bug, falsified a claim the
+Fifteen of these twenty-three slices found a bug, falsified a claim the
 project had already written down, or both — and three of those were
 soundness bugs reachable from ordinary code. That is not an accident of luck: each
 slice is built by writing the thing the previous document said was
@@ -85,6 +86,7 @@ caught before the project did.
 
 | Next | Why it is next |
 |---|---|
+| `float` | `against-c-and-rust.md` §4 turned this from a gap into an argued one: it buys **expressiveness, not speed** — f64 was 17% slower than fixed point on the kernel measured — and what it costs today is ten orders of magnitude of precision. The design question left is which of IEEE-754's corners this language defines rather than inherits |
 | File handles | `porting.md` §9.1 put a program behind `filesystem.md` §3's own deferral. Reading a file of unknown size currently means reading it repeatedly — 1.2 MB is read six times — because `fs_read` cannot report truncation and there is nothing to hold open. §3 says a handle is "a milestone, not a paragraph", and it is the milestone a real program is now waiting on |
 | Effect polymorphism | A function generic over the *row* it performs. Named nowhere yet, and much larger than anything above |
 
