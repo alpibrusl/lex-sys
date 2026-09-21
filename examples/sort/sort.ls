@@ -52,16 +52,35 @@ fn read_stdin[&h, &i](heap: &!h Heap, io: &!i Io, text: buffer.Buffer)
 // been truncated -- which is why this doubles and reads again rather than
 // trusting the first answer. §9.1 is about what that costs.
 //
-// Answers -1 if the file could not be read, and the buffer comes back
-// either way: an error is not a reason to leak.
+// Answers -1 if the file could not be read and -2 if it is larger than
+// this can grow to hold. Two codes rather than one because they are two
+// different things to tell a user, and `docs/file-handles.md` §1.2 is
+// what collapsing them cost: a file past the ceiling looked exactly
+// like a typo in a filename.
+//
+// The buffer comes back either way: an error is not a reason to leak.
 fn read_file[&h, &f, &p](heap: &!h Heap, fs: &f Fs(""), path: &p [byte],
     text: buffer.Buffer) -> [heap, fs_read("")] (buffer.Buffer, int) {
     var out = text;
     var capacity = 65536;
     var attempts = 0;
-    // Eight doublings from 64 KiB reaches 16 MiB, which is where this
-    // gives up rather than growing without bound.
-    while attempts < 8 {
+    // Fifteen attempts from 64 KiB reach a largest capacity of 1 GiB:
+    // 65536 * 2^14. The read has to come back *strictly* shorter than
+    // the capacity to be believed, so that is the largest file this can
+    // hold -- and a sort that keeps the whole file in memory has worse
+    // problems past a gigabyte.
+    //
+    // It was eight, which reached 8 MiB, under a comment claiming 16 --
+    // it counted doublings where the loop counts attempts, so the one
+    // place a reader would look for the limit said twice the real one
+    // and `examples/sort/` quietly refused an 8 MiB file.
+    // `docs/file-handles.md` §1.1 is the measurement.
+    //
+    // A ceiling at all, rather than growing until something gives:
+    // `heap.md` says an allocation that fails **traps**, so without one
+    // a file bigger than memory would abort instead of reporting an
+    // error, and a sort should be able to say "too big" out loud.
+    while attempts < 15 {
         var got = 0;
         var scratch = buffer.empty(heap, capacity);
         borrow mut scratch as &!s in {
@@ -86,7 +105,7 @@ fn read_file[&h, &f, &p](heap: &!h Heap, fs: &f Fs(""), path: &p [byte],
         capacity = capacity * 2;
         attempts = attempts + 1;
     }
-    return (out, 0 - 1);
+    return (out, 0 - 2);
 }
 
 // ---------------------------------------------------------------------
@@ -233,7 +252,15 @@ fn main(world: World) -> [] int {
                 while n < arg_count(g) {
                     let (grown, got) = read_file(h, f, arg(g, n), text);
                     text = grown;
-                    if got < 0 {
+                    if got == 0 - 2 {
+                        // Larger than `read_file` can grow to hold. GNU
+                        // has no such case -- it spills to disk -- so
+                        // there is no status of its to match, and this
+                        // takes one of its own rather than hiding
+                        // inside the one for a file that is not there.
+                        status = 3;
+                    }
+                    if got == 0 - 1 {
                         // GNU writes the failing path to standard error
                         // and exits 2. There is no standard error here
                         // yet, so this is the status alone (§9.2).

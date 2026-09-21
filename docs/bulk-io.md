@@ -185,13 +185,62 @@ So the honest shape of this slice:
 
 - The thing §2 called a bug **was** a bug, and it is fixed: no program
   has to buy `Ffi("libc")` to print at a reasonable speed any more.
-- The 12.8× is real, and it is real for *output*. A program whose time
-  is output — `fasta`, `reverse-complement`, anything that formats more
-  than it computes — gets most of it.
+- The 12.8× is real for a loop that does **nothing but write**. What a
+  real program gets is §4.1, and it is much less.
 - A program that also computes gets the output part only, minus what
   the buffer costs. base64 is still **5.9× off coreutils** afterwards,
   which is now a question about the encode loop rather than about
   printing: `benchmarks-game.md` §3's question, not this document's.
+
+### 4.1 A correction: volume written is not time spent writing
+
+An earlier version of this section said the 12.8× *"is real for
+**output**. A program whose time is output — `fasta`,
+`reverse-complement`, anything that formats more than it computes — gets
+most of it."*
+
+`examples/sort/` falsifies that, and it is the fairest test available:
+it already wrote through `io.write_all`, so it moved onto the bulk path
+with **no change to the program at all**. Sorting 9 MB and writing all
+9 MB back out, medians of nine:
+
+| | median |
+|---|---|
+| per-byte `write_all` (pre-#54) | 438.9 ms |
+| bulk `write_all` | **360.1 ms** |
+| GNU `sort` | 62.6 ms |
+
+**1.22×.** A program that writes nine megabytes — as output-heavy by
+*volume* as anything here — got a fifth of one doubling.
+
+The mistake was conflating **how much a program writes** with **how much
+of its time it spends writing**. `sort` writes a lot and spends its time
+merging. Lined up, the three measurements say the same thing:
+
+| | what it does besides write | gain |
+|---|---|---|
+| §1's loop | nothing | **12.8×** |
+| `base64` | a shift and a table lookup per byte | 1.59× |
+| `sort` | a merge sort over 300,000 lines | 1.22× |
+
+So the rule is the dull one: **the gain is the share of the runtime that
+was libc call overhead**, and nothing about writing a lot of bytes makes
+that share large. A program has to be writing bytes it did almost no
+work to produce.
+
+Which leaves `fasta` and `reverse-complement` — named above as the
+programs that would "get most of it" — an open question rather than a
+prediction. `fasta` computes a linear congruential step and a table
+lookup per byte, so it is nearer base64 than §1's loop, and this
+document should not have guessed. `benchmarks-game.md` §2.1 is where
+that gets settled, by measuring.
+
+One thing the numbers do not excuse: `sort` still makes **two libc
+calls per line** on the bulk path, one `fwrite` and one `putchar` for
+the newline. 600,000 calls for 300,000 lines, where a batched buffer
+would make a few thousand. Whether that is worth the buffer-fill cost
+§4 measured is exactly the question base64 answered "barely", and it is
+not this slice's to spend.
 
 ---
 
