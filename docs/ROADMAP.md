@@ -50,12 +50,13 @@ reasoning — this table is the index, not the argument.
 | [#39](https://github.com/alpibrusl/lex-sys/pull/39) | [The authority surface](authority.md) | §12's release question answered **no**: the four `release` calls are not ceremony around the authority declaration, they *are* it — `main` owns rather than borrows, so its row is `[]` and every entry point has the same signature. `lex-sys authority` reads them instead |
 | [#40](https://github.com/alpibrusl/lex-sys/pull/40) | [`[budget]`](budget.md) | Answered **no**, from the units: a budget is wall-clock seconds, commands and **cents**, none of which is a property of a program's text. `lex-os` already charges it, at the boundary that can stop you. What was wanted was legibility, so the authority report grew `--output json` |
 | [#41](https://github.com/alpibrusl/lex-sys/pull/41) | [What a program can reach](reach.md) | Answered by building it: a **REST endpoint over a real TCP socket**, with no socket type, no `Net` capability and no library — because sockets are libc and libc has a name. The no's are one sentence: a foreign *result* is a scalar, so every opaque handle (TLS, libpq, `FILE *`) is out. And the row cannot say `net`, because a library is not an authority domain |
+| [#42](https://github.com/alpibrusl/lex-sys/pull/42) | [What the overflow trap costs](overflow-cost.md) | The README's *"low single-digit percent"* had never been measured. Measured: +2.8% call-bound, +3.6% memory-bound, **−9.1%** branch-bound, **+40.5%** arithmetic-bound — so not a percentage but a rule. And the stated reason was wrong: not the never-taken branch, but that **a trap is observable, so the loop cannot vectorise** — clang pays 46% and gcc 74% for the same guarantee. Both documents corrected in place |
 
 ### The pattern, if there is one
 
-Eleven of these nineteen slices found a bug, falsified a claim the
-project had already written down, or both — and three of those were
-soundness bugs reachable from ordinary code. That is not an accident of luck: each
+Twelve of these twenty slices found a bug, falsified a claim the project
+had already written down, or both — and three of those were soundness
+bugs reachable from ordinary code. That is not an accident of luck: each
 slice is built by writing the thing the previous document said was
 possible, and the documents keep being wrong in the same direction —
 optimistic about what generality the type system already had.
@@ -70,7 +71,11 @@ and #36 corrects `reading-references.md` §2.0 and `sharing.md` §2.1,
 where a refusal turned out to be broader than the hazard it was written
 for; and #41 corrects a refusal that named `()` as a foreign result, in a
 language whose grammar refuses `()` on purpose — two correct rules with a
-loop between them, which only a program walking into it would find.
+loop between them, which only a program walking into it would find; and
+#42 corrects `README.md`'s performance expectation and
+`defined-behaviour.md` §2.1, which had put a number on the overflow trap
+that nobody had ever measured — the one claim here that an outside reader
+caught before the project did.
 
 ---
 
@@ -78,10 +83,11 @@ loop between them, which only a program walking into it would find.
 
 | Next | Why it is next |
 |---|---|
+| Port a real C program | `reach.md` §6 and `overflow-cost.md` §4 both want the same thing for different reasons: a program that already existed, with its own opinions, so the effect rows and the arithmetic cost are reported *in anger* rather than from code written to make a point |
 | Effect polymorphism | A function generic over the *row* it performs. Named nowhere yet, and much larger than anything above |
 
-Ordinary work, blocked by nothing: flag parsing, standard error, and
-`float` — which `reach.md` §6 upgrades from an omission to a named gap,
+Ordinary work, blocked by nothing: `jo` instead of `seto`/`test`/`jne`
+(`overflow-cost.md` §3.4), flag parsing, standard error, and `float` — which `reach.md` §6 upgrades from an omission to a named gap,
 since `std.math` does not yet mean what its name suggests.
 
 Environment variables moved off that list and onto `reach.md`'s: `getenv`

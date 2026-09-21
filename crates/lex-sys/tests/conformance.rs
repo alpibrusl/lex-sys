@@ -275,6 +275,9 @@ fn printing_preserves_every_identity_and_is_idempotent() {
         "examples/slab",
         "examples/modular",
         "examples/serve",
+        // The benchmarks are code too, and the pairs are the place a
+        // careless edit would land without anyone reading it.
+        "benches",
         // The standard library is code, and gets the same contract every
         // other file here gets: printed, reparsed, identical hashes, and
         // a fixed point.
@@ -2140,4 +2143,49 @@ fn the_authority_report_names_the_syscalls_the_row_cannot() {
             "the report should name `{symbol}`:\n{report}"
         );
     }
+}
+
+/// `benches/` — both halves of every pair compute the same answer.
+///
+/// The benchmarks are how `docs/overflow-cost.md` knows what the overflow
+/// trap costs, and the measurement is only meaningful while the two halves
+/// are the same program. Each one returns `result - expected`, so a
+/// non-zero exit is a wrong answer — which is what this checks.
+///
+/// **Not a timing gate.** Wall-clock in CI is noise, and a benchmark that
+/// fails the build when a runner is busy teaches people to ignore it.
+/// `scripts/bench.py` is where the numbers come from; this is only here so
+/// a refactor cannot quietly make the two halves disagree.
+#[test]
+fn every_benchmark_pair_agrees() {
+    let dir = repo_root().join("benches");
+    let scratch = scratch("benches");
+    let mut pairs = 0;
+
+    for name in ["sum", "sieve", "scan", "fib"] {
+        for half in ["checked", "wrapping"] {
+            let source = dir.join(format!("{name}_{half}.ls"));
+            let exe = scratch.join(format!("{name}_{half}"));
+            let build = Command::new(BIN)
+                .args(["build".as_ref(), source.as_os_str(), "-o".as_ref(), exe.as_os_str()])
+                .output()
+                .expect("the compiler runs");
+            assert!(
+                build.status.success(),
+                "`{name}_{half}` should compile, but the compiler said:\n{}",
+                String::from_utf8_lossy(&build.stderr)
+            );
+
+            let run = Command::new(&exe).output().expect("the benchmark runs");
+            assert_eq!(
+                run.status.code(),
+                Some(0),
+                "`{name}_{half}` computed the wrong answer (it exits with its error)"
+            );
+        }
+        pairs += 1;
+    }
+
+    assert_eq!(pairs, 4, "every pair in `benches/` should be covered here");
+    let _ = std::fs::remove_dir_all(&scratch);
 }

@@ -63,8 +63,23 @@ A checksum that wraps is doing arithmetic; a balance that wraps is a bug that
 will be found somewhere else, later, by someone else.
 
 The cost is real and is paid on purpose: every addition is a checked
-addition. A branch that is never taken is close to free on both targets, and
-"close to free" is the right price for an answer that is always right.
+addition.
+
+> **This paragraph used to say "a branch that is never taken is close to
+> free on both targets, and 'close to free' is the right price for an
+> answer that is always right."** The first half is true and the second
+> half was a guess. Measured (`docs/overflow-cost.md`): the branch costs
+> 2.8% where calls dominate and 3.6% where memory does — close to free,
+> as claimed. But an arithmetic-bound reduction pays **40%**, and not
+> because of the branch: a trap is observable, so the additions cannot be
+> reassociated, so the loop cannot vectorise. The same guarantee costs
+> clang 46% and gcc 74% on the same loop, which is how we know it is the
+> semantics rather than the backend.
+
+None of that changes the argument above — a silently wrong answer still
+propagates where a stopped process does not — but the price is a range
+with a rule attached, not a number: **it is whether arithmetic is on the
+critical path.** §2.2 exists for the loops where it is.
 
 ### 2.2 Wrapping is spelled out
 

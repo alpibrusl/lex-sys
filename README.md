@@ -253,14 +253,35 @@ the function's contract.
 
 ## Performance expectation
 
-The ceiling is Rust's. Linearity and effects are erased at compile time;
-generics monomorphise; an LLVM backend inherits rustc's own optimiser.
-Linearity can hand the optimiser *stronger* aliasing facts than `&mut` does,
-and known purity enables reordering Rust can't justify. The one structural
-cost is defining away UB — principally integer-overflow semantics — worth a
-low single-digit percent.
+Linearity and effects are erased at compile time; generics monomorphise; an
+LLVM backend inherits rustc's own optimiser. Linearity can hand the optimiser
+*stronger* aliasing facts than `&mut` does, and known purity enables
+reordering Rust can't justify.
 
-Any larger gap early on is implementation maturity, not language design.
+The one structural cost is defining away UB — principally integer-overflow
+semantics — and it has now been **measured** rather than estimated
+([`docs/overflow-cost.md`](docs/overflow-cost.md)):
+
+| what dominates the loop | checked arithmetic costs |
+|---|---|
+| calls and returns | +2.8% |
+| memory and cache | +3.6% |
+| comparisons and branches | −9.1% (checked was *faster*) |
+| arithmetic, nothing else | **+40.5%** |
+
+So it is not a percentage, it is a rule: **the cost is whether arithmetic is
+on the critical path.** For most systems code it is not, and the price is
+the low single digits this file used to promise across the board. For a
+tight reduction it is large, and the reason is not the never-taken branch —
+it is that a trap is observable, so the loop cannot vectorise. Measured in C
+at `-O2`, the same guarantee costs clang 46% and gcc 74% on the same shape,
+which is how we know it is the semantics and not the young backend.
+
+This is where "the ceiling is Rust's" needs a qualifier, and the qualifier
+is real: Rust's release profile *wraps*, so on arithmetic-bound code the
+ceiling is Rust's only if you are comparing against a Rust build that also
+checks. Everywhere else the claim stands, and any larger gap early on is
+implementation maturity rather than language design.
 
 ---
 
@@ -344,6 +365,8 @@ std/                     the standard library, as Lex source
 examples/                programs meant to be read
 tests/accept             fixtures that must compile and run
 tests/reject             fixtures that must be refused, each stating why
+benches/                 checked/wrapping pairs; what the overflow trap costs
+scripts/bench.py         runs them and prints the table
 docs/                    design documents
 ```
 
