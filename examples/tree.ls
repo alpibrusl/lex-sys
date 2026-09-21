@@ -54,14 +54,14 @@ struct Walk {
 // Console
 // ---------------------------------------------------------------------
 
-fn print_nat[&i](io: &!i Io, n: int) -> [io] int {
+fn print_nat[&i](io: &!i Io, n: int) -> [io_write] int {
     if n >= 10 {
         print_nat(io, n / 10);
     }
     return putchar(io, 48 + n % 10);
 }
 
-fn write_all[&r, &i](io: &!i Io, s: &r [byte]) -> [io] int {
+fn write_all[&r, &i](io: &!i Io, s: &r [byte]) -> [io_write] int {
     var n = 0;
     while n < len(s) {
         putchar(io, int_of(s[n]));
@@ -180,7 +180,7 @@ fn tally[&t](tree: &t Tree) -> [] Walk {
 // frees each node and yields what it held, and the recursion does the same
 // to that. Exactly one `free` per node, and the checker is what guarantees
 // it.
-fn drain[&h, &i](heap: &!h Heap, io: &!i Io, t: Tree, first: bool) -> [heap, io] Walk {
+fn drain[&h, &i](heap: &!h Heap, io: &!i Io, t: Tree, first: bool) -> [heap, io_write] Walk {
     match t {
         Tree::Leaf => {
             return Walk { sum: 0, count: 0, depth: 0 };
@@ -210,7 +210,7 @@ fn drain[&h, &i](heap: &!h Heap, io: &!i Io, t: Tree, first: bool) -> [heap, io]
     }
 }
 
-fn run[&h, &i](heap: &!h Heap, io: &!i Io) -> [heap, io] int {
+fn run[&h, &i](heap: &!h Heap, io: &!i Io) -> [heap, io_write] int {
     var tree = Tree::Leaf;
     tree = insert(heap, tree, 5);
     tree = insert(heap, tree, 3);

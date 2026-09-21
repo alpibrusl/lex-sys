@@ -12,18 +12,18 @@
 //~ STDOUT checked: 6
 //~ EXIT 0
 
-fn space[&i](io: &!i Io) -> [io] int {
+fn space[&i](io: &!i Io) -> [io_write] int {
     return putchar(io, 32);
 }
 
-fn print_nat[&i](io: &!i Io, n: int) -> [io] int {
+fn print_nat[&i](io: &!i Io, n: int) -> [io_write] int {
     if n >= 10 {
         print_nat(io, n / 10);
     }
     return putchar(io, 48 + n % 10);
 }
 
-fn digit[&i](io: &!i Io, b: bool) -> [io] int {
+fn digit[&i](io: &!i Io, b: bool) -> [io_write] int {
     if b {
         return putchar(io, 49);
     }
@@ -41,7 +41,7 @@ fn lowest() -> [] int {
     return 0 - 9223372036854775807 - 1;
 }
 
-fn run[&i](io: &!i Io) -> [io] int {
+fn run[&i](io: &!i Io) -> [io_write] int {
     putchar(io, 119); putchar(io, 114); putchar(io, 97); putchar(io, 112);
     putchar(io, 112); putchar(io, 101); putchar(io, 100); putchar(io, 58);
     space(io);                                                  // "wrapped: "

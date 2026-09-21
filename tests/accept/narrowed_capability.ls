@@ -6,7 +6,7 @@
 // one that names something — there is no other constructor, exactly as
 // there is none for `Io` (§8.2).
 //
-// Read `magnitude`'s row. `[ffi("libc"), io]` is the whole story of that
+// Read `magnitude`'s row. `[ffi("libc"), io_write]` is the whole story of that
 // function: it calls into one named library and it writes to the console,
 // and a caller that holds neither capability cannot reach it.
 //~ STDOUT 7
@@ -18,7 +18,7 @@ extern fn labs[&f](ffi: &f Ffi("libc"), n: int) -> [ffi("libc")] int;
 
 // Borrows both capabilities, so it declares both. The row is sorted by the
 // label's text, which is why `ffi("libc")` comes first however it is written.
-fn magnitude[&f, &i](ffi: &f Ffi("libc"), io: &!i Io, n: int) -> [io, ffi("libc")] int {
+fn magnitude[&f, &i](ffi: &f Ffi("libc"), io: &!i Io, n: int) -> [io_write, ffi("libc")] int {
     let size = labs(ffi, n);
     putchar(io, 48 + size);
     putchar(io, 10);

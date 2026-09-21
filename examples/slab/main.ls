@@ -33,7 +33,7 @@
 //     lex-sys build examples/slab/main.ls examples/slab/slab.ls -o slab
 //     ./slab
 
-fn write_all[&r, &i](io: &!i Io, s: &r [byte]) -> [io] int {
+fn write_all[&r, &i](io: &!i Io, s: &r [byte]) -> [io_write] int {
     var n = 0;
     while n < len(s) {
         putchar(io, int_of(s[n]));
@@ -42,14 +42,14 @@ fn write_all[&r, &i](io: &!i Io, s: &r [byte]) -> [io] int {
     return len(s);
 }
 
-fn print_nat[&i](io: &!i Io, n: int) -> [io] int {
+fn print_nat[&i](io: &!i Io, n: int) -> [io_write] int {
     if n >= 10 {
         print_nat(io, n / 10);
     }
     return putchar(io, 48 + n % 10);
 }
 
-fn show[&i](io: &!i Io, f: Found) -> [io] int {
+fn show[&i](io: &!i Io, f: Found) -> [io_write] int {
     match f {
         Found::Missing => {
             write_all(io, "missing");
@@ -63,7 +63,7 @@ fn show[&i](io: &!i Io, f: Found) -> [io] int {
 }
 
 // Look one handle up, say what came back, and hand the slab on.
-fn probe[&i](io: &!i Io, s: Slab, g: Gen, label: &static [byte]) -> [io] Slab {
+fn probe[&i](io: &!i Io, s: Slab, g: Gen, label: &static [byte]) -> [io_write] Slab {
     write_all(io, label);
     let (slab, found) = look(s, g);
     show(io, found);
@@ -84,7 +84,7 @@ fn probe[&i](io: &!i Io, s: Slab, g: Gen, label: &static [byte]) -> [io] Slab {
 // one before it. Rebinding it over a live slab is still a leak and still
 // refused (`docs/shadowing.md` §3.3). The linearity is unchanged; only
 // the names are gone.
-fn run[&h, &i](heap: &!h Heap, io: &!i Io) -> [heap, io] int {
+fn run[&h, &i](heap: &!h Heap, io: &!i Io) -> [heap, io_write] int {
     let slab = new_slab(heap, 4);
 
     let (slab, first) = insert(slab, 7);

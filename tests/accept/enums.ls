@@ -29,13 +29,13 @@ fn describe(s: Shape) -> [] int {
     }
 }
 
-fn digits[&i](io: &!i Io, n: int) -> [io] int {
+fn digits[&i](io: &!i Io, n: int) -> [io_write] int {
     putchar(io, 48 + n / 10);
     putchar(io, 48 + n % 10);
     return n;
 }
 
-fn run[&i](io: &!i Io) -> [io] int {
+fn run[&i](io: &!i Io) -> [io_write] int {
     digits(io, area(Shape::Empty));            // 00
     digits(io, area(Shape::Circle(2)));        // 12
     digits(io, area(Shape::Rect(4, 5)));       // 20

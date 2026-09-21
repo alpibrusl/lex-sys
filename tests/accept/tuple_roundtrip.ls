@@ -20,14 +20,14 @@ fn sum[&p](pair: &p (int, int)) -> [] int {
     return pair.0 + pair.1;
 }
 
-fn print_nat[&i](io: &!i Io, n: int) -> [io] int {
+fn print_nat[&i](io: &!i Io, n: int) -> [io_write] int {
     if n >= 10 {
         print_nat(io, n / 10);
     }
     return putchar(io, 48 + n % 10);
 }
 
-fn write_all[&r, &i](io: &!i Io, s: &r [byte]) -> [io] int {
+fn write_all[&r, &i](io: &!i Io, s: &r [byte]) -> [io_write] int {
     var n = 0;
     while n < len(s) {
         putchar(io, int_of(s[n]));

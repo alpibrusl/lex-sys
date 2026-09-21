@@ -21,7 +21,7 @@ enum List {
     Cons(int, Box[List]),
 }
 
-fn print_nat[&i](io: &!i Io, n: int) -> [io] int {
+fn print_nat[&i](io: &!i Io, n: int) -> [io_write] int {
     if n >= 10 {
         print_nat(io, n / 10);
     }
@@ -40,7 +40,7 @@ fn push[&h](heap: &!h Heap, rest: List, value: int) -> [heap] List {
 // `rest` is the box the match produced. `unbox` frees that node and yields
 // the tail, and the recursion does the same to it -- exactly one `free` per
 // node, guaranteed by the checker rather than by a convention or a test.
-fn drain[&h, &i](heap: &!h Heap, io: &!i Io, list: List, first: bool) -> [heap, io] int {
+fn drain[&h, &i](heap: &!h Heap, io: &!i Io, list: List, first: bool) -> [heap, io_write] int {
     match list {
         List::Empty => { return 0; }
         List::Cons(value, rest) => {
@@ -54,7 +54,7 @@ fn drain[&h, &i](heap: &!h Heap, io: &!i Io, list: List, first: bool) -> [heap, 
     }
 }
 
-fn run[&h, &i](heap: &!h Heap, io: &!i Io) -> [heap, io] int {
+fn run[&h, &i](heap: &!h Heap, io: &!i Io) -> [heap, io_write] int {
     var list = List::Empty;
     list = push(heap, list, 5);
     list = push(heap, list, 1);

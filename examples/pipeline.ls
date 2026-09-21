@@ -58,18 +58,18 @@ fn cancel(j: Job) -> [] int {
 }
 
 // ------------------------------------------------------------- output -----
-// Every one of these declares `[io]` and takes an `&!i Io` it did not create.
+// Every one of these declares `[io_write]` and takes an `&!i Io` it did not create.
 // Reading the row and reading the parameter list are the same act.
 
-fn space[&i](io: &!i Io) -> [io] int {
+fn space[&i](io: &!i Io) -> [io_write] int {
     return putchar(io, 32);
 }
 
-fn newline[&i](io: &!i Io) -> [io] int {
+fn newline[&i](io: &!i Io) -> [io_write] int {
     return putchar(io, 10);
 }
 
-fn print_nat[&i](io: &!i Io, n: int) -> [io] int {
+fn print_nat[&i](io: &!i Io, n: int) -> [io_write] int {
     if n >= 10 {
         print_nat(io, n / 10);
     }
@@ -112,7 +112,7 @@ fn admit[&t](job: Job, tally: &!t Tally, budget: int) -> [] int {
 // ---------------------------------------------------------------- run -----
 // The row says everything this does: it reaches libc, and it prints. It can
 // do nothing else, because it was handed nothing else.
-fn run[&f, &i](libc: &f Ffi("libc"), io: &!i Io, budget: int) -> [io, ffi("libc")] int {
+fn run[&f, &i](libc: &f Ffi("libc"), io: &!i Io, budget: int) -> [io_write, ffi("libc")] int {
     var headroom = 0;
     var done = 0;
     var dropped = 0;

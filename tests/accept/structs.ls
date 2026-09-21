@@ -17,7 +17,7 @@ fn shift(p: Point, by: int) -> [] Point {
     return Point { x: p.x + by, y: p.y + by };
 }
 
-fn run[&i](io: &!i Io) -> [io] int {
+fn run[&i](io: &!i Io) -> [io_write] int {
     let a = Point { x: 1, y: 2 };
     let b = shift(a, 3);
     let l = Line { from: a, to: b, dashed: false };

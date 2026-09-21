@@ -157,8 +157,21 @@ and requires every hash to survive.
 > [`docs/shadowing.md`](docs/shadowing.md), and it finishes
 > `sharing.md` §4's list.
 >
-> **Still missing:** standard input, and a standard library. Do not
-> mistake this for a usable language yet.
+> **And it reads standard input.** `getchar` is the mirror of `putchar`:
+> one byte in, behind the capability that authorises it, `-1` at the end.
+> What is worth reading is that it is **not a seventh capability**. `Fs`
+> is one capability with two labels, `fs_read` and `fs_write`, because
+> reading a file and writing one are the same authority used in two
+> directions and the *row* says which. The console is the same shape — so
+> `Io` gains `io_read`, and `putchar`'s label becomes `io_write`. A
+> function declaring `[io_write]` may not read, and the refusal names the
+> label it is missing; without that the two labels would be a spelling
+> rather than a distinction. `examples/tally.ls` is `wc` over a pipe,
+> which is the program that could not be written before. That is
+> [`docs/standard-input.md`](docs/standard-input.md).
+>
+> **Still missing:** a standard library. Do not mistake this for a usable
+> language yet.
 
 ## What this is
 
@@ -367,6 +380,18 @@ cargo run -p lex-sys -- run examples/wordfreq/main.ls \
 # the 3
 ```
 
+`examples/tally.ls` is `wc` over **standard input** — the same counts,
+from a pipe rather than from a document compiled in. Worth reading for
+`count`'s row: `[io_read, io_write]` says in the signature that the
+function consumes the program's input as well as writing to the console,
+and a caller learns both without opening the body.
+
+```sh
+printf 'the quick brown fox\njumps over\nthe lazy dog\n' \
+    | cargo run -p lex-sys -- run examples/tally.ls
+#      3      9     44
+```
+
 `examples/wordcount.ls` is `wc` over an embedded document — the first
 program here that is mostly text processing rather than demonstration, with
 a whole-word search that is two slices compared a byte at a time, which is
@@ -386,7 +411,8 @@ capabilities, narrowing, capability-gated foreign calls, arenas, checked
 arithmetic, slices, strings, file IO through a path-carrying capability, a
 general heap with recursive types, boxed slices and the growable buffers
 they allow, reading through references — `*r` and `match` on a reference —
-tuples, the command line, and programs spread over several files.
+tuples, the command line, standard input, and programs spread over several
+files.
 
 ```
 res struct Ticket { serial: int }
@@ -620,8 +646,16 @@ survives for the program that was actually dangerous. It is checked at
 replay rather than in the parser, because whether a binding is dead is a
 fact about the trace. One must-reject fixture was retired to it.
 
-**What does not, yet:** standard input, a standard library, `import`,
-namespaces and visibility, flag parsing, and environment variables. All
+Standard input came last, and the interesting part was where it went.
+The obvious move is a seventh capability and an eighth field on `Split`;
+the right one is a second *label* on `Io`, because `Fs` already answers
+this question — one capability, two directions, one label each, and the
+row says which. So `putchar`'s effect is `io_write` now and reading is
+`io_read`, a rename across 53 files that had to happen with the feature
+rather than after it. `examples/tally.ls` is `wc` over a pipe.
+
+**What does not, yet:** a standard library, `import`, namespaces and
+visibility, flag parsing, environment variables, and standard error. All
 of them are now ordinary work rather than blocked work, which is the
 difference these changes made.
 
@@ -687,6 +721,7 @@ carry them exists now, while it is cheap.
 | [`docs/sharing.md`](docs/sharing.md) | §9's escape hatches as built: why `Rc` needs a copyable pointer this language does not have, why `Gen` does not, and what a linear library costs to write | **settled and built, and it corrects `linearity-and-effects.md` §9** — three reject fixtures for the three ways `Rc` fails; `examples/slab/` is the one that works |
 | [`docs/tuples.md`](docs/tuples.md) | `(A, B)`: an anonymous struct with positional components, the first structural type here, and a computed rather than declared mode | **settled and built** — the first feature whose case was made by a library; a tuple and the struct it replaces emit byte-identical objects |
 | [`docs/shadowing.md`](docs/shadowing.md) | Rebinding a name in one block: why it was refused, and the liveness rule that replaces the refusal | **settled and built** — the last of `sharing.md` §4's three gaps, and one rule where there were two |
+| [`docs/standard-input.md`](docs/standard-input.md) | `getchar`, and why reading the console is a second label on `Io` rather than a seventh capability | **settled and built** — `examples/tally.ls` is `wc` over a pipe; the `io` effect label became `io_write` |
 | `docs/memory-model.md` | Regions, escape, the escape hatches and their cost | not written — §5 and §6 settled and built regions and escape, and `sharing.md` has now settled §9's hatches. Nothing is left that a document of its own would say |
 | [`docs/defined-behaviour.md`](docs/defined-behaviour.md) | Every place C and Rust leave behaviour open, and what we define it to | **written and enforced** — overflow traps, evaluation order is left to right, and §9 names the fixture behind each rule |
 | [`docs/strings.md`](docs/strings.md) | What a string is: bytes rather than an encoding, `byte` as storage rather than arithmetic, packed layout, literals and the static region | **settled and built** — gated M3's last item; §9's must-reject suite is enforced |

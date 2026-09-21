@@ -97,7 +97,7 @@ fn push_all[&h, &r](heap: &!h Heap, b: Buffer, text: &r [byte]) -> [heap] Buffer
 // (`docs/reading-references.md` §2 -- nothing moves out of a reference).
 // So the way to reach the box is to take the whole buffer apart, which
 // means owning it, which means handing it back.
-fn write_buffer[&i](io: &!i Io, b: Buffer) -> [io] Buffer {
+fn write_buffer[&i](io: &!i Io, b: Buffer) -> [io_write] Buffer {
     let Buffer { held, used } = b;
     borrow held as &r in {
         let whole = contents(r);

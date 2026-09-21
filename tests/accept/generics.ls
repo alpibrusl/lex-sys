@@ -23,11 +23,11 @@ fn unwrap_or[T](o: Option[T], fallback: T) -> [] T {
     }
 }
 
-fn digit[&i](io: &!i Io, n: int) -> [io] int {
+fn digit[&i](io: &!i Io, n: int) -> [io_write] int {
     return putchar(io, 48 + n);
 }
 
-fn run[&i](io: &!i Io) -> [io] int {
+fn run[&i](io: &!i Io) -> [io_write] int {
     digit(io, identity(7));                                  // 7
     let p = Pair { first: 1, second: true };
     let q = swap(p);                                     // Pair[bool, int]

@@ -4,9 +4,9 @@
 //
 //   * a pure helper stays pure. `double` touches nothing, so its row is `[]`,
 //     and that is a fact a reader can act on rather than an absence.
-//   * a row is transitive. `banner` performs `io` because `emit` does, and
+//   * a row is transitive. `banner` performs `io_write` because `emit` does, and
 //     `main` because `banner` does.
-//   * a row is a *set*. `[io, io]` is `[io]`, and `[io]` written twice in the
+//   * a row is a *set*. `[io_write, io_write]` is `[io_write]`, and `[io_write]` written twice in the
 //     body costs nothing extra -- union, not count.
 //~ STDOUT AB6
 //~ EXIT 0
@@ -16,19 +16,19 @@ fn double(n: int) -> [] int {
     return n * 2;
 }
 
-// The grounding: `putchar` is the builtin that performs `io`, and every `io`
+// The grounding: `putchar` is the builtin that performs `io_write`, and every `io`
 // in every row above this one traces back to it.
-fn emit[&i](io: &!i Io, c: int) -> [io] int {
+fn emit[&i](io: &!i Io, c: int) -> [io_write] int {
     return putchar(io, c);
 }
 
-// Performs `io` twice; the row is still `[io]`, because a row is a set.
-fn banner[&i](io: &!i Io) -> [io] int {
+// Performs `io_write` twice; the row is still `[io_write]`, because a row is a set.
+fn banner[&i](io: &!i Io) -> [io_write] int {
     emit(io, 65);
     return emit(io, 66);
 }
 
-fn run[&i](io: &!i Io) -> [io] int {
+fn run[&i](io: &!i Io) -> [io_write] int {
     banner(io);
     // A pure call inside an effectful function adds nothing to the row.
     let last = emit(io, 48 + double(3));

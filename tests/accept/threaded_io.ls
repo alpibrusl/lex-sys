@@ -5,7 +5,7 @@
 // its row is `[]` -- not because it does nothing, but because it *owns* the
 // authority rather than borrowing it, and ownership is already visible in
 // the parameter list (§8.2). Every frame below it borrows, and every one
-// says `[io]` because a row lists what a function borrows.
+// says `[io_write]` because a row lists what a function borrows.
 //
 // `digit` is the deepest frame and the only one that touches the console.
 // Nothing here could print without being handed the capability, and there
@@ -14,18 +14,18 @@
 //~ EXIT 0
 
 // Frame three: performs the effect.
-fn digit[&i](io: &!i Io, n: int) -> [io] int {
+fn digit[&i](io: &!i Io, n: int) -> [io_write] int {
     return putchar(io, 48 + n);
 }
 
 // Frame two: performs nothing itself, borrows on the way through.
-fn pair[&i](io: &!i Io, a: int, b: int) -> [io] int {
+fn pair[&i](io: &!i Io, a: int, b: int) -> [io_write] int {
     digit(io, a);
     return digit(io, b);
 }
 
 // Frame one.
-fn run[&i](io: &!i Io) -> [io] int {
+fn run[&i](io: &!i Io) -> [io_write] int {
     pair(io, 2, 4);
     digit(io, 6);
     return putchar(io, 10);

@@ -44,7 +44,7 @@ fn add[&h](heap: &!h Heap, counts: Counts, start: int, length: int) -> [heap] Co
 
 // Print every word and its count, without spending the list: `&c Counts`
 // binds each payload as a shared reference into it.
-fn report[&c, &t, &i](counts: &c Counts, text: &t [byte], io: &!i Io) -> [io] int {
+fn report[&c, &t, &i](counts: &c Counts, text: &t [byte], io: &!i Io) -> [io_write] int {
     match counts {
         Counts::Empty => { return 0; }
         Counts::Entry(at, size, total, rest) => {

@@ -4,7 +4,7 @@
 // against the parameter it is passed to, and `putchar`'s second one is the
 // byte to write.
 
-fn shout[&i](io: &!i Io) -> [io] int {
+fn shout[&i](io: &!i Io) -> [io_write] int {
     putchar(io, true);
     return 0;
 }

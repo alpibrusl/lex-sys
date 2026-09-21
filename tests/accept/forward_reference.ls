@@ -2,7 +2,7 @@
 //~ STDOUT z
 //~ EXIT 0
 
-fn run[&i](io: &!i Io) -> [io] int {
+fn run[&i](io: &!i Io) -> [io_write] int {
     putchar(io, last_letter());
     putchar(io, 10);
     return 0;

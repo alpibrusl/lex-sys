@@ -21,7 +21,7 @@ fn merged[&dst, &src where src <= dst](d: &dst Bytes, s: &src Bytes) -> [] int {
     return len_of(d) * 10 + len_of(s);
 }
 
-fn run[&i](io: &!i Io) -> [io] int {
+fn run[&i](io: &!i Io) -> [io_write] int {
     let big = Bytes { len: 1 };
     let small = Bytes { len: 2 };
 

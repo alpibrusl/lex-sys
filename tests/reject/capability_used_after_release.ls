@@ -4,7 +4,7 @@
 // a released one being used again. No new rule, and no special case for
 // authority -- that is the point of making a capability an ordinary value.
 
-fn greet[&i](io: &!i Io) -> [io] int {
+fn greet[&i](io: &!i Io) -> [io_write] int {
     return putchar(io, 65);
 }
 

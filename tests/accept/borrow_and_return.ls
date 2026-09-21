@@ -28,7 +28,7 @@ fn size_of[&r](handle: &r File) -> [] int {
     return handle.size;
 }
 
-fn run[&i](io: &!i Io) -> [io] int {
+fn run[&i](io: &!i Io) -> [io_write] int {
     let f = open(4);
 
     borrow f as &r in {

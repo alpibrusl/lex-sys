@@ -22,27 +22,27 @@
 
 // ---------------------------------------------------------------- output ---
 
-fn newline[&i](io: &!i Io) -> [io] int {
+fn newline[&i](io: &!i Io) -> [io_write] int {
     return putchar(io, 10);
 }
 
-fn space[&i](io: &!i Io) -> [io] int {
+fn space[&i](io: &!i Io) -> [io_write] int {
     return putchar(io, 32);
 }
 
-fn print_digit[&i](io: &!i Io, d: int) -> [io] int {
+fn print_digit[&i](io: &!i Io, d: int) -> [io_write] int {
     return putchar(io, 48 + d);
 }
 
 // Recursive, so the most significant digit is written first.
-fn print_nat[&i](io: &!i Io, n: int) -> [io] int {
+fn print_nat[&i](io: &!i Io, n: int) -> [io_write] int {
     if n >= 10 {
         print_nat(io, n / 10);
     }
     return print_digit(io, n % 10);
 }
 
-fn print_int[&i](io: &!i Io, n: int) -> [io] int {
+fn print_int[&i](io: &!i Io, n: int) -> [io_write] int {
     if n < 0 {
         putchar(io, 45);
         return print_nat(io, 0 - n);
@@ -163,7 +163,7 @@ fn compare(a: Rational, b: Rational) -> [] Ordering {
 
 // --------------------------------------------------------------- printing ---
 
-fn print_rational[&i](io: &!i Io, r: Rational) -> [io] int {
+fn print_rational[&i](io: &!i Io, r: Rational) -> [io_write] int {
     print_int(io, r.num);
     if r.den != 1 {
         putchar(io, 47);
@@ -172,21 +172,21 @@ fn print_rational[&i](io: &!i Io, r: Rational) -> [io] int {
     return 0;
 }
 
-fn print_error[&i](io: &!i Io, e: Error) -> [io] int {
+fn print_error[&i](io: &!i Io, e: Error) -> [io_write] int {
     match e {
         Error::DivideByZero => { return putchar(io, 68); }
         Error::ZeroDenominator => { return putchar(io, 90); }
     }
 }
 
-fn print_result[&i](io: &!i Io, r: Result[Rational]) -> [io] int {
+fn print_result[&i](io: &!i Io, r: Result[Rational]) -> [io_write] int {
     match r {
         Result::Ok(value) => { return print_rational(io, value); }
         Result::Err(e) => { return print_error(io, e); }
     }
 }
 
-fn print_ordering[&i](io: &!i Io, o: Ordering) -> [io] int {
+fn print_ordering[&i](io: &!i Io, o: Ordering) -> [io_write] int {
     match o {
         Ordering::Less => { return putchar(io, 60); }
         Ordering::Equal => { return putchar(io, 61); }
@@ -216,7 +216,7 @@ fn harmonic(n: int) -> [] Result[Rational] {
     return Result::Ok(total);
 }
 
-fn run[&i](io: &!i Io) -> [io] int {
+fn run[&i](io: &!i Io) -> [io_write] int {
     // Normalisation: 6/8 is 3/4, and a negative denominator moves to the top.
     print_result(io, rational(6, 8));
     space(io);

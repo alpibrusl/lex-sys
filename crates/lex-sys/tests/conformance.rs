@@ -7,17 +7,24 @@
 //! The header syntax is a comment the compiler ignores:
 //!
 //! ```text
+//! //~ STDIN <a line fed to the program>          (default: nothing)
 //! //~ STDOUT <a line the program must print>
 //! //~ EXIT <the status it must exit with>      (default 0)
 //! //~ ERROR <a substring the refusal must contain>
 //! ```
 //!
+//! `STDIN` arrived with `docs/standard-input.md`: a fixture that reads
+//! input needs input to be tested with, and every runner here fed a
+//! program nothing. It is read from the same header as the rest, so the
+//! accept walker and the example walker got it at the same moment.
+//!
 //! Adding a rule to the language means adding a fixture here. M2 says every
 //! rule needs a must-reject fixture (#1, #2); the discipline starts at M0, when
 //! it is cheap.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 const BIN: &str = env!("CARGO_BIN_EXE_lex-sys");
 
@@ -61,6 +68,31 @@ fn directive(source: &str, key: &str) -> Option<String> {
     directives(source, key).into_iter().next()
 }
 
+/// Run a compiled fixture, feeding it whatever its header's `STDIN` lines
+/// say (`docs/standard-input.md` §5).
+///
+/// Closing the pipe is the point rather than an implementation detail: a
+/// program reading to end of input never ends until the writer hangs up,
+/// so a fixture with no `STDIN` gets an immediately-closed stream rather
+/// than an inherited terminal. That is what makes "reads until the input
+/// ends" testable at all.
+fn run_with_stdin(exe: &Path, source: &str) -> std::process::Output {
+    let lines = directives(source, "STDIN");
+    let mut child = Command::new(exe)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the compiled program runs");
+    {
+        let mut pipe = child.stdin.take().expect("a piped stdin");
+        for line in &lines {
+            writeln!(pipe, "{line}").expect("the program accepts its input");
+        }
+    }
+    child.wait_with_output().expect("the program finishes")
+}
+
 #[test]
 fn accepted_programs_build_and_run() {
     for path in fixtures("accept") {
@@ -79,7 +111,7 @@ fn accepted_programs_build_and_run() {
             String::from_utf8_lossy(&build.stderr)
         );
 
-        let run = Command::new(&exe).output().expect("the compiled program runs");
+        let run = run_with_stdin(&exe, &source);
 
         let mut expected = directives(&source, "STDOUT").join("\n");
         if !expected.is_empty() {
@@ -168,7 +200,7 @@ fn every_example_runs_and_prints_what_it_says() {
             String::from_utf8_lossy(&build.stderr)
         );
 
-        let run = Command::new(&exe).output().expect("the compiled example runs");
+        let run = run_with_stdin(&exe, &source);
         let mut expected = directives(&source, "STDOUT").join("\n");
         expected.push('\n');
         assert_eq!(
@@ -569,16 +601,16 @@ fn a_sibling_of_the_granted_directory_traps() {
 
 /// A program that echoes `argc` and every argument, one per line.
 fn echo_source() -> String {
-    "fn write_all[&r, &i](io: &!i Io, s: &r [byte]) -> [io] int {\n\
+    "fn write_all[&r, &i](io: &!i Io, s: &r [byte]) -> [io_write] int {\n\
          var n = 0;\n\
          while n < len(s) { putchar(io, int_of(s[n])); n = n + 1; }\n\
          return len(s);\n\
      }\n\
-     fn print_nat[&i](io: &!i Io, n: int) -> [io] int {\n\
+     fn print_nat[&i](io: &!i Io, n: int) -> [io_write] int {\n\
          if n >= 10 { print_nat(io, n / 10); }\n\
          return putchar(io, 48 + n % 10);\n\
      }\n\
-     fn run[&a, &i](args: &a Args, io: &!i Io) -> [args, io] int {\n\
+     fn run[&a, &i](args: &a Args, io: &!i Io) -> [args, io_write] int {\n\
          let count = arg_count(args);\n\
          print_nat(io, count); putchar(io, 10);\n\
          var n = 1;\n\
@@ -694,7 +726,7 @@ fn build_many(tag: &str, files: &[(&str, &str)]) -> (PathBuf, std::process::Outp
     (exe, build)
 }
 
-const UTIL_LS: &str = "fn print_nat[&i](io: &!i Io, n: int) -> [io] int {\n\
+const UTIL_LS: &str = "fn print_nat[&i](io: &!i Io, n: int) -> [io_write] int {\n\
                            if n >= 10 { print_nat(io, n / 10); }\n\
                            return putchar(io, 48 + n % 10);\n\
                        }\n";
