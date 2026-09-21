@@ -316,6 +316,19 @@ early on is implementation maturity rather than language design" a claim
 with a falsifier: if an LLVM backend lands and the gap stays at 1.6×, it
 was wrong.
 
+There is one thing this language can do that neither of the other two
+can, and it is not tuning. **An effect row of `[]` is a purity proof the
+type checker produced** — C can only *promise* the same fact with
+`__attribute__((const))`, which nothing verifies, and Rust has no way to
+state it at all. 35% of the functions in this repository qualify, and on
+a pure call across a compilation boundary the fact is worth 1.94× as
+common-subexpression elimination, or 158× where the call is also
+loop-invariant. Nothing collects it today: Cranelift has no call
+attribute for it, and an own optimiser is a
+[non-goal](#explicit-non-goals). [`docs/purity.md`](docs/purity.md) is the
+measurement, and it is the first argument for the LLVM backend that is
+about capability rather than speed.
+
 ---
 
 ## Try it

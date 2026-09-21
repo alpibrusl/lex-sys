@@ -192,6 +192,7 @@ promise that they will get faster, because on evidence they will not.
 
 | Question | Why it waits |
 |---|---|
+| ~~Anything lex-sys does *better*~~ | **Answered — `docs/purity.md`.** There is exactly one candidate and it is structural: the row is a checked purity proof, which C can only promise and Rust cannot state. Measured at 1.94× (CSE) and 158× (hoisting a loop-invariant call), on 35% of the functions here, and collected by nothing today |
 | An LLVM backend | §3 makes this falsifiable: the claim is that 1.6× is Cranelift. The README already commits to "Cranelift for dev, LLVM for release", and this is the number that says what the second half is worth |
 | `jo` instead of `seto`/`test`/`jne` | `overflow-cost.md` §3.4. Three instructions for one on every checked operation, and this kernel does seven per iteration — the cheapest place to look for part of the 1.6× |
 | `float` | §4. Now with an argument attached: expressiveness, not speed, and the design question is which of IEEE-754's corners (NaN ordering, reassociation, `-0.0`) this language defines rather than inherits |

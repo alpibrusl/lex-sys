@@ -397,6 +397,16 @@ fn print_authority(inputs: &[PathBuf], with_std: bool, json: bool) -> Result<(),
     symbols.sort_unstable();
     symbols.dedup();
 
+    // The functions the checker can prove are pure (`docs/purity.md` §2).
+    // Reported because it is a fact about the program that no other
+    // language here can state: C's `__attribute__((const))` is an
+    // unchecked promise and Rust has no way to say it at all. What it is
+    // *for* is a backend that can use it, which Cranelift cannot (§4).
+    let mut pure: Vec<&str> =
+        program.funcs.iter().filter(|f| f.is_pure()).map(|f| f.name.as_str()).collect();
+    pure.sort_unstable();
+    let total = program.funcs.len();
+
     let stdout = io::stdout();
     let mut out = stdout.lock();
     if json {
@@ -417,7 +427,9 @@ fn print_authority(inputs: &[PathBuf], with_std: bool, json: bool) -> Result<(),
                 )?;
             }
             writeln!(out, "  ],")?;
-            writeln!(out, "  \"foreign_symbols\": [{}]", quoted(&symbols))?;
+            writeln!(out, "  \"foreign_symbols\": [{}],", quoted(&symbols))?;
+            writeln!(out, "  \"pure\": [{}],", quoted(&pure))?;
+            writeln!(out, "  \"functions\": {total}")?;
             writeln!(out, "}}")?;
             out.flush()
         })();
@@ -464,6 +476,12 @@ fn print_authority(inputs: &[PathBuf], with_std: bool, json: bool) -> Result<(),
             writeln!(out, "foreign symbols")?;
             for symbol in symbols {
                 writeln!(out, "    {symbol}")?;
+            }
+        }
+        if !pure.is_empty() {
+            writeln!(out, "provably pure ({} of {total})", pure.len())?;
+            for name in &pure {
+                writeln!(out, "    {name}")?;
             }
         }
         out.flush()
