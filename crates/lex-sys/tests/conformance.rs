@@ -5013,6 +5013,66 @@ fn the_readme_commands_still_work() {
     }
 }
 
+/// `docs/net.md` §1 and §5 — the only network program here is inbound.
+///
+/// `reach.md` §5.1 frames a `Net` capability as *"a host is a thing
+/// worth narrowing to"*, which is the **outbound** question. The one
+/// network program in this repository binds a port and waits: it
+/// declares `bind`, `listen` and `accept` and never `connect`.
+///
+/// That is the count §5 rests on — inbound 1, outbound 0 — and the
+/// reason `net.md` ends at *settled, not built*: the half that would
+/// unblock the `lex-os` join has no asker.
+///
+/// So this test exists to **fail** when one arrives. A program that
+/// connects makes the count wrong, and whoever writes it rewrites §5
+/// rather than leaving a document that quietly aged.
+#[test]
+fn the_only_network_program_is_inbound() {
+    let root = repo_root();
+    let mut inbound = Vec::new();
+    let mut outbound = Vec::new();
+
+    let mut sources: Vec<PathBuf> = Vec::new();
+    for directory in ["examples", "std", "tests/accept"] {
+        let mut stack = vec![root.join(directory)];
+        while let Some(at) = stack.pop() {
+            for entry in std::fs::read_dir(&at).expect("a readable directory") {
+                let path = entry.expect("a readable entry").path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().is_some_and(|e| e == "ls") {
+                    sources.push(path);
+                }
+            }
+        }
+    }
+
+    for path in &sources {
+        let text = std::fs::read_to_string(path).expect("a readable program");
+        for line in text.lines() {
+            let Some(rest) = line.trim().strip_prefix("extern fn ") else { continue };
+            let Some(name) = rest.split(['[', '(']).next() else { continue };
+            let name = name.trim();
+            if ["bind", "listen", "accept"].contains(&name) {
+                inbound.push(format!("{}:{name}", path.display()));
+            }
+            if ["connect", "sendto", "getaddrinfo"].contains(&name) {
+                outbound.push(format!("{}:{name}", path.display()));
+            }
+        }
+    }
+
+    assert!(!inbound.is_empty(), "`examples/serve/` should still declare the inbound three");
+    assert!(
+        outbound.is_empty(),
+        "an outbound network program has arrived: {outbound:?}\n\
+         `net.md` §5 counts zero of them, and that count is the reason the \
+         document ends at \"settled, not built\". Rewrite §5 rather than \
+         deleting this test."
+    );
+}
+
 /// Read `authority --output json` for a program, as parsed fields.
 ///
 /// Returns `(effect names, foreign symbols, labels as name=argument)`.

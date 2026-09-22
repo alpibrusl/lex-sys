@@ -310,6 +310,20 @@ Filed in §6 rather than answered here.
 > reports `args` and `ffi`, so a grant saying `network: None` has nothing
 > to refuse it with. The row is the prerequisite for lex-sys code running
 > under a grant at all, not a refinement of the report.
+>
+> **And corrected (#75): [`net.md`](net.md) §1.** *"A host is a thing
+> worth narrowing to"* is the **outbound** question, and it describes
+> neither side. `examples/serve/` — the only network program here —
+> declares `bind`, `listen` and `accept` and **no `connect`**: it is pure
+> ingress. A `lex-os` grant's network fields are `network` and `egress`,
+> and both are **outbound**; there is no inbound notion in it at all.
+>
+> Which is right, for a reason that decides the capability's shape:
+> outbound is the program's choice and belongs in the type, and inbound
+> is not — who reaches a listening port is routing's answer, which is
+> why lex-os enforces it with iptables on the tap device rather than in
+> the grant. So `Net` has **two axes**: a host outbound, a port inbound,
+> and nothing more on the inbound side.
 
 ### 5.2 What covers the difference today
 
