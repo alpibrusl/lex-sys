@@ -60,7 +60,7 @@ fn loops[&i](io: &!i Io) -> [io_write] int {
     while n < 3 {
         let f = open(n);
         defer close(f);
-        putchar(io, 48 + n);
+        putchar(io, '0' + n);
         n = n + 1;
     }
     return n;

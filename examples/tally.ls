@@ -62,7 +62,7 @@ fn count[&i](io: &!i Io) -> [io_read] Counts {
     var c = getchar(io);
     while c >= 0 {
         bytes = bytes + 1;
-        if c == 10 {
+        if c == '\n' {
             lines = lines + 1;
         }
         if bytes.is_blank(c) {
@@ -83,7 +83,7 @@ fn print_nat[&i](io: &!i Io, n: int) -> [io_write] int {
     if n >= 10 {
         print_nat(io, n / 10);
     }
-    return putchar(io, 48 + n % 10);
+    return putchar(io, '0' + n % 10);
 }
 
 // How many digits a count takes, so the columns line up. The column

@@ -31,7 +31,7 @@ fn space[&i](io: &!i Io) -> [io_write] int {
 }
 
 fn print_digit[&i](io: &!i Io, d: int) -> [io_write] int {
-    return putchar(io, 48 + d);
+    return putchar(io, '0' + d);
 }
 
 // Recursive, so the most significant digit is written first.

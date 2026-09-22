@@ -20,8 +20,8 @@ fn run[&i](io: &!i Io) -> [io_write] int {
 
     borrow buf as &a in {
         borrow buf as &b in {
-            putchar(io, 48 + len_of(a));
-            putchar(io, 48 + len_of(b));
+            putchar(io, '0' + len_of(a));
+            putchar(io, '0' + len_of(b));
         }
     }
 

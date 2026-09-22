@@ -30,8 +30,8 @@ fn describe(s: Shape) -> [] int {
 }
 
 fn digits[&i](io: &!i Io, n: int) -> [io_write] int {
-    putchar(io, 48 + n / 10);
-    putchar(io, 48 + n % 10);
+    putchar(io, '0' + n / 10);
+    putchar(io, '0' + n % 10);
     return n;
 }
 

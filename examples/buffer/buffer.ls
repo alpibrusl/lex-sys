@@ -117,5 +117,5 @@ fn push_nat[&h](heap: &!h Heap, b: Buffer, n: int) -> [heap] Buffer {
     if n >= 10 {
         out = push_nat(heap, out, n / 10);
     }
-    return push_byte(heap, out, byte_of(48 + n % 10));
+    return push_byte(heap, out, byte_of('0' + n % 10));
 }

@@ -20,7 +20,7 @@ extern fn labs[&f](ffi: &f Ffi("libc"), n: int) -> [ffi("libc")] int;
 // label's text, which is why `ffi("libc")` comes first however it is written.
 fn magnitude[&f, &i](ffi: &f Ffi("libc"), io: &!i Io, n: int) -> [io_write, ffi("libc")] int {
     let size = labs(ffi, n);
-    putchar(io, 48 + size);
+    putchar(io, '0' + size);
     putchar(io, 10);
     return size;
 }

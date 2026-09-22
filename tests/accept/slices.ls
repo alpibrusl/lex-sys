@@ -21,7 +21,7 @@ fn print_nat[&i](io: &!i Io, n: int) -> [io_write] int {
     if n >= 10 {
         print_nat(io, n / 10);
     }
-    return putchar(io, 48 + n % 10);
+    return putchar(io, '0' + n % 10);
 }
 
 // Takes a *shared* slice, and is called below on what `alloc_slice` handed

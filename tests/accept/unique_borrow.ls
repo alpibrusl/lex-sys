@@ -25,12 +25,12 @@ fn run[&i](io: &!i Io) -> [io_write] int {
     var c = Counter { n: 1, step: 2 };
 
     borrow mut c as &!r in {
-        putchar(io, 48 + bump(r));
-        putchar(io, 48 + bump(r));
+        putchar(io, '0' + bump(r));
+        putchar(io, '0' + bump(r));
     }
 
     // Owned again, and carrying what the reference wrote.
-    putchar(io, 48 + c.n);
+    putchar(io, '0' + c.n);
 
     // `&!r` is `val`, so it copies -- and the copies are copies of one
     // *pointer*, so writes through them alias rather than racing to be the
@@ -43,7 +43,7 @@ fn run[&i](io: &!i Io) -> [io_write] int {
         a.n = 3;
         b.n = b.n + 4;
     }
-    putchar(io, 48 + d.n);
+    putchar(io, '0' + d.n);
 
     putchar(io, 10);
     return 0;

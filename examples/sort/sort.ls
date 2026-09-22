@@ -153,7 +153,7 @@ fn find_lines[&h, &t](heap: &!h Heap, text: &t [byte], starts: vec.Vec[int],
     var at = 0;
     while at < len(text) {
         var end = at;
-        while end < len(text) && int_of(text[end]) != 10 {
+        while end < len(text) && int_of(text[end]) != '\n' {
             end = end + 1;
         }
         s = vec.push(heap, s, at);

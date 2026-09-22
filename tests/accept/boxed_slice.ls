@@ -14,7 +14,7 @@ fn print_nat[&i](io: &!i Io, n: int) -> [io_write] int {
     if n >= 10 {
         print_nat(io, n / 10);
     }
-    return putchar(io, 48 + n % 10);
+    return putchar(io, '0' + n % 10);
 }
 
 fn write_all[&r, &i](io: &!i Io, s: &r [byte]) -> [io_write] int {
@@ -28,7 +28,7 @@ fn write_all[&r, &i](io: &!i Io, s: &r [byte]) -> [io_write] int {
 
 // Built here, used by the caller: the box outlives this frame.
 fn build[&h](heap: &!h Heap, count: int) -> [heap] Box[[byte]] {
-    let b = box_slice(heap, count, byte_of(65));
+    let b = box_slice(heap, count, byte_of('A'));
     borrow mut b as &!w in {
         // `contents` is the same `contents` an ordinary box has, and it is
         // mode-preserving: a unique borrow of the box gives a unique slice,
@@ -37,7 +37,7 @@ fn build[&h](heap: &!h Heap, count: int) -> [heap] Box[[byte]] {
         let s = contents(w);
         var i = 0;
         while i < len(s) {
-            s[i] = byte_of(65 + i);
+            s[i] = byte_of('A' + i);
             i = i + 1;
         }
     }

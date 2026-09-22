@@ -50,10 +50,10 @@ fn unwrap[T](h: Held[T]) -> [] T {
 }
 
 fn run[&i](io: &!i Io) -> [io_write] int {
-    putchar(io, 48 + sum(Point { x: 1, y: 2 }) - 0);
-    putchar(io, 48 + unwrap(Held { value: 4 }));
-    putchar(io, 48 + close_both(Pair { left: Ticket { fd: 1 }, right: Ticket { fd: 2 } }) / 10);
-    putchar(io, 48 + close(unwrap(Held { value: Ticket { fd: 2 } })));
+    putchar(io, '0' + sum(Point { x: 1, y: 2 }) - 0);
+    putchar(io, '0' + unwrap(Held { value: 4 }));
+    putchar(io, '0' + close_both(Pair { left: Ticket { fd: 1 }, right: Ticket { fd: 2 } }) / 10);
+    putchar(io, '0' + close(unwrap(Held { value: Ticket { fd: 2 } })));
     putchar(io, 10);
     return 0;
 }

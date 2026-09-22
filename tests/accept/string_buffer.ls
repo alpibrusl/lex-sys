@@ -16,7 +16,7 @@ fn print_nat[&i](io: &!i Io, n: int) -> [io_write] int {
     if n >= 10 {
         print_nat(io, n / 10);
     }
-    return putchar(io, 48 + n % 10);
+    return putchar(io, '0' + n % 10);
 }
 
 fn write_all[&r, &i](io: &!i Io, s: &r [byte]) -> [io_write] int {
@@ -30,8 +30,8 @@ fn write_all[&r, &i](io: &!i Io, s: &r [byte]) -> [io_write] int {
 
 // Comparing storage is not arithmetic, so `==` on bytes is allowed (§2).
 fn is_vowel(b: byte) -> [] bool {
-    return b == byte_of(65) || b == byte_of(69) || b == byte_of(73)
-        || b == byte_of(79) || b == byte_of(85);
+    return b == byte_of('A') || b == byte_of('E') || b == byte_of('I')
+        || b == byte_of('O') || b == byte_of('U');
 }
 
 fn count_vowels[&r](s: &r [byte]) -> [] int {
@@ -51,14 +51,14 @@ fn run[&i](io: &!i Io) -> [io_write] int {
     var bytes = 0;
     region a {
         // Five bytes, all `A` to begin with.
-        let buffer = alloc_slice[a](5, byte_of(65));
+        let buffer = alloc_slice[a](5, byte_of('A'));
 
         // Written through the unique slice the arena handed back. The
         // arithmetic happens in `int`, and `byte_of` is where the range is
         // checked -- visibly, rather than inside an operator.
         var n = 0;
         while n < len(buffer) {
-            buffer[n] = byte_of(65 + n);
+            buffer[n] = byte_of('A' + n);
             n = n + 1;
         }
 

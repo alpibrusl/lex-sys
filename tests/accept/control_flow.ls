@@ -13,7 +13,7 @@ fn fib(n: int) -> [] int {
 fn run[&i](io: &!i Io) -> [io_write] int {
     var i = 0;
     while i < 5 {
-        putchar(io, 48 + fib(i));
+        putchar(io, '0' + fib(i));
         i = i + 1;
     }
     if i == 5 {

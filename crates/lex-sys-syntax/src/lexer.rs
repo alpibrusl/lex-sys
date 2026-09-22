@@ -252,6 +252,103 @@ pub fn tokenize(text: &str) -> Result<Vec<Token>, Diagnostic> {
             continue;
         }
 
+        // A character literal: the third spelling of an integer, after
+        // decimal and hexadecimal (`docs/character-literals.md` §2). It
+        // lexes as `TokenKind::Int` because that is what it is — `'a'` and
+        // `97` are one node — so nothing past `int_value` knows the
+        // spelling exists, and no hash moved when it arrived (§5).
+        //
+        // The escape set is the string's six with `\'` where `\"` is: each
+        // literal escapes its own delimiter and not the other's.
+        if b == b'\'' {
+            let mut j = i + 1;
+            match bytes.get(j) {
+                None => {
+                    return Err(Diagnostic::new(
+                        Rule::LiteralForm,
+                        "unterminated character literal",
+                        Span::new(start as u32, bytes.len() as u32),
+                    ));
+                }
+                Some(b'\'') => {
+                    return Err(Diagnostic::new(
+                        Rule::LiteralForm,
+                        "a character literal holds exactly one character; `''` holds none",
+                        Span::new(start as u32, (j + 1) as u32),
+                    ));
+                }
+                Some(b'\n') => {
+                    return Err(Diagnostic::new(
+                        Rule::LiteralForm,
+                        "a character literal may not span lines",
+                        Span::new(start as u32, j as u32),
+                    ));
+                }
+                Some(b'\\') => {
+                    let Some(escape) = bytes.get(j + 1) else {
+                        return Err(Diagnostic::new(
+                            Rule::LiteralForm,
+                            "unterminated character literal",
+                            Span::new(start as u32, bytes.len() as u32),
+                        ));
+                    };
+                    if !matches!(escape, b'n' | b'r' | b't' | b'\\' | b'\'' | b'0') {
+                        let end = next_char_boundary(text, j + 1);
+                        return Err(Diagnostic::new(
+                            Rule::UnknownEscape,
+                            format!(
+                                "`\\{}` is not an escape; a character literal takes `\\n`, `\\r`, `\\t`, `\\\\`, `\\'` and `\\0`",
+                                &text[j + 1..end]
+                            ),
+                            Span::new(j as u32, end as u32),
+                        ));
+                    }
+                    j += 2;
+                }
+                Some(c) if c.is_ascii() => j += 1,
+                Some(_) => {
+                    // `'é'` is two bytes in UTF-8 and this literal is one.
+                    // Refused rather than decoded, because U+00E9 and its
+                    // first encoded byte are both obvious readings and
+                    // `strings.md` §1 declines to pick (§3.1).
+                    let end = next_char_boundary(text, j);
+                    return Err(Diagnostic::new(
+                        Rule::LiteralForm,
+                        format!(
+                            "`{}` is not ASCII, and a character literal is one byte; write the code point, or the bytes of its encoding",
+                            &text[j..end]
+                        ),
+                        Span::new(start as u32, end as u32),
+                    ));
+                }
+            }
+            if bytes.get(j) == Some(&b'\'') {
+                j += 1;
+            } else {
+                // Which mistake it is depends on whether the quote ever
+                // closes: `'ab'` is two characters and `'a` is a literal
+                // that never ended. The string lexer draws the same line
+                // between "spans lines" and "unterminated".
+                let mut scan = j;
+                while scan < bytes.len() && bytes[scan] != b'\n' && bytes[scan] != b'\'' {
+                    scan += 1;
+                }
+                let closed = bytes.get(scan) == Some(&b'\'');
+                return Err(Diagnostic::new(
+                    Rule::LiteralForm,
+                    if closed {
+                        "a character literal holds exactly one character; a longer run of text is a string, written with `\"`"
+                    } else {
+                        "unterminated character literal"
+                    },
+                    Span::new(start as u32, if closed { scan + 1 } else { scan } as u32),
+                ));
+            }
+            i = j;
+            out.push(Token { kind: TokenKind::Int, span: Span::new(start as u32, i as u32) });
+            continue;
+        }
+
         if b.is_ascii_digit() {
             // `0x` is the one prefix. Base two and base eight were left out
             // deliberately: a mask is written in hex by everyone who writes

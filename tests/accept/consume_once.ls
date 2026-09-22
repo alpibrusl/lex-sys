@@ -28,10 +28,10 @@ fn close(f: Ticket) -> [] int {
 
 fn run[&i](io: &!i Io) -> [io_write] int {
     let straight = open(7);
-    putchar(io, 48 + close(straight));
+    putchar(io, '0' + close(straight));
 
     let threaded = open(7);
-    putchar(io, 48 + close(touch(threaded)));
+    putchar(io, '0' + close(touch(threaded)));
 
     putchar(io, 10);
     return 0;

@@ -53,6 +53,15 @@ become measurable the first time a milestone adds a node, and §8's
 sentence about "every milestone from M2 on adds nodes" is the reason to
 expect that to happen rather than not.
 
+> **A second observation, same kind (#70).**
+> [`character-literals.md`](character-literals.md) adds a *spelling* —
+> `'a'` is the integer 97 — and rewrote 119 sites across `std/`,
+> `examples/` and `tests/accept/` onto it. No golden hash moved, and
+> `a_character_literal_hashes_as_its_integer` checks the two spellings
+> against each other. Two observations, two passes, and the encoder rate
+> is still unmeasured: a change designed to move no tag cannot show that
+> a moved tag would be caught.
+
 ---
 
 ## 2. The language rate: 71% of its own past is unreadable

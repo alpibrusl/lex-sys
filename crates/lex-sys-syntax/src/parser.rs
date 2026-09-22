@@ -1329,7 +1329,26 @@ impl<'a> Parser<'a> {
     }
 
     fn int_value(&self, tok: Token, negated: bool) -> Result<i64, Diagnostic> {
-        let digits: String = self.text(tok).chars().filter(|c| *c != '_').collect();
+        let text = self.text(tok);
+        // The third spelling, and the one whose characters must survive the
+        // underscore filter below: `'_'` is a literal, not a digit group
+        // (`docs/character-literals.md` §2). The lexer has already checked
+        // the shape, so this only decodes.
+        if let Some(body) = text.strip_prefix('\'').and_then(|t| t.strip_suffix('\'')) {
+            let value = match body.as_bytes() {
+                [b'\\', escape] => match escape {
+                    b'n' => b'\n',
+                    b'r' => b'\r',
+                    b't' => b'\t',
+                    b'0' => 0,
+                    other => *other,
+                },
+                [only] => *only,
+                _ => unreachable!("the lexer refuses every other shape"),
+            };
+            return Ok(if negated { -i64::from(value) } else { i64::from(value) });
+        }
+        let digits: String = text.chars().filter(|c| *c != '_').collect();
         // A hexadecimal literal is a *spelling*, not a type: `0xff` and
         // `255` are the same node, so `canonical-ast.md` §3 keeps the value
         // and the two hash identically (`docs/bitwise.md` §1.1).

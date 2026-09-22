@@ -36,12 +36,12 @@ fn total(w: Wide) -> [] int {
 
 fn run[&i](io: &!i Io) -> [io_write] int {
     let t = three(1, 2, 3);
-    putchar(io, 48 + t.a);                       // 1
+    putchar(io, '0' + t.a);                       // 1
 
     let n = nest(true);
-    putchar(io, 48 + n.right.c - 6 + 7);         // 7
+    putchar(io, '0' + n.right.c - 6 + 7);         // 7
     if n.flag {
-        putchar(io, 48 + n.left.b + 1);          // 3
+        putchar(io, '0' + n.left.b + 1);          // 3
     } else {
         putchar(io, 48);
     }
@@ -49,8 +49,8 @@ fn run[&i](io: &!i Io) -> [io_write] int {
     // The wide path: `Wide::Big` carries a three-field struct, so the enum is
     // four leaves and comes back through the buffer.
     let big = total(widen(7));               // Big(7, 7, 7) -> 21
-    putchar(io, 48 + big / 10);                  // 2
-    putchar(io, 48 + big % 10);                  // 1
+    putchar(io, '0' + big / 10);                  // 2
+    putchar(io, '0' + big % 10);                  // 1
     putchar(io, 10);
     return 0;
 }

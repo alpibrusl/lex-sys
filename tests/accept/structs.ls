@@ -22,8 +22,8 @@ fn run[&i](io: &!i Io) -> [io_write] int {
     let b = shift(a, 3);
     let l = Line { from: a, to: b, dashed: false };
     // (4-1)^2 + (5-2)^2 = 9 + 9 = 18
-    putchar(io, 48 + length_squared(l) / 10);
-    putchar(io, 48 + length_squared(l) % 10);
+    putchar(io, '0' + length_squared(l) / 10);
+    putchar(io, '0' + length_squared(l) % 10);
     if l.dashed {
         putchar(io, 33);
     } else {

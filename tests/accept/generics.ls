@@ -42,7 +42,7 @@ fn unwrap_or[T: val](o: Option[T], fallback: T) -> [] T {
 }
 
 fn digit[&i](io: &!i Io, n: int) -> [io_write] int {
-    return putchar(io, 48 + n);
+    return putchar(io, '0' + n);
 }
 
 fn run[&i](io: &!i Io) -> [io_write] int {

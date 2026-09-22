@@ -34,7 +34,7 @@ pub fn print_nat[&i](io: &!i Io, n: int) -> [io_write] int {
     if n >= 10 {
         print_nat(io, n / 10);
     }
-    return putchar(io, 48 + n % 10);
+    return putchar(io, '0' + n % 10);
 }
 
 // Any integer, with the sign.
@@ -58,7 +58,7 @@ fn print_negative[&i](io: &!i Io, n: int) -> [io_write] int {
     if n <= 0 - 10 {
         print_negative(io, n / 10);
     }
-    return putchar(io, 48 + (0 - (n % 10)));
+    return putchar(io, '0' + (0 - (n % 10)));
 }
 
 // How many characters `print_int` would write.
