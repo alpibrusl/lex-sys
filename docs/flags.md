@@ -181,6 +181,24 @@ is what `cut` wants.
 
 | Test | Shows |
 |---|---|
-| `both_ports_match_gnu_on_every_spelling` | eighteen rows against the real `/usr/bin/cut` and `/usr/bin/base64`, stdout **and** exit status — including the three §4 keeps as divergences, asserted to still diverge, so a row that quietly starts agreeing is moved rather than forgotten |
+| `both_ports_match_gnu_on_every_spelling` | eighteen rows, stdout **and** exit status, including the three §4 keeps as divergences — asserted to still diverge, so a row that quietly starts agreeing is moved rather than forgotten |
 | `every_argument_shape` | §2's nine shapes, read back as themselves |
 | `tests/accept/flags.ls` | the fixture, which **is** the driver `every_argument_shape` runs: §2's table and the program that prints it are one file |
+
+### 5.1 The expectation is written down, and GNU is a second opinion
+
+That test began by reading the answer off `/usr/bin/cut`, and **went red
+on darwin**: macOS ships **BSD** `cut`, which has no `--delimiter` at
+all, so the comparison was against the wrong specification on one of the
+two supported targets. The base64 test in the same file already says
+this — *"macOS ships BSD `base64`, which prints a newline for empty
+input where GNU prints nothing"* — and the fact cost a red build before
+it was applied here.
+
+So the table carries GNU's answer and that is the assertion, on every
+target. Where the reference *is* GNU — probed with `--version`, which
+BSD's does not have — it is checked against the same table, so a wrong
+expectation fails on linux rather than being believed everywhere. The
+same rewrite caught two: `base64 -d` answers `hi` with **no trailing
+newline**, and the first version of this table had one, because a shell
+`$(...)` had eaten it.

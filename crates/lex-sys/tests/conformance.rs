@@ -4730,57 +4730,70 @@ fn every_argument_shape() {
 /// `docs/flags.md` §1 — every spelling GNU accepts, on both ports.
 ///
 /// The gap this closes is not a missing feature. Before `std.flags`, six
-/// of these twelve rows disagreed with GNU: `cut` refused four of them
-/// loudly, and `base64` answered two of them by **encoding its input and
-/// exiting 0**, because `--decode` is not two bytes so the test for `-d`
-/// was false and the flag was dropped.
+/// of these rows disagreed with GNU: `cut` refused four of them loudly,
+/// and `base64` answered two of them by **encoding its input and exiting
+/// 0**, because `--decode` is not two bytes so the test for `-d` was
+/// false and the flag was dropped.
 ///
 /// And every base64 test in this file passed exactly `-d`. Twelve input
 /// sizes, both directions and three malformed inputs, all through one
 /// spelling of one flag — `line-reading.md` §1's shape again, where the
 /// dimension the suite never varied was the length of a line.
 ///
-/// So this is a table of spellings rather than of data, and it compares
-/// stdout *and* exit status: a divergence that only shows in the status
-/// is how `cut` failed.
+/// # The expectation is written down, and the reference is a second
+/// opinion
+///
+/// The table carries GNU's answer rather than reading it off whatever
+/// `/usr/bin/cut` happens to be, because **macOS ships BSD**: BSD `cut`
+/// has no `--delimiter` at all, so comparing against it on darwin tests
+/// this program against the wrong specification. The base64 test below
+/// already says this about empty input and BSD's extra newline; this is
+/// the same fact costing a red build before it was applied here.
+///
+/// So: the written answer is the assertion, on every target. Where the
+/// reference *is* GNU — detected by `--version`, which BSD's does not
+/// have — it is checked against the same table, so a wrong expectation
+/// fails on linux rather than being believed everywhere.
 #[test]
 fn both_ports_match_gnu_on_every_spelling() {
     let data = b"a,b,c\n";
     let encoded = b"aGk=\n";
 
-    // `(program, args, whether GNU and this program should agree)`. The
-    // `false` rows are the divergences `flags.md` §4 keeps on purpose,
-    // written here so they are checked rather than remembered.
-    let cases: &[(&str, &[&str], bool)] = &[
-        ("cut", &["-d,", "-f2"], true),
-        ("cut", &["-d", ",", "-f2"], true),
-        ("cut", &["--delimiter=,", "--fields=2"], true),
-        ("cut", &["--delimiter", ",", "--fields", "2"], true),
-        ("cut", &["-d,", "-f", "2"], true),
-        ("cut", &["-f2", "-d,"], true),
-        ("cut", &["-d,", "-f1,3"], true),
-        ("cut", &["-d,", "-f2", "--"], true),
-        ("cut", &["-x"], true),
-        ("cut", &["-d,,", "-f2"], true),
+    // `(program, args, stdout, exit, whether GNU agrees)`.
+    //
+    // The `false` rows are the divergences `flags.md` §4 keeps on
+    // purpose. They are asserted to still *disagree*, so one that
+    // quietly starts agreeing gets moved rather than forgotten.
+    let cases: &[(&str, &[&str], &str, i32, bool)] = &[
+        ("cut", &["-d,", "-f2"], "b\n", 0, true),
+        ("cut", &["-d", ",", "-f2"], "b\n", 0, true),
+        ("cut", &["--delimiter=,", "--fields=2"], "b\n", 0, true),
+        ("cut", &["--delimiter", ",", "--fields", "2"], "b\n", 0, true),
+        ("cut", &["-d,", "-f", "2"], "b\n", 0, true),
+        ("cut", &["-f2", "-d,"], "b\n", 0, true),
+        ("cut", &["-d,", "-f1,3"], "a,c\n", 0, true),
+        ("cut", &["-d,", "-f2", "--"], "b\n", 0, true),
+        ("cut", &["-x"], "", 1, true),
+        ("cut", &["-d,,", "-f2"], "", 1, true),
         // §4: no abbreviation, because resolving one needs the option
         // table this design does not have.
-        ("cut", &["--delim=,", "-f2"], false),
-        ("base64", &["-d"], true),
-        ("base64", &["--decode"], true),
-        ("base64", &[], true),
-        ("base64", &["--"], true),
-        ("base64", &["-q"], true),
+        ("cut", &["--delim=,", "-f2"], "", 1, false),
+        ("base64", &["-d"], "hi", 0, true),
+        ("base64", &["--decode"], "hi", 0, true),
+        ("base64", &[], "YUdrPQo=\n", 0, true),
+        ("base64", &["--"], "YUdrPQo=\n", 0, true),
+        ("base64", &["-q"], "", 1, true),
         // §4: `-i` and `-w` are refused rather than accepted and
         // ignored. Neither is implementable here, and accepting one
         // would be §1's silent lie in a second place.
-        ("base64", &["-di"], false),
-        ("base64", &["-w0"], false),
+        ("base64", &["-di"], "", 1, false),
+        ("base64", &["-w0"], "", 1, false),
     ];
 
     let (cut_dir, cut_exe) = build_example("flags-cut", "examples/cut/cut.ls", "cut");
     let (b64_dir, b64_exe) = build_example("flags-base64", "examples/base64/base64.ls", "base64");
 
-    fn feed(command: &Path, args: &[&str], input: &[u8]) -> (Vec<u8>, Option<i32>) {
+    fn feed(command: &Path, args: &[&str], input: &[u8]) -> (String, Option<i32>) {
         let mut child = Command::new(command)
             .args(args)
             .stdin(Stdio::piped())
@@ -4796,45 +4809,57 @@ fn both_ports_match_gnu_on_every_spelling() {
         });
         let out = child.wait_with_output().expect("it exits");
         writer.join().expect("the writer thread finishes");
-        (out.stdout, out.status.code())
+        (String::from_utf8_lossy(&out.stdout).into_owned(), out.status.code())
     }
 
-    let mut compared = 0;
-    for (program, args, agrees) in cases {
-        let reference = PathBuf::from(format!("/usr/bin/{program}"));
-        if !reference.exists() {
-            continue;
-        }
+    /// Whether this reference is GNU coreutils rather than BSD.
+    ///
+    /// `--version` is the probe because BSD's `cut` does not have it and
+    /// GNU's does — the same distinction the table exists for.
+    fn is_gnu(path: &Path) -> bool {
+        path.exists()
+            && Command::new(path)
+                .arg("--version")
+                .output()
+                .is_ok_and(|out| String::from_utf8_lossy(&out.stdout).contains("GNU coreutils"))
+    }
+
+    for (program, args, stdout, exit, agrees) in cases {
         let (exe, input): (&Path, &[u8]) = match *program {
             "cut" => (&cut_exe, data),
             _ => (&b64_exe, encoded),
         };
-        let (theirs, their_status) = feed(&reference, args, input);
-        let (ours, our_status) = feed(exe, args, input);
-        compared += 1;
+        let written = ((*stdout).to_owned(), Some(*exit));
+
+        assert_eq!(
+            feed(exe, args, input),
+            written,
+            "`{program} {}` should answer what `flags.md` §1 says it does",
+            args.join(" ")
+        );
+
+        let reference = PathBuf::from(format!("/usr/bin/{program}"));
+        if !is_gnu(&reference) {
+            continue;
+        }
+        let theirs = feed(&reference, args, input);
         if *agrees {
             assert_eq!(
-                (String::from_utf8_lossy(&ours).into_owned(), our_status),
-                (String::from_utf8_lossy(&theirs).into_owned(), their_status),
-                "`{program} {}` should match GNU",
+                theirs,
+                written,
+                "GNU `{program} {}` should answer this too — if it does not, \
+                 the expectation in this table is wrong rather than the port",
                 args.join(" ")
             );
         } else {
             assert_ne!(
-                (String::from_utf8_lossy(&ours).into_owned(), our_status),
-                (String::from_utf8_lossy(&theirs).into_owned(), their_status),
+                theirs,
+                written,
                 "`{program} {}` is a documented divergence (`flags.md` §4); \
                  if it now agrees, move the row rather than deleting it",
                 args.join(" ")
             );
         }
-    }
-
-    // Both references are coreutils, so either both exist or neither
-    // does. Nothing to assert on a machine without them — and saying so
-    // is better than a test that silently checks nothing.
-    if compared > 0 {
-        assert_eq!(compared, cases.len(), "every row should have run");
     }
 
     let _ = std::fs::remove_dir_all(&cut_dir);
