@@ -63,6 +63,13 @@ The thesis of lex-sys is that ownership and effects are the same idea, and that
 a language designed from scratch can have one system where Rust and Koka have
 two. Here is that claim made precise:
 
+> **Prior art, credited late (#75).** **Austral** had already shown the first
+> half: capabilities as linear values, with a root capability handed to the
+> entry point, checked by the same machinery as every other linear value. What
+> this document adds is the second half — that same authority stated as an
+> exact effect row — and [`related-work.md`](related-work.md) §2 says what that
+> buys and what Austral got to first.
+
 > **The resource rule.** Every resource is created once, used exactly as its
 > mode permits, and destroyed once. A function's signature names every resource
 > that crosses its boundary: **moved** (by value), **borrowed** (by reference,

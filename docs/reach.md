@@ -302,7 +302,7 @@ it is "a host is a thing worth narrowing to", which is exactly what
 
 Filed in §6 rather than answered here.
 
-> **Promoted (#74): [`under-a-grant.md`](under-a-grant.md) §5.** The
+> **Promoted (#73): [`under-a-grant.md`](under-a-grant.md) §5.** The
 > argument above frames this as a question of taste — whether a host is
 > worth narrowing to — and that framing is now incomplete. Measured
 > against `lex-os`'s real grant, **two of its three dimensions cannot be
@@ -311,7 +311,7 @@ Filed in §6 rather than answered here.
 > to refuse it with. The row is the prerequisite for lex-sys code running
 > under a grant at all, not a refinement of the report.
 >
-> **And corrected (#75): [`net.md`](net.md) §1.** *"A host is a thing
+> **And corrected (#74): [`net.md`](net.md) §1.** *"A host is a thing
 > worth narrowing to"* is the **outbound** question, and it describes
 > neither side. `examples/serve/` — the only network program here —
 > declares `bind`, `listen` and `accept` and **no `connect`**: it is pure
@@ -344,7 +344,7 @@ being asked to run a server, and knows it without trusting a word the
 program says about itself: the list is what pass 2 emitted, which is what
 `main` reaches, which is what the binary can call (`authority.md` §2).
 
-> **Corrected (#74): [`under-a-grant.md`](under-a-grant.md) §3.** The
+> **Corrected (#73): [`under-a-grant.md`](under-a-grant.md) §3.** The
 > first half of that sentence stands and the second does not. The list is
 > a proof about **names** — every foreign call needs a declaration, so it
 > is exactly the set reachable from `main` — and a **heuristic** about

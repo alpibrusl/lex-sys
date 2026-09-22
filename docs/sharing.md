@@ -96,6 +96,11 @@ stronger than it knew.
 
 ## 3. `Gen` is a library, exactly as promised
 
+> **Credit, added late (#75).** A handle that is a plain index plus a
+> generation, checked against the arena that issued it on every use, is
+> **Vale's generational reference**. This section was written without
+> saying so; [`related-work.md`](related-work.md) §1 now does.
+
 ```
 val struct Gen { index: int, generation: int }
 ```

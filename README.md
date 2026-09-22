@@ -114,7 +114,7 @@ combines:
 | **Capabilities** | `World`, `Io`, `Fs(prefix)`, `Ffi(lib)`, `Heap`, `Args`, `File` — linear values, `split` once, released by name | [`linearity-and-effects.md`](docs/linearity-and-effects.md) |
 | **Effect rows** | A canonically ordered set, exact in both directions, every label tracing to a builtin | [`linearity-and-effects.md`](docs/linearity-and-effects.md) |
 | **Narrowing** | Prefix extension, one way, and it *consumes* what it attenuates | [`filesystem.md`](docs/filesystem.md), [`reach.md`](docs/reach.md) |
-| **Authority report** | `lex-sys authority`, computed from reachability; `--output json` for a supervisor | [`authority.md`](docs/authority.md) |
+| **Authority report** | `lex-sys authority`, computed from reachability; `--output json` for a supervisor, and it **fails closed** on foreign code | [`authority.md`](docs/authority.md) |
 | **Borrowing** | Lexical regions, no borrow checker; `&!` is a lock on the binding, answered with a measurement | [`aliasing.md`](docs/aliasing.md) |
 | **Memory** | Arenas, a general heap with recursive types, boxed slices, growable buffers | [`heap.md`](docs/heap.md), [`boxed-slices.md`](docs/boxed-slices.md) |
 | **Types** | `int` `byte` `bool` `float`, structs, enums with exhaustive `match`, tuples, generics with `[T: val]` bounds | [`floating-point.md`](docs/floating-point.md), [`tuples.md`](docs/tuples.md) |
@@ -316,6 +316,42 @@ program waiting on it.
 
 ---
 
+## Related work
+
+lex-sys builds on other people's ideas, and the closest of them got
+there first.
+
+- **Austral** — the nearest relative: linear types, capabilities as linear
+  values with a root capability handed to the entry point, lexical
+  borrowing, no borrow checker. Most of this core is Austral's first.
+  lex-sys adds the same authority stated as an **exact effect row**, which
+  is what `lex-sys authority` reads.
+- **Koka** — effects as a row of labels. Kept the row; no handlers, no row
+  polymorphism.
+- **Effekt** — *effects as capabilities*, from the effect-handler side:
+  the closest statement of "an effect is a borrowed capability".
+- **Cyclone** — lexical regions; here without Rust's inference.
+- **Rust** — ownership as move; the borrow checker declined.
+- **Vale** — generational references, which `Gen` is.
+- **Zig** — `defer`.
+- **Pony**, **Hylo** — other answers to aliasing and ownership. Pony's
+  `val` means something different from this one.
+- **The object-capability model** (E, *Robust Composition*) and
+  **Capsicum** — no ambient authority.
+- **Lex** — the parent language, and the worldview.
+
+**The competitor is WASI, not Rust.** For running code you did not write,
+WebAssembly with WASI enforces authority at run time, by trying. lex-sys
+knows it **before execution**, from the program's text, with no runtime
+cost — a narrower claim, and a stronger one where it applies. Under
+`lex-os` it is defence in depth: a static proof before load, a supervisor
+while it runs.
+
+What each project contributed, traced to the document that used it, and
+what differs: [`docs/related-work.md`](docs/related-work.md).
+
+---
+
 ## Design commitments
 
 | Area | Commitment | Why |
@@ -426,12 +462,16 @@ The surface is the union of what everything `main` reaches performs, so
 it is precise rather than conservative — rows are exact in both
 directions. An absent label is a proof: the capability was released, and
 nothing in the language creates another. `--output json` gives the same
-report as data, for a supervisor checking it against a grant — which
-[`docs/under-a-grant.md`](docs/under-a-grant.md) finally tried, with
-`lex-os`'s real grant. One of its three dimensions is enforceable and
-**more precisely than the grant can express**; two are not, because
-sockets and processes are libc and `Ffi(lib)` is the one capability whose
-label does not bound what it authorises.
+report as data, and it **fails closed**: its first field is `"bounded"`,
+`false` for any program that reaches foreign code, because a library is
+not an authority domain and `ffi("libc")` bounds nothing.
+
+That was learned by trying. [`docs/under-a-grant.md`](docs/under-a-grant.md)
+checked the report against `lex-os`'s real grant: the filesystem
+dimension is enforceable, and **more precisely than the grant can
+express**; network and exec are not, because sockets and processes are
+libc. So a supervisor that reads nothing but `bounded` refuses exactly the
+programs it cannot see into.
 [`docs/authority.md`](docs/authority.md).
 
 A program is the **set of files named on the command line**, in any order.
