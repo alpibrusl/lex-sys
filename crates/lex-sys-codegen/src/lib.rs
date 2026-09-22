@@ -75,6 +75,14 @@ fn leaves_into(ty: &Type, program: &Program, pointer: types::Type, out: &mut Vec
         // a load rather than a computation, and why §4 can let a type
         // contain itself through one: it is a single leaf however large what
         // it points at is.
+        // `docs/file-handles.md`: a handle at run time is a descriptor and
+        // nothing else -- one leaf, where the six capabilities are zero.
+        // That is the whole difference between a `File` and an `Io`: one
+        // is authority the type system tracks and the kernel has never
+        // heard of, and the other is a number the kernel gave us.
+        Type::Named(def, _) if def.0 as usize == lex_sys_ir::PRELUDE_FILE => {
+            out.push(types::I64);
+        }
         Type::Named(def, args) if def.0 as usize == lex_sys_ir::PRELUDE_BOX => {
             out.push(pointer);
             // `docs/boxed-slices.md` §2: the second shape. A box of an
@@ -1109,6 +1117,97 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
         vec![self.builder.block_params(merge)[0]]
     }
 
+    /// `open_read(fs, path)` — `docs/file-handles.md` §2.1.
+    ///
+    /// The first half of [`Self::file_op`] and then it stops: the same
+    /// prefix check, the same non-variadic `open(path, O_RDONLY)`, and the
+    /// descriptor *kept* rather than spent on one transfer and closed. What
+    /// comes back is an `Opened`, which is a tag and one payload leaf.
+    fn open_file(&mut self, prefix: &str, args: &[Expr]) -> Vec<Value> {
+        let pointer = self.pointer;
+        // The capability is zero-sized and stops here; the path does not.
+        let path = self.expr(&args[1]);
+        let path = self.checked_path(prefix, &path);
+
+        let open = self.libc_fn("open", &[pointer, types::I32], &[types::I32]);
+        let open = self.module.declare_func_in_func(open, self.builder.func);
+        let read_only = self.builder.ins().iconst(types::I32, 0);
+        let call = self.builder.ins().call(open, &[path, read_only]);
+        let fd = self.builder.inst_results(call)[0];
+        let fd = self.builder.ins().sextend(types::I64, fd);
+
+        // Tag 0 is `Ok(File)` and tag 1 is `Failed(int)`, which is
+        // declaration order in the prelude. Each variant has its own leaf
+        // -- a payload slot is not shared between arms -- so this is three
+        // values: the tag, the descriptor, and the reason.
+        let failed = self.builder.ins().icmp_imm(IntCC::SignedLessThan, fd, 0);
+        let one = self.builder.ins().iconst(types::I64, 1);
+        let zero = self.builder.ins().iconst(types::I64, 0);
+        let tag = self.builder.ins().select(failed, one, zero);
+        let reason = self.errno();
+        vec![tag, fd, reason]
+    }
+
+    /// `errno`, which is a *function* in every modern libc because it has
+    /// to be per-thread: `__errno_location()` on glibc and `__error()` on
+    /// macOS, both answering a pointer to it.
+    ///
+    /// This is `docs/file-handles.md` §6's last row, and the half of §1's
+    /// argument for handles that survived the other two evaporating:
+    /// `fs_read` answers `-1` with no reason attached, so `examples/sort/`
+    /// could name the path it could not read and not why. `Failed(int)`
+    /// carries the number, and a program can say *No such file* where it
+    /// used to say only *failed*.
+    fn errno(&mut self) -> Value {
+        let pointer = self.pointer;
+        let symbol = match self.module.isa().triple().operating_system {
+            target_lexicon::OperatingSystem::Darwin(_) => "__error",
+            _ => "__errno_location",
+        };
+        let id = self.libc_fn(symbol, &[], &[pointer]);
+        let at = self.module.declare_func_in_func(id, self.builder.func);
+        let call = self.builder.ins().call(at, &[]);
+        let address = self.builder.inst_results(call)[0];
+        let value = self.builder.ins().load(types::I32, MemFlags::trusted(), address, 0);
+        self.builder.ins().sextend(types::I64, value)
+    }
+
+    /// `read(file, into)` — `docs/file-handles.md` §3.
+    ///
+    /// One `read(2)`, and its three outcomes sorted into the three
+    /// constructors. The descriptor comes in as the handle's one leaf, and
+    /// the buffer as the pointer and length a slice always is.
+    fn read_file(&mut self, args: &[Value]) -> Vec<Value> {
+        let pointer = self.pointer;
+        // The handle arrives as a reference, so the descriptor is a load;
+        // the buffer is the pointer and length a slice always is.
+        let fd = self.builder.ins().load(types::I64, MemFlags::trusted(), args[0], 0);
+        let fd = self.builder.ins().ireduce(types::I32, fd);
+
+        let read = self.libc_fn("read", &[types::I32, pointer, types::I64], &[types::I64]);
+        let read = self.module.declare_func_in_func(read, self.builder.func);
+        let call = self.builder.ins().call(read, &[fd, args[1], args[2]]);
+        let moved = self.builder.inst_results(call)[0];
+
+        // Tags in declaration order: `Got(int)` 0, `End` 1, `Failed(int)` 2.
+        // A negative count is a failure, a zero is the end, and anything
+        // else is bytes -- which is the whole of `read(2)`'s contract and
+        // the last place this program has to know it.
+        let negative = self.builder.ins().icmp_imm(IntCC::SignedLessThan, moved, 0);
+        let empty = self.builder.ins().icmp_imm(IntCC::Equal, moved, 0);
+        let two = self.builder.ins().iconst(types::I64, 2);
+        let one = self.builder.ins().iconst(types::I64, 1);
+        let zero = self.builder.ins().iconst(types::I64, 0);
+        let not_failed = self.builder.ins().select(empty, one, zero);
+        let tag = self.builder.ins().select(negative, two, not_failed);
+        // Three leaves: the tag, `Got`'s count, and `Failed`'s reason.
+        // `End` carries nothing and so occupies none. Reading `errno` here
+        // costs a call on the path that succeeded too, which is the price
+        // of answering *why* rather than *whether* (§6).
+        let reason = self.errno();
+        vec![tag, moved, reason]
+    }
+
     /// The address of one of `main`'s two globals
     /// (`docs/arguments.md` §3).
     fn global(&mut self, name: &str) -> Value {
@@ -1814,6 +1913,10 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
                 let (write, prefix, args) = (*write, prefix.clone(), args.clone());
                 self.file_op(write, &prefix, &args)
             }
+            Expr::OpenFile { prefix, args } => {
+                let (prefix, args) = (prefix.clone(), args.clone());
+                self.open_file(&prefix, &args)
+            }
             Expr::FieldRef { base, def, args, index } => {
                 let address = self.scalar(base);
                 let TypeInfo::Struct { fields, .. } = self.program.type_info(*def) else {
@@ -2095,6 +2198,26 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
                     // prefix the backend checks against.
                     Callee::Builtin(Builtin::FsRead | Builtin::FsWrite) => {
                         unreachable!("a file operation is lowered as `Expr::FileOp`")
+                    }
+                    // Like the two above: the prefix decides the path check,
+                    // so it travels in its own node.
+                    Callee::Builtin(Builtin::OpenRead) => {
+                        unreachable!("`open_read` is lowered as `Expr::OpenFile`")
+                    }
+                    // `docs/file-handles.md` §3. `read(2)` answers a count,
+                    // zero at the end, and `-1` with the reason in `errno` --
+                    // which is exactly the three outcomes `Read` has
+                    // constructors for, so this is the one place the
+                    // sentinel is unpacked and the last.
+                    Callee::Builtin(Builtin::ReadFile) => self.read_file(&args),
+                    // `close(2)`. The handle is one leaf and it ends here.
+                    Callee::Builtin(Builtin::Close) => {
+                        let close = self.libc_fn("close", &[types::I32], &[types::I32]);
+                        let close = self.module.declare_func_in_func(close, self.builder.func);
+                        let fd = self.builder.ins().ireduce(types::I32, args[0]);
+                        let call = self.builder.ins().call(close, &[fd]);
+                        let answer = self.builder.inst_results(call)[0];
+                        vec![self.builder.ins().sextend(types::I64, answer)]
                     }
                     // Like `len` and the file operations: checked and
                     // lowered at the call site, because the type being boxed

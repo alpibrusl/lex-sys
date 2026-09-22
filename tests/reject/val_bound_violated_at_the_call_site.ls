@@ -1,4 +1,4 @@
-//~ ERROR needs `T` to be `val`, and `File` is `res`
+//~ ERROR needs `T` to be `val`, and `Ticket` is `res`
 //~ RULE mode-bound-violated
 
 // `docs/mode-polymorphism.md` §3.1 — the half §12 said was missing: *a
@@ -7,14 +7,14 @@
 // `sink` declares `[T: val]`, so it is checked once at a copyable `T`
 // and accepted: dropping `x` is fine for a type with no obligation. The
 // promise is then kept at the **call site**, which is where the mistake
-// is -- the caller chose `File`, the callee did not.
+// is -- the caller chose `Ticket`, the callee did not.
 //
 // Compare `unbounded_generic_drops_its_parameter.ls`, which is the same
 // body without the bound and is refused at the definition instead. Two
 // fixtures for one rule, because the rule is about *where* the error
 // goes and one of them could not show that alone.
 
-res struct File {
+res struct Ticket {
     fd: int,
 }
 
@@ -29,5 +29,5 @@ fn main(world: World) -> [] int {
     release(fs);
     release(heap);
     release(io);
-    return sink(File { fd: 5 });
+    return sink(Ticket { fd: 5 });
 }

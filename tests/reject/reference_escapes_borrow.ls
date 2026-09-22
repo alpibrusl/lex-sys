@@ -5,14 +5,14 @@
 // function's return type can only name `q`, and no `borrow` block outlives a
 // region its caller opened -- so the reference has nowhere to go.
 
-res struct File { fd: int }
+res struct Ticket { fd: int }
 
-fn close(f: File) -> [] int {
-    let File { fd } = f;
+fn close(f: Ticket) -> [] int {
+    let Ticket { fd } = f;
     return fd;
 }
 
-fn escape[&q](f: File, fallback: &q File) -> [] &q File {
+fn escape[&q](f: Ticket, fallback: &q Ticket) -> [] &q Ticket {
     borrow f as &r in {
         return r;
     }

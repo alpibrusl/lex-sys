@@ -7,18 +7,18 @@
 //
 // Swapping the arguments makes it hold -- see `tests/accept/nested_regions.ls`.
 
-res struct File { fd: int }
+res struct Ticket { fd: int }
 
-fn close(f: File) -> [] int {
-    let File { fd } = f;
+fn close(f: Ticket) -> [] int {
+    let Ticket { fd } = f;
     return fd;
 }
 
-fn copy_into[&dst, &src where src <= dst](d: &dst File, s: &src File) -> [] int {
+fn copy_into[&dst, &src where src <= dst](d: &dst Ticket, s: &src Ticket) -> [] int {
     return 0;
 }
 
-fn unsatisfied(x: File, y: File) -> [] int {
+fn unsatisfied(x: Ticket, y: Ticket) -> [] int {
     borrow x as &outer in {
         borrow y as &inner in {
             let n = copy_into(inner, outer);

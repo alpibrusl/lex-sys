@@ -8,18 +8,18 @@
 // Rust reaches for subtyping and variance here. The stack does it instead:
 // `b`'s block does not enclose `a`'s, and that is the whole answer.
 
-res struct File { fd: int }
+res struct Ticket { fd: int }
 
-fn close(f: File) -> [] int {
-    let File { fd } = f;
+fn close(f: Ticket) -> [] int {
+    let Ticket { fd } = f;
     return fd;
 }
 
-fn same[&p](a: &p File, b: &p File) -> [] int {
+fn same[&p](a: &p Ticket, b: &p Ticket) -> [] int {
     return 0;
 }
 
-fn unrelated(x: File, y: File) -> [] int {
+fn unrelated(x: Ticket, y: Ticket) -> [] int {
     borrow x as &a in {
         borrow y as &b in {
             let n = same(a, b);

@@ -679,6 +679,10 @@ pub struct Ast {
 pub const PRELUDE: &[&str] = &[
     "World", "Io", "Split", "io", "Ffi", "ffi", "L", "Fs", "fs", "P", "Heap", "heap", "Box", "B",
     "Args", "args",
+    // `docs/file-handles.md`: a handle and the two enums its verbs answer.
+    // The constructors are interned too, because a `match` arm names one
+    // and the prelude is what makes those names exist without a library.
+    "File", "Opened", "Ok", "Failed", "Read", "Got", "End",
 ];
 
 impl Ast {

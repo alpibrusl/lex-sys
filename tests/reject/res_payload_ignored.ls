@@ -2,13 +2,13 @@
 //~ RULE linear-value-unconsumed
 
 // The same rule one level down: `_` in a payload position drops whatever was
-// there. Fine for an `int`, not for a `File`.
+// there. Fine for an `int`, not for a `Ticket`.
 
-res struct File { fd: int }
+res struct Ticket { fd: int }
 
 enum Slot {
     Empty,
-    Full(File),
+    Full(Ticket),
 }
 
 fn size(s: Slot) -> [] int {

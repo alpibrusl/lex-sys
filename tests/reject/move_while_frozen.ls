@@ -4,14 +4,14 @@
 // §5 rule 1: frozen means not movable and not consumable. `close` takes
 // ownership, and ownership is exactly what the borrow suspended.
 
-res struct File { fd: int }
+res struct Ticket { fd: int }
 
-fn close(f: File) -> [] int {
-    let File { fd } = f;
+fn close(f: Ticket) -> [] int {
+    let Ticket { fd } = f;
     return fd;
 }
 
-fn move_frozen(f: File) -> [] int {
+fn move_frozen(f: Ticket) -> [] int {
     borrow f as &r in {
         let fd = close(f);
     }

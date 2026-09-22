@@ -3,14 +3,14 @@
 
 // §4: every path, not some path. The `else` returns with `f` still live.
 
-res struct File { fd: int }
+res struct Ticket { fd: int }
 
-fn close(f: File) -> [] int {
-    let File { fd } = f;
+fn close(f: Ticket) -> [] int {
+    let Ticket { fd } = f;
     return fd;
 }
 
-fn sometimes(f: File, flag: bool) -> [] int {
+fn sometimes(f: Ticket, flag: bool) -> [] int {
     if flag {
         let fd = close(f);
         return 0;

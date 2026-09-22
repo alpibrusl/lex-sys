@@ -17,18 +17,18 @@ fn sum(p: Point) -> [] int {
     return x + y;
 }
 
-res struct File {
+res struct Ticket {
     fd: int,
 }
 
 // A `res` aggregate: `res` by inference, because a member is.
 struct Pair {
-    left: File,
-    right: File,
+    left: Ticket,
+    right: Ticket,
 }
 
-fn close(f: File) -> [] int {
-    let File { fd } = f;
+fn close(f: Ticket) -> [] int {
+    let Ticket { fd } = f;
     return fd;
 }
 
@@ -38,7 +38,7 @@ fn close_both(p: Pair) -> [] int {
     return close(left) * 10 + close(right);
 }
 
-// Generic structs carry their argument's mode: `Held[File]` is `res`,
+// Generic structs carry their argument's mode: `Held[Ticket]` is `res`,
 // `Held[int]` is `val`, and neither needed a word written on it.
 struct Held[T] {
     value: T,
@@ -52,8 +52,8 @@ fn unwrap[T](h: Held[T]) -> [] T {
 fn run[&i](io: &!i Io) -> [io_write] int {
     putchar(io, 48 + sum(Point { x: 1, y: 2 }) - 0);
     putchar(io, 48 + unwrap(Held { value: 4 }));
-    putchar(io, 48 + close_both(Pair { left: File { fd: 1 }, right: File { fd: 2 } }) / 10);
-    putchar(io, 48 + close(unwrap(Held { value: File { fd: 2 } })));
+    putchar(io, 48 + close_both(Pair { left: Ticket { fd: 1 }, right: Ticket { fd: 2 } }) / 10);
+    putchar(io, 48 + close(unwrap(Held { value: Ticket { fd: 2 } })));
     putchar(io, 10);
     return 0;
 }

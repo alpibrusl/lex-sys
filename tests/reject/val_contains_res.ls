@@ -4,10 +4,10 @@
 // §3: `val` is a promise about the whole type, so a `res` member breaks it.
 // Inferring `res` here instead would make the word decorative.
 
-res struct File { fd: int }
+res struct Ticket { fd: int }
 
 val struct Wrapper {
-    f: File,
+    f: Ticket,
 }
 
 fn main() -> [] int {

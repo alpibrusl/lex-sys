@@ -4,10 +4,10 @@
 // §4: linear, not affine. A value that reaches the end of its scope with
 // nothing having consumed it is the leak the system exists to prevent.
 
-res struct File { fd: int }
+res struct Ticket { fd: int }
 
-fn open(fd: int) -> [] File {
-    return File { fd: fd };
+fn open(fd: int) -> [] Ticket {
+    return Ticket { fd: fd };
 }
 
 fn main() -> [] int {

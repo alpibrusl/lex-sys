@@ -3922,6 +3922,86 @@ fn main(world: World) -> [] int {
     );
 }
 
+/// `docs/file-handles.md` §4.1 — the prefix survives the rewrite.
+///
+/// `bulk-io.md` §3.2's rule is that a program must not look more
+/// powerful for having been written better, and the test there pins the
+/// authority report **byte for byte**: `write_bytes` writes the same
+/// stream `putchar` writes, so a new label would have been a regression.
+///
+/// Here the rule needs one more word, and the difference is real rather
+/// than a loophole. A handle program *does* perform something the path
+/// program does not — it holds a descriptor across statements — and §4
+/// chose to say so, in a label carrying **no argument**. So the test is
+/// not byte-identity but the thing §3.2 was actually protecting:
+///
+///   * every label that carries an argument is identical, so the
+///     directory is still named and named the same way;
+///   * the handle program adds exactly one label, and it has no
+///     argument to widen.
+///
+/// If `read` ever grew a path — §4's first option, which would make a
+/// handle unusable by a function that was not told where it came from —
+/// the first assertion catches it.
+#[test]
+fn a_handle_reports_the_same_prefix_a_path_does() {
+    let prologue = "\
+fn main(world: World) -> [] int {
+    let Split { io, ffi, fs, heap, args } = split(world);
+    release(args); release(heap); release(ffi); release(io);
+";
+    let whole_file = format!(
+        "{prologue}    region a {{\n        \
+         var buffer = alloc_slice[a](8, byte_of(0));\n        \
+         borrow fs as &c in {{ fs_read(c, \"/tmp/lex-sys-authority.txt\", buffer); }}\n    \
+         }}\n    release(fs);\n    return 0;\n}}\n"
+    );
+    let handle = format!(
+        "{prologue}    region a {{\n        \
+         var buffer = alloc_slice[a](8, byte_of(0));\n        \
+         borrow fs as &c in {{\n            \
+         match open_read(c, \"/tmp/lex-sys-authority.txt\") {{\n                \
+         Opened::Ok(f) => {{\n                    var file = f;\n                    \
+         borrow mut file as &!h in {{ file_read(h, buffer); }}\n                    \
+         file_close(file);\n                }}\n                \
+         Opened::Failed(e) => {{ }}\n            }}\n        }}\n    }}\n    \
+         release(fs);\n    return 0;\n}}\n"
+    );
+
+    let by_path = authority_json(&whole_file, "handle-authority-path");
+    let by_handle = authority_json(&handle, "handle-authority-handle");
+
+    // The labels that name something. Every label has an `"argument"` key;
+    // a path-free one spells it `null`, which is exactly the difference
+    // this test is about.
+    let arguments = |json: &str| {
+        json.match_indices("{ \"name\":")
+            .filter_map(|(at, _)| json[at..].find('}').map(|end| json[at..at + end + 1].to_owned()))
+            .filter(|row| !row.contains("\"argument\": null"))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        arguments(&by_path),
+        arguments(&by_handle),
+        "a handle must name the same directory a path does (§4.1):\n{by_path}\n{by_handle}"
+    );
+    assert!(
+        by_path.contains("\"fs_read\""),
+        "the path program should name the directory at all:\n{by_path}"
+    );
+
+    // And the one label the rewrite adds carries nothing to widen.
+    assert!(
+        by_handle.contains("\"file_read\""),
+        "a handle program performs `file_read` (§4.1):\n{by_handle}"
+    );
+    assert!(
+        by_handle.contains("{ \"name\": \"file_read\", \"argument\": null }"),
+        "`file_read` must carry no argument, or a handle would need its own path:\n{by_handle}"
+    );
+    assert!(!by_path.contains("file_read"), "the path program never opens a handle:\n{by_path}");
+}
+
 /// §3 — `write_bytes` goes through the same stream `putchar` does.
 ///
 /// The reason the primitive lowers to `fwrite` on `stdout` rather than

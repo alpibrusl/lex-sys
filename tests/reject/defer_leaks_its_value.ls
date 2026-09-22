@@ -10,12 +10,12 @@
 // that block, and "which rules still apply over there" is exactly what
 // a sugar feature gets wrong.
 
-res struct File {
+res struct Ticket {
     fd: int,
 }
 
-fn open(n: int) -> [] File {
-    return File { fd: n };
+fn open(n: int) -> [] Ticket {
+    return Ticket { fd: n };
 }
 
 fn leak() -> [] int {

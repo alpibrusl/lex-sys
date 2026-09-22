@@ -3,14 +3,14 @@
 
 // §4.1: `close` took ownership, so there is nothing left to pass again.
 
-res struct File { fd: int }
+res struct Ticket { fd: int }
 
-fn close(f: File) -> [] int {
-    let File { fd } = f;
+fn close(f: Ticket) -> [] int {
+    let Ticket { fd } = f;
     return fd;
 }
 
-fn after_move(f: File) -> [] int {
+fn after_move(f: Ticket) -> [] int {
     let first = close(f);
     return close(f);
 }

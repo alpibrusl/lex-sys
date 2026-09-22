@@ -57,6 +57,19 @@ pub const PRELUDE_HEAP: usize = 4;
 pub const PRELUDE_BOX: usize = 5;
 pub const PRELUDE_ARGS: usize = 6;
 pub const PRELUDE_SPLIT: usize = 7;
+/// `docs/file-handles.md`: an open descriptor, and the two enums its verbs
+/// answer. A `File` is a capability the program *made* rather than one
+/// `split` handed it — `open_read` manufactures one out of an `Fs(p)` and
+/// a path, which is why that row carries the prefix and `read`'s does not
+/// (§4.1).
+pub const PRELUDE_FILE: usize = 8;
+pub const PRELUDE_OPENED: usize = 9;
+pub const PRELUDE_READ: usize = 10;
+
+/// How many types the prelude declares. Written once, because a builtin's
+/// signature indexes this table and a stale slice is a panic rather than a
+/// diagnostic.
+pub const PRELUDE_COUNT: usize = 11;
 
 /// The library an unnarrowed `Ffi` names: none of them yet.
 ///
@@ -358,6 +371,35 @@ pub enum Builtin {
     /// missing file is an ordinary outcome, not a broken promise. A path
     /// *outside* the capability's prefix is the broken promise, and traps.
     FsRead,
+    /// `open_read[&c, &a](fs: &c Fs(p), path: &a [byte]) -> [fs_read(p)] Opened`
+    /// — `docs/file-handles.md` §2.1.
+    ///
+    /// Checked at the call site like [`Builtin::FsRead`] and for the same
+    /// reason: the prefix lives in the capability's type, and a fixed
+    /// signature has no parameter to name it. The whole path check is paid
+    /// here, once, which is §4's fourth answer — the handle it returns
+    /// cannot be widened, so `read` performs a path-free label.
+    OpenRead,
+    /// `file_read[&f, &b](file: &!f File, into: &!b [byte]) -> [file_read] Read`
+    /// — §3.
+    ///
+    /// Named the way `fs_read` is — the subject, then the verb — and
+    /// sharing its name with the label it performs, exactly as `fs_read`
+    /// does. The design doc wrote it `read`, and `read` turned out to be
+    /// a name a program wants: `examples/serve/` declares `extern fn read`
+    /// for libc's, on a socket rather than a file.
+    ///
+    /// Three outcomes and three constructors. A sentinel is how `getchar`
+    /// and `fs_read` came to disagree about `-1`, so this is the API that
+    /// does not repeat it.
+    ReadFile,
+    /// `file_close(file: File) -> [] int` — §2. Renamed from `close` for
+    /// the reason above: 31 fixtures had a `close` of their own.
+    ///
+    /// Consumes the handle, which is what `res` means; the checker needed
+    /// nothing new to enforce it. The `int` is the outcome of `close(2)`,
+    /// which can fail even though nothing can be done about it.
+    Close,
     /// `fs_write(fs, path, bytes) -> [fs_write(p)] int` — write a whole file.
     FsWrite,
     /// `box(h, value) -> [heap] Box[T]` — one value, one allocation.
@@ -442,6 +484,9 @@ impl Builtin {
         Builtin::BitsOf,
         Builtin::FsRead,
         Builtin::FsWrite,
+        Builtin::OpenRead,
+        Builtin::ReadFile,
+        Builtin::Close,
         Builtin::Box,
         Builtin::Unbox,
         Builtin::Contents,
@@ -472,6 +517,9 @@ impl Builtin {
             Builtin::Sqrt => "sqrt",
             Builtin::BitsOf => "bits_of",
             Builtin::FsRead => "fs_read",
+            Builtin::OpenRead => "open_read",
+            Builtin::ReadFile => "file_read",
+            Builtin::Close => "file_close",
             Builtin::FsWrite => "fs_write",
             Builtin::Box => "box",
             Builtin::Unbox => "unbox",
@@ -535,6 +583,8 @@ impl Builtin {
             Builtin::PutChar | Builtin::GetChar | Builtin::ArgCount | Builtin::Arg => 1,
             // Two: the borrowed `Io` and the slice's own region.
             Builtin::Write | Builtin::WriteErr => 2,
+            // Two: the borrowed handle and the buffer's own region.
+            Builtin::ReadFile => 2,
             _ => 0,
         }
     }
@@ -599,6 +649,30 @@ impl Builtin {
             // capability's type is what decides the row, and a fixed
             // signature cannot say that.
             Builtin::FsRead | Builtin::FsWrite => (Vec::new(), Type::Unit),
+            // Checked at the call site, exactly as `fs_read` is: the prefix
+            // is in the capability's type (`docs/file-handles.md` §2.1).
+            Builtin::OpenRead => (Vec::new(), Type::Unit),
+            // The handle is borrowed uniquely because the read moves the
+            // descriptor's offset, and the buffer uniquely because the read
+            // writes into it -- the same pair `fs_read` takes, with the
+            // capability replaced by the handle it was spent on.
+            Builtin::ReadFile => (
+                vec![
+                    Type::Ref {
+                        unique: true,
+                        region: Region::Param(0),
+                        inner: Box::new(named(PRELUDE_FILE)),
+                    },
+                    Type::Ref {
+                        unique: true,
+                        region: Region::Param(1),
+                        inner: Box::new(Type::Slice(Box::new(Type::Byte))),
+                    },
+                ],
+                named(PRELUDE_READ),
+            ),
+            // By value: `close` ends the handle, which is what `res` means.
+            Builtin::Close => (vec![named(PRELUDE_FILE)], Type::Int),
             // All three depend on the type being boxed, which a fixed
             // signature has no parameter to name (`docs/heap.md` §3).
             Builtin::Box
@@ -676,6 +750,12 @@ impl Builtin {
             // §2: reading the command line is an effect, because a
             // function whose behaviour depends on it should say so.
             Builtin::ArgCount | Builtin::Arg => Effects::plain(["args"]),
+            // `docs/file-handles.md` §4.1: a path-free label, because the
+            // path was spent at `open_read` and the row there still names
+            // the directory. `close` performs nothing for the same reason
+            // `release` does not -- ending a capability is not using one --
+            // even though this one ends with a syscall.
+            Builtin::ReadFile => Effects::plain(["file_read"]),
             // Moving authority around is not an effect. Splitting a `World`
             // observes nothing outside the program and releasing a
             // capability only ends one; what a capability *authorises* is
@@ -831,6 +911,16 @@ pub enum Expr {
     /// from is gone by then (`docs/filesystem.md` §4).
     FileOp {
         write: bool,
+        prefix: String,
+        args: Vec<Expr>,
+    },
+    /// `open_read(fs, path)` (`docs/file-handles.md` §2.1).
+    ///
+    /// Its own node for the same reason [`Expr::FileOp`] is one: the prefix
+    /// the capability was narrowed to travels with it, because the backend
+    /// emits the path check against that prefix and the type it came from
+    /// is gone by then. What comes back is an `Opened`, tagged.
+    OpenFile {
         prefix: String,
         args: Vec<Expr>,
     },
@@ -1475,6 +1565,16 @@ pub fn leaf_free(ty: &Type) -> bool {
     ))
 }
 
+/// Is this the file handle (`docs/file-handles.md`)?
+///
+/// Unlike the six capabilities above it is **not** leaf-free: a descriptor
+/// is a number the kernel gave us, so a `File` is one leaf. That is the
+/// whole difference between it and an `Io`, which is authority with nothing
+/// behind it.
+pub fn is_file(def: DefId) -> bool {
+    def.0 as usize == PRELUDE_FILE
+}
+
 /// Is this one of the prelude's capability types?
 ///
 /// §8.2: authority comes from exactly one place, and a program that could
@@ -1492,6 +1592,11 @@ fn is_capability(def: DefId) -> bool {
             | PRELUDE_HEAP
             | PRELUDE_ARGS
             | PRELUDE_SPLIT
+            // §8.2 again, and more sharply: a program that could write
+            // `File { }` would be conjuring a descriptor, which is worse
+            // than conjuring authority because the number would be someone
+            // else's open file.
+            | PRELUDE_FILE
     )
 }
 
@@ -1506,6 +1611,16 @@ fn released_only(def: DefId) -> bool {
         def.0 as usize,
         PRELUDE_WORLD | PRELUDE_IO | PRELUDE_FFI | PRELUDE_FS | PRELUDE_HEAP | PRELUDE_ARGS
     )
+}
+
+/// Is this a type whose only consumer is `close` (`docs/file-handles.md`)?
+///
+/// The same rule as [`released_only`] and [`unboxed_only`], pointed at the
+/// third thing that owns something the language cannot see: a descriptor.
+/// Destructuring a `File` would drop it without calling `close`, which is
+/// a leak the kernel keeps rather than one the allocator does.
+fn closed_only(def: DefId) -> bool {
+    def.0 as usize == PRELUDE_FILE
 }
 
 /// Is this a type whose only consumer is `unbox` (`docs/heap.md` §3)?
@@ -1567,6 +1682,12 @@ fn discharged_by(defs: &[TypeDef], ty: &Type) -> Effects {
         // `docs/heap.md` §2: one plain label, because a heap has no parts to
         // name and so nothing to narrow.
         PRELUDE_HEAP => Effects::plain(["heap"]),
+        // `docs/file-handles.md` §4.1: one plain label, for the same reason
+        // `heap` is plain. A file *does* have a name -- and the name was
+        // spent at `open`, so re-attaching it here would mean a handle that
+        // could not be passed to a function that had not been told where it
+        // came from.
+        PRELUDE_FILE => Effects::plain(["file_read"]),
         // `docs/arguments.md` §2: one plain label. There is one command
         // line and no part of it to name, so nothing to narrow.
         PRELUDE_ARGS => Effects::plain(["args"]),
@@ -1576,7 +1697,8 @@ fn discharged_by(defs: &[TypeDef], ty: &Type) -> Effects {
         // declaring `[]` is not a gap in the row — it is the parameter list
         // saying something stronger.
         PRELUDE_WORLD => {
-            let mut all = Effects::plain(["io_read", "io_write", "err_write", "heap", "args"]);
+            let mut all =
+                Effects::plain(["io_read", "io_write", "err_write", "heap", "args", "file_read"]);
             for name in ["ffi", "fs_read", "fs_write"] {
                 all.union(&Effects::new([Label {
                     name: name.to_owned(),
@@ -1598,10 +1720,21 @@ fn discharged_by(defs: &[TypeDef], ty: &Type) -> Effects {
         // both are things its holder can reach without asking anyone
         // (`docs/filesystem.md` §1).
         PRELUDE_FS => match args.first() {
-            Some(Type::Lit(prefix)) => Effects::new([
-                Label { name: "fs_read".to_owned(), argument: Some(prefix.clone()) },
-                Label { name: "fs_write".to_owned(), argument: Some(prefix.clone()) },
-            ]),
+            Some(Type::Lit(prefix)) => {
+                let mut all = Effects::new([
+                    Label { name: "fs_read".to_owned(), argument: Some(prefix.clone()) },
+                    Label { name: "fs_write".to_owned(), argument: Some(prefix.clone()) },
+                ]);
+                // `docs/file-handles.md` §4.1: and reading a handle it
+                // opened. The only way to hold a `File` is to have held an
+                // `Fs` -- `open_read` is where one comes from -- so the
+                // capability that paid the prefix discharges the path-free
+                // label that follows it. A function handed only a `File`
+                // still declares `file_read`, which is the case the
+                // authority report is for.
+                all.union(&Effects::plain(["file_read"]));
+                all
+            }
             _ => Effects::pure(),
         },
         _ => Effects::pure(),
@@ -1632,6 +1765,13 @@ fn prelude_types(ast: &Ast, unifier: &mut Unifier) -> Vec<TypeDef> {
     let arguments = symbol("Args");
     let boxed = symbol("Box");
     let split = symbol("Split");
+    let file = symbol("File");
+    let opened = symbol("Opened");
+    let read_answer = symbol("Read");
+    let ok_arm = symbol("Ok");
+    let failed_arm = symbol("Failed");
+    let got_arm = symbol("Got");
+    let end_arm = symbol("End");
     let library = symbol("L");
     let prefix = symbol("P");
     let boxed_param = symbol("B");
@@ -1654,6 +1794,9 @@ fn prelude_types(ast: &Ast, unifier: &mut Unifier) -> Vec<TypeDef> {
     let box_def = unifier.declare("Box");
     let args_def = unifier.declare("Args");
     let split_def = unifier.declare("Split");
+    let file_def = unifier.declare("File");
+    let opened_def = unifier.declare("Opened");
+    let read_def = unifier.declare("Read");
 
     vec![
         TypeDef {
@@ -1776,6 +1919,61 @@ fn prelude_types(ast: &Ast, unifier: &mut Unifier) -> Vec<TypeDef> {
                 // Nothing to narrow: the heap is the heap.
                 (heap_field, Type::Named(heap_def, Vec::new())),
                 (args_field, Type::Named(args_def, Vec::new())),
+            ]),
+            span,
+        },
+        // `docs/file-handles.md`: the handle. `res`, because a descriptor
+        // is owned exactly once and `close` is what ends it -- the same
+        // shape as every other resource here, and the reason §2's three
+        // questions about linearity needed no new machinery.
+        //
+        // No fields, like `Box[T]`: what it owns is a descriptor, and a
+        // pattern that could name it would be a program conjuring one.
+        TypeDef {
+            name: file,
+            def: file_def,
+            module: PRELUDE_MODULE,
+            public: true,
+            generics: Vec::new(),
+            bounds: Vec::new(),
+            declared_mode: Some(Mode::Res),
+            kind: DefKind::Struct(Vec::new()),
+            span,
+        },
+        // §2.1: what `open_read` answers, because `Result[T, E]` is
+        // `std.result` and a builtin's signature is the prelude. Two arms,
+        // and the type is a resource because one of them holds one.
+        TypeDef {
+            name: opened,
+            def: opened_def,
+            module: PRELUDE_MODULE,
+            public: true,
+            generics: Vec::new(),
+            bounds: Vec::new(),
+            declared_mode: None,
+            kind: DefKind::Enum(vec![
+                (ok_arm, vec![Type::Named(file_def, Vec::new())]),
+                (failed_arm, vec![Type::Int]),
+            ]),
+            span,
+        },
+        // §3: three constructors because a read has three outcomes, and an
+        // enum rather than a sentinel because a sentinel is how `getchar`
+        // and `fs_read` came to disagree about what `-1` means. `Got(0)` is
+        // not reachable -- a read that returns nothing is `End` or
+        // `Failed`, never a zero.
+        TypeDef {
+            name: read_answer,
+            def: read_def,
+            module: PRELUDE_MODULE,
+            public: true,
+            generics: Vec::new(),
+            bounds: Vec::new(),
+            declared_mode: None,
+            kind: DefKind::Enum(vec![
+                (got_arm, vec![Type::Int]),
+                (end_arm, Vec::new()),
+                (failed_arm, vec![Type::Int]),
             ]),
             span,
         },
@@ -2736,7 +2934,7 @@ fn settle_expr(expr: &mut Expr, unifier: &Unifier) {
         }
         Expr::Len(inner) => settle_expr(inner, unifier),
         Expr::Bytes(_) => {}
-        Expr::FileOp { args, .. } => {
+        Expr::FileOp { args, .. } | Expr::OpenFile { args, .. } => {
             for arg in args {
                 settle_expr(arg, unifier);
             }
@@ -3904,7 +4102,7 @@ impl<'a> FnLowering<'a> {
 
     /// The prelude's type ids, in the order `prelude_types` declared them.
     fn prelude(&self) -> Vec<DefId> {
-        self.defs[..8].iter().map(|d| d.def).collect()
+        self.defs[..PRELUDE_COUNT].iter().map(|d| d.def).collect()
     }
 
     /// Does `outer` outlive `inner` (§5.2)?
@@ -4407,6 +4605,19 @@ impl<'a> FnLowering<'a> {
                 Rule::CapabilityMisused,
                 format!(
                     "`{text}` is a capability and is destroyed by `release`, not by being taken apart; authority is a resource and the function that ends one is named"
+                ),
+                span,
+            ));
+        }
+        // `docs/file-handles.md` §2: the third thing that owns something
+        // the language cannot see. A pattern naming the descriptor would
+        // be a way to drop one without `close`, and the kernel keeps that
+        // leak rather than the allocator.
+        if closed_only(def_id) {
+            return Err(Diagnostic::new(
+                Rule::LinearValueTakenApart,
+                format!(
+                    "`{text}` owns an open descriptor and is ended by `file_close`, not by being taken apart"
                 ),
                 span,
             ));
@@ -4937,6 +5148,47 @@ impl<'a> FnLowering<'a> {
                 args: vec![fs_value, path_value, buffer_value],
             },
             Type::Int,
+        ))
+    }
+
+    /// `open_read(fs, path)` — `docs/file-handles.md` §2.1.
+    ///
+    /// The same shape as [`Self::file_op`] minus the buffer: the prefix
+    /// comes out of the capability's type, the row carries it, and what is
+    /// handed back is an `Opened` rather than an `int`, because "the file
+    /// or the reason" is two outcomes and `-1` is one sentence
+    /// (`file-handles.md` §3).
+    fn open_read(&mut self, args: &[ExprId], span: Span) -> Result<(Expr, Type), Diagnostic> {
+        let [capability, path] = args else {
+            return Err(Diagnostic::new(
+                Rule::ArityMismatch,
+                format!("`open_read` takes 2 arguments, but {} were given", args.len()),
+                span,
+            ));
+        };
+        let capability_span = self.ast.expr_span(*capability);
+        let (fs_value, fs_ty) = self.expr(*capability)?;
+        let prefix = self.granted_prefix(&fs_ty, capability_span)?;
+
+        let bytes = Type::Ref {
+            unique: false,
+            region: self.unifier.fresh_region(),
+            inner: Box::new(Type::Slice(Box::new(Type::Byte))),
+        };
+        let path_span = self.ast.expr_span(*path);
+        let (path_value, path_ty) = self.expr(*path)?;
+        self.expect_type(&bytes, &path_ty, path_span)?;
+
+        // §4.1: the whole prefix is spent here. `read` performs a path-free
+        // label afterwards precisely because this row named the directory.
+        self.performed.union(&Effects::new([Label {
+            name: "fs_read".to_owned(),
+            argument: Some(prefix.clone()),
+        }]));
+
+        Ok((
+            Expr::OpenFile { prefix, args: vec![fs_value, path_value] },
+            Type::Named(self.prelude()[PRELUDE_OPENED], Vec::new()),
         ))
     }
 
@@ -6288,6 +6540,9 @@ impl<'a> FnLowering<'a> {
                 }
                 if let Some(op @ (Builtin::FsRead | Builtin::FsWrite)) = Builtin::from_name(text) {
                     return self.file_op(op, args, span);
+                }
+                if Builtin::from_name(text) == Some(Builtin::OpenRead) {
+                    return self.open_read(args, span);
                 }
                 // `docs/heap.md` §3: all three depend on the type being
                 // boxed, which no fixed signature has a parameter to name.
@@ -7667,8 +7922,8 @@ mod slice_tests {
         // §6.1, sharpened: the fill is copied into every element, and a
         // linear value cannot be copied at all.
         let message = refused(
-            "res struct File { fd: int } \
-             fn open(n: int) -> [] File { return File { fd: n }; } \
+            "res struct Ticket { fd: int } \
+             fn open(n: int) -> [] Ticket { return Ticket { fd: n }; } \
              fn main() -> [] int { region a { let s = alloc_slice[a](2, open(1)); } return 0; }",
         );
         assert!(message.contains("arena holds `val` data only"), "{message}");
@@ -7904,8 +8159,8 @@ mod arena_tests {
         // linear obligation put inside would be dropped rather than
         // discharged -- a leak with a static blessing.
         let message = refused(
-            "res struct File { fd: int } \
-             fn open(n: int) -> [] File { return File { fd: n }; } \
+            "res struct Ticket { fd: int } \
+             fn open(n: int) -> [] Ticket { return Ticket { fd: n }; } \
              fn main() -> [] int { let f = open(3); region a { let p = alloc[a](f); } return 0; }",
         );
         assert!(message.contains("arena holds `val` data only"), "{message}");
@@ -8196,9 +8451,9 @@ mod linearity_tests {
     /// A `res` type, a way to make one, and a way to spend one -- the three
     /// things every case below needs.
     const PRELUDE: &str = "\
-        res struct File { fd: int } \
-        fn open(n: int) -> [] File { return File { fd: n }; } \
-        fn close(f: File) -> [] int { let File { fd } = f; return fd; } ";
+        res struct Ticket { fd: int } \
+        fn open(n: int) -> [] Ticket { return Ticket { fd: n }; } \
+        fn close(f: Ticket) -> [] int { let Ticket { fd } = f; return fd; } ";
 
     fn check(body: &str) -> Result<Program, Diagnostic> {
         lower_src(&format!("{PRELUDE}{body}"))
@@ -8220,7 +8475,7 @@ mod linearity_tests {
     #[test]
     fn a_res_value_used_twice_is_refused() {
         let message = refused(
-            "struct Pair { a: File, b: File } \
+            "struct Pair { a: Ticket, b: Ticket } \
              fn main() -> [] int { let f = open(1); let p = Pair { a: f, b: f }; return 0; }",
         );
         assert!(message.contains("already been consumed"), "{message}");
@@ -8303,7 +8558,7 @@ mod linearity_tests {
         // `&&` does not evaluate its right operand when the left decides, so
         // a consumption there happens on one path only.
         let message = refused(
-            "fn spend(f: File) -> [] bool { let a = close(f); return true; } \
+            "fn spend(f: Ticket) -> [] bool { let a = close(f); return true; } \
              fn main() -> [] int { let f = open(1); \
              let b = false && spend(f); return 0; }",
         );
@@ -8346,7 +8601,7 @@ mod linearity_tests {
     #[test]
     fn a_wildcard_arm_may_not_swallow_a_res_scrutinee() {
         let message = refused(
-            "enum Slot { Empty, Full(File) } \
+            "enum Slot { Empty, Full(Ticket) } \
              fn size(s: Slot) -> [] int { match s { Slot::Empty => { return 0; } \
              _ => { return 1; } } } fn main() -> [] int { return 0; }",
         );
@@ -8356,7 +8611,7 @@ mod linearity_tests {
     #[test]
     fn an_ignored_res_payload_is_refused() {
         let message = refused(
-            "enum Slot { Empty, Full(File) } \
+            "enum Slot { Empty, Full(Ticket) } \
              fn size(s: Slot) -> [] int { match s { Slot::Empty => { return 0; } \
              Slot::Full(_) => { return 1; } } } fn main() -> [] int { return 0; }",
         );
@@ -8375,7 +8630,7 @@ mod linearity_tests {
     #[test]
     fn mode_is_inferred_from_members() {
         let message = refused(
-            "struct Holder { f: File } \
+            "struct Holder { f: Ticket } \
              fn main() -> [] int { let h = Holder { f: open(1) }; return 0; }",
         );
         assert!(message.contains("consumed on every path"), "{message}");
@@ -8383,7 +8638,7 @@ mod linearity_tests {
 
     #[test]
     fn a_val_declaration_may_not_hold_a_res_member() {
-        let message = refused("val struct Wrapper { f: File } fn main() -> [] int { return 0; }");
+        let message = refused("val struct Wrapper { f: Ticket } fn main() -> [] int { return 0; }");
         assert!(message.contains("declared `val`, but it holds"), "{message}");
     }
 
@@ -8394,7 +8649,7 @@ mod linearity_tests {
 
     #[test]
     fn a_generic_type_takes_its_mode_from_its_arguments() {
-        // `Held[int]` is `val` and may be dropped; `Held[File]` is `res`.
+        // `Held[int]` is `val` and may be dropped; `Held[Ticket]` is `res`.
         accepted(
             "struct Held[T] { value: T } fn main() -> [] int { let h = Held { value: 1 }; return 0; }",
         );
@@ -8411,7 +8666,7 @@ mod linearity_tests {
     /// obligation — so a body that drops it is refused **at the
     /// definition**, which is where it is wrong. This used to be accepted
     /// where it was written and refused at the copy, as
-    /// "(instantiated at `File`)".
+    /// "(instantiated at `Ticket`)".
     ///
     /// A function that meant only copyable types says `[T: val]`, and
     /// then the refusal moves to the call site, where the choice of type
@@ -8437,7 +8692,7 @@ mod linearity_tests {
              fn main() -> [] int { return sink(open(1)); }",
         );
         assert!(call_site.contains("needs `T` to be `val`"), "{call_site}");
-        assert!(call_site.contains("`File` is `res`"), "{call_site}");
+        assert!(call_site.contains("`Ticket` is `res`"), "{call_site}");
     }
 
     /// `docs/collections.md` §3: a `res` aggregate may bound its own
@@ -8460,11 +8715,11 @@ mod linearity_tests {
         // not inside the library at some `box_slice` it cannot change.
         let message = refused(
             "res struct Vec[T: val] { held: Box[[T]], used: int } \
-             fn hold(v: Vec[File]) -> [] int { return 0; } \
+             fn hold(v: Vec[Ticket]) -> [] int { return 0; } \
              fn main() -> [] int { return 0; }",
         );
         assert!(message.contains("`Vec` bounds `T` by `val`"), "{message}");
-        assert!(message.contains("`File` is `res`"), "{message}");
+        assert!(message.contains("`Ticket` is `res`"), "{message}");
     }
 
     /// The bug the bound was unusable for (`docs/collections.md` §4).
@@ -8538,7 +8793,7 @@ mod linearity_tests {
     #[test]
     fn destructuring_consumes_the_whole_and_produces_the_parts() {
         accepted(
-            "struct Pair { a: File, b: File } \
+            "struct Pair { a: Ticket, b: Ticket } \
              fn main() -> [] int { let p = Pair { a: open(1), b: open(2) }; \
              let Pair { a, b } = p; return close(a) + close(b); }",
         );
@@ -8547,7 +8802,7 @@ mod linearity_tests {
     #[test]
     fn a_destructured_part_carries_its_own_obligation() {
         let message = refused(
-            "struct Pair { a: File, b: File } \
+            "struct Pair { a: Ticket, b: Ticket } \
              fn main() -> [] int { let p = Pair { a: open(1), b: open(2) }; \
              let Pair { a, b } = p; return close(a); }",
         );
@@ -8557,7 +8812,7 @@ mod linearity_tests {
     #[test]
     fn a_partial_destructuring_is_refused() {
         let message = refused(
-            "struct Pair { a: File, b: File } \
+            "struct Pair { a: Ticket, b: Ticket } \
              fn main() -> [] int { let p = Pair { a: open(1), b: open(2) }; \
              let Pair { a } = p; return close(a); }",
         );
@@ -8567,7 +8822,7 @@ mod linearity_tests {
     #[test]
     fn destructuring_names_the_declared_fields() {
         let message =
-            refused("fn main() -> [] int { let File { handle } = open(1); return handle; }");
+            refused("fn main() -> [] int { let Ticket { handle } = open(1); return handle; }");
         assert!(message.contains("has no field `handle`"), "{message}");
         let message = refused("fn main() -> [] int { let Missing { x } = open(1); return x; }");
         assert!(message.contains("is not a struct"), "{message}");
@@ -8616,7 +8871,7 @@ mod linearity_tests {
     #[test]
     fn a_shared_borrow_reads_without_consuming() {
         accepted(
-            "fn size[&p](h: &p File) -> [] int { return h.fd; } \
+            "fn size[&p](h: &p Ticket) -> [] int { return h.fd; } \
              fn main() -> [] int { let f = open(1); \
              borrow f as &r in { let n = size(r); } return close(f); }",
         );
@@ -8676,7 +8931,7 @@ mod linearity_tests {
         // thaw the outer one -- which is why the checker counts rather than
         // flags.
         accepted(
-            "fn size[&p](h: &p File) -> [] int { return h.fd; } \
+            "fn size[&p](h: &p Ticket) -> [] int { return h.fd; } \
              fn main() -> [] int { let f = open(1); \
              borrow f as &a in { borrow f as &b in { let n = size(a) + size(b); } \
              let m = size(a); } return close(f); }",
@@ -8686,7 +8941,7 @@ mod linearity_tests {
     #[test]
     fn a_reference_may_not_outlive_its_region() {
         let message = refused(
-            "fn escape[&q](f: File, fallback: &q File) -> [] &q File { \
+            "fn escape[&q](f: Ticket, fallback: &q Ticket) -> [] &q Ticket { \
              borrow f as &r in { return r; } return fallback; } \
              fn main() -> [] int { return 0; }",
         );
@@ -8701,7 +8956,7 @@ mod linearity_tests {
         let message = refused(
             "enum Holder[T] { Empty, Full(T) } \
              fn main() -> [] int { let f = open(1); let hole = Holder::Empty; \
-             borrow f as &r in { let used: Holder[&r File] = hole; } return close(f); }",
+             borrow f as &r in { let used: Holder[&r Ticket] = hole; } return close(f); }",
         );
         assert!(message.contains("would hold a reference into `r`"), "{message}");
     }
@@ -8709,7 +8964,7 @@ mod linearity_tests {
     #[test]
     fn a_region_must_be_in_scope_where_it_is_written() {
         let message = refused(
-            "fn escape(f: File) -> [] &r File { return f; } fn main() -> [] int { return 0; }",
+            "fn escape(f: Ticket) -> [] &r Ticket { return f; } fn main() -> [] int { return 0; }",
         );
         assert!(message.contains("is not a region in scope"), "{message}");
     }
@@ -8717,8 +8972,8 @@ mod linearity_tests {
     #[test]
     fn sibling_regions_do_not_outlive_each_other() {
         let message = refused(
-            "fn same[&p](a: &p File, b: &p File) -> [] int { return 0; } \
-             fn u(x: File, y: File) -> [] int { \
+            "fn same[&p](a: &p Ticket, b: &p Ticket) -> [] int { return 0; } \
+             fn u(x: Ticket, y: Ticket) -> [] int { \
              borrow x as &a in { borrow y as &b in { let n = same(a, b); } } \
              return close(x) + close(y); } fn main() -> [] int { return 0; }",
         );
@@ -8728,8 +8983,8 @@ mod linearity_tests {
     #[test]
     fn an_outer_reference_is_usable_in_an_inner_block() {
         accepted(
-            "fn size[&p](h: &p File) -> [] int { return h.fd; } \
-             fn u(x: File, y: File) -> [] int { \
+            "fn size[&p](h: &p Ticket) -> [] int { return h.fd; } \
+             fn u(x: Ticket, y: Ticket) -> [] int { \
              borrow x as &a in { borrow y as &b in { let n = size(a) + size(b); } } \
              return close(x) + close(y); } fn main() -> [] int { return 0; }",
         );
@@ -8737,8 +8992,8 @@ mod linearity_tests {
 
     #[test]
     fn a_declared_outlives_is_checked_at_the_call_site() {
-        const OUTER_FIRST: &str = "fn copy_into[&dst, &src where src <= dst](d: &dst File, s: &src File) -> [] int { return 0; } \
-             fn u(x: File, y: File) -> [] int { \
+        const OUTER_FIRST: &str = "fn copy_into[&dst, &src where src <= dst](d: &dst Ticket, s: &src Ticket) -> [] int { return 0; } \
+             fn u(x: Ticket, y: Ticket) -> [] int { \
              borrow x as &outer in { borrow y as &inner in { let n = copy_into(PAIR); } } \
              return close(x) + close(y); } fn main() -> [] int { return 0; }";
         // `dst` is the outer block, which does outlive the inner `src`.
@@ -8751,7 +9006,7 @@ mod linearity_tests {
     #[test]
     fn a_where_clause_names_the_declarations_own_regions() {
         let message = refused(
-            "fn f[&a where b <= a](x: &a File) -> [] int { return 0; } fn main() -> [] int { return 0; }",
+            "fn f[&a where b <= a](x: &a Ticket) -> [] int { return 0; } fn main() -> [] int { return 0; }",
         );
         assert!(message.contains("is not a region parameter"), "{message}");
     }
@@ -8762,7 +9017,7 @@ mod linearity_tests {
             refused("fn f[T, &T](x: T) -> [] int { return 0; } fn main() -> [] int { return 0; }");
         assert!(message.contains("both a type parameter and a region parameter"), "{message}");
         let message = refused(
-            "fn f[&r, &r](x: &r File) -> [] int { return 0; } fn main() -> [] int { return 0; }",
+            "fn f[&r, &r](x: &r Ticket) -> [] int { return 0; } fn main() -> [] int { return 0; }",
         );
         assert!(message.contains("region parameter `r` is declared twice"), "{message}");
     }
@@ -8850,7 +9105,7 @@ mod linearity_tests {
         // Overwriting names no consumer for what was there, which is the
         // silent drop §4 refuses however it is spelled.
         let message = refused(
-            "struct Holder { f: File } \
+            "struct Holder { f: Ticket } \
              fn set[&r](h: &!r Holder) -> [] int { h.f = open(2); return 0; } \
              fn main() -> [] int { return 0; }",
         );
@@ -8863,7 +9118,7 @@ mod linearity_tests {
         // is emitted once however many regions call it. A *type* parameter
         // still copies.
         let program = check(
-            "fn size[&p](h: &p File) -> [] int { return h.fd; } \
+            "fn size[&p](h: &p Ticket) -> [] int { return h.fd; } \
              fn main() -> [] int { let f = open(1); \
              borrow f as &a in { let x = size(a); } \
              borrow f as &b in { let y = size(b); } return close(f); }",
@@ -9021,14 +9276,14 @@ mod linearity_tests {
         // moves out of a reference, so a `res` payload binds as a borrow
         // and the scrutinee is as owned after the match as before it.
         let message = refused(
-            "enum Holder { None, Some(File) } \
+            "enum Holder { None, Some(Ticket) } \
              fn peek[&r](h: &r Holder) -> [] int { \
              match h { Holder::None => { return 0; } \
              Holder::Some(f) => { return close(f); } } } \
              fn main() -> [] int { return 0; }",
         );
-        // `close` takes a `File`; this is a `&r File`.
-        assert!(message.contains("expected `File`"), "{message}");
+        // `close` takes a `Ticket`; this is a `&r Ticket`.
+        assert!(message.contains("expected `Ticket`"), "{message}");
     }
 
     #[test]
@@ -9038,7 +9293,7 @@ mod linearity_tests {
         // consumption and the second would not compile.
         assert!(
             check(
-                "enum Holder { None, Some(File) } \
+                "enum Holder { None, Some(Ticket) } \
                  fn tag[&r](h: &r Holder) -> [] int { \
                  match h { Holder::None => { return 0; } Holder::Some(_) => { return 1; } } } \
                  fn main() -> [] int { let h = Holder::Some(open(1)); var n = 0; \
@@ -9057,14 +9312,14 @@ mod linearity_tests {
         // owned it.
         assert!(
             check(
-                "enum Holder { None, Some(File) } \
+                "enum Holder { None, Some(Ticket) } \
                  fn tag[&r](h: &r Holder) -> [] int { match h { _ => { return 1; } } } \
                  fn main() -> [] int { return 0; }",
             )
             .is_ok()
         );
         let message = refused(
-            "enum Holder { None, Some(File) } \
+            "enum Holder { None, Some(Ticket) } \
              fn take(h: Holder) -> [] int { match h { _ => { return 1; } } } \
              fn main() -> [] int { return 0; }",
         );
@@ -9076,7 +9331,7 @@ mod linearity_tests {
         // §3: copying a `res` out of a reference would leave two values
         // where one obligation is owed.
         let message = refused(
-            "fn peek[&r](f: &r File) -> [] File { return *f; } \
+            "fn peek[&r](f: &r Ticket) -> [] Ticket { return *f; } \
              fn main() -> [] int { return 0; }",
         );
         assert!(message.contains("`*` would copy it"), "{message}");
@@ -9150,7 +9405,8 @@ mod linearity_tests {
         // `borrow` block. That is a confusing way to find out, so it is
         // checked here instead.
         for builtin in crate::Builtin::ALL {
-            let prelude: Vec<crate::DefId> = (0..8).map(crate::DefId).collect();
+            let prelude: Vec<crate::DefId> =
+                (0..crate::PRELUDE_COUNT as u32).map(crate::DefId).collect();
             let (params, ret) = builtin.signature(&prelude);
             let highest = params
                 .iter()
@@ -9176,7 +9432,7 @@ mod linearity_tests {
         // copied, so what comes back is a reference to it -- exactly as
         // `match` on a reference binds a `res` payload.
         accepted(
-            "res struct Holder { f: File } \
+            "res struct Holder { f: Ticket } \
              fn peek[&r](h: &r Holder) -> [] int { let taken = h.f; return 0; } \
              fn main() -> [] int { return 0; }",
         );
@@ -9187,11 +9443,11 @@ mod linearity_tests {
         // belongs at the *use*, because the double free was never about
         // reading -- and the ordinary type rule already puts it there.
         let message = refused(
-            "res struct Holder { f: File } \
+            "res struct Holder { f: Ticket } \
              fn steal[&r](h: &r Holder) -> [] int { let taken = h.f; return close(taken); } \
              fn main() -> [] int { return 0; }",
         );
-        assert!(message.contains("expected `File`, found `&r File`"), "{message}");
+        assert!(message.contains("expected `Ticket`, found `&r Ticket`"), "{message}");
     }
 
     #[test]
@@ -9201,7 +9457,7 @@ mod linearity_tests {
         // different offsets in one value and no two names reach the same
         // one.
         accepted(
-            "res struct Holder { f: File } \
+            "res struct Holder { f: Ticket } \
              fn peek[&r](h: &!r Holder) -> [] int { let taken = h.f; return 0; } \
              fn main() -> [] int { return 0; }",
         );
@@ -9213,8 +9469,8 @@ mod linearity_tests {
         // escape its block, by the same occurs-check as every other
         // reference (`contents_escapes_its_borrow.ls`).
         accepted(
-            "res struct Holder { f: File } \
-             fn take[&r](h: &r Holder) -> [] &r File { return h.f; } \
+            "res struct Holder { f: Ticket } \
+             fn take[&r](h: &r Holder) -> [] &r Ticket { return h.f; } \
              fn main() -> [] int { return 0; }",
         );
     }
