@@ -1,4 +1,5 @@
 //~ ERROR `Point` is a struct, not an enum
+//~ RULE not-an-enum
 
 struct Point { x: int }
 

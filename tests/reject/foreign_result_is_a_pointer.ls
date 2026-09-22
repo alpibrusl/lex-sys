@@ -10,6 +10,7 @@
 // `()` as a third, which sent a reader to write `()` and be told there is
 // no `()` -- `tuples.md` §4 keeps unit out of the grammar on purpose.
 //~ ERROR a foreign result is `int` or `bool`
+//~ RULE foreign-boundary-type
 
 extern fn getenv[&f, &n](ffi: &f Ffi("libc"), name: &n [byte])
     -> [ffi("libc")] &n [byte];

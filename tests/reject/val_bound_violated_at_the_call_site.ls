@@ -1,4 +1,5 @@
 //~ ERROR needs `T` to be `val`, and `File` is `res`
+//~ RULE mode-bound-violated
 
 // `docs/mode-polymorphism.md` §3.1 — the half §12 said was missing: *a
 // signature that says so and is checked once*.

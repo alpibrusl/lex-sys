@@ -1,4 +1,5 @@
 //~ ERROR is `res`, so `*` would copy it
+//~ RULE linear-value-taken-apart
 
 // `docs/reading-references.md` §3: `*` copies, so what it copies has to be
 // `val`.

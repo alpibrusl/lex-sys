@@ -1,4 +1,5 @@
 //~ ERROR there is no `res` bound
+//~ RULE mode-bound-violated
 
 // `docs/mode-polymorphism.md` §3.2.
 //

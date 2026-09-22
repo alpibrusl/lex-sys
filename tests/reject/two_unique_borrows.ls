@@ -1,4 +1,5 @@
 //~ ERROR already uniquely borrowed
+//~ RULE borrow-conflict
 
 // §5 rule 2: one unique borrow at a time. Two `&!` references to one value
 // are two ways to reach it, which is the one thing `&!` promises there are

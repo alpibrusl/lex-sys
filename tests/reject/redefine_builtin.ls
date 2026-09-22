@@ -1,4 +1,5 @@
 //~ ERROR builtin
+//~ RULE builtin-redeclared
 
 fn putchar(c: int) -> [] int {
     return c;

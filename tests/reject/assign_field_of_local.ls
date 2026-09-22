@@ -1,4 +1,5 @@
 //~ ERROR assign the whole value instead
+//~ RULE not-a-reference
 
 // A place is a whole binding or a field reached through a unique reference,
 // and deliberately not a field of an owned local. That would be a partial

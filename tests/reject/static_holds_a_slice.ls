@@ -5,6 +5,7 @@
 // second way to say one thing — and the second way would be the slower
 // one, because it cannot participate in an expression.
 //~ ERROR must be a slice
+//~ RULE static-item
 
 static limit: int {
     return 4096;

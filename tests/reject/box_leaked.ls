@@ -1,4 +1,5 @@
 //~ ERROR is still live
+//~ RULE linear-value-unconsumed
 
 // `docs/heap.md` §3.1, and the property the whole section is for.
 //

@@ -9,9 +9,11 @@ pub mod ast;
 pub mod lexer;
 pub mod parser;
 pub mod print;
+pub mod rules;
 pub mod span;
 
 pub use ast::Ast;
 pub use parser::{parse, parse_into};
 pub use print::print;
+pub use rules::Rule;
 pub use span::{Diagnostic, SourceFile, SourceMap, Span};

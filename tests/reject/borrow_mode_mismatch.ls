@@ -1,4 +1,5 @@
 //~ ERROR write `as &!r`
+//~ RULE pattern-shape
 
 // `mut` in one place and not the other is a typo, not a shorthand, so neither
 // spelling is quietly preferred over the other.

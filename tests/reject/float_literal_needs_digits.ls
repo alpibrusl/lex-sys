@@ -5,6 +5,7 @@
 // rather than accepted as `1.0`. What it lexes as is an integer followed
 // by a dot, which is the start of a field access with nothing after it.
 //~ ERROR expected an identifier
+//~ RULE type-mismatch
 
 fn main(world: World) -> [] int {
     let Split { io, ffi, fs, heap, args } = split(world);

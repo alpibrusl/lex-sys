@@ -1,4 +1,5 @@
 //~ ERROR every variant of `Shape` is already matched
+//~ RULE match-arm-unreachable
 
 enum Shape { Circle(int) }
 

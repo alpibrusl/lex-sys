@@ -1,4 +1,5 @@
 //~ ERROR would discard the `res` value it still holds
+//~ RULE linear-value-unconsumed
 
 // An assignment overwrites. Overwriting a live `res` binding destroys it
 // without naming a consumer, so the binding must be spent first.

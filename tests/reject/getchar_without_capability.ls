@@ -1,4 +1,5 @@
 //~ ERROR takes 1 argument
+//~ RULE arity-mismatch
 
 // `docs/standard-input.md` §2: reading the console is authority, and
 // authority is a parameter.

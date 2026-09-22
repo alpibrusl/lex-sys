@@ -1,4 +1,5 @@
 //~ ERROR contains itself
+//~ RULE infinite-type
 
 enum List { Nil, Cons(int, List) }
 

@@ -1,4 +1,5 @@
 //~ ERROR requires `src <= dst`
+//~ RULE reference-escapes-region
 
 // §5.2: a declared `where` is an obligation the call site discharges with the
 // same lexical lookup the body used. Here `dst` is bound to the inner block

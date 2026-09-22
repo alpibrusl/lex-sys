@@ -1,4 +1,5 @@
 //~ ERROR does not declare
+//~ RULE effect-not-declared
 
 // §7.3 and §8.4: a foreign declaration's row is exact, like every other.
 //

@@ -1,4 +1,5 @@
 //~ ERROR frozen by an enclosing `borrow`
+//~ RULE borrow-conflict
 
 // §5 rule 1: frozen means not movable and not consumable. `close` takes
 // ownership, and ownership is exactly what the borrow suspended.

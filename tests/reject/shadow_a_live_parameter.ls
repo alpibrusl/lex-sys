@@ -1,4 +1,5 @@
 //~ ERROR shadowing it here would put that value out of reach
+//~ RULE linear-value-unconsumed
 
 // `docs/shadowing.md` §4.1.
 //

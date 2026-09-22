@@ -1,4 +1,5 @@
 //~ ERROR an arena holds `val` data only
+//~ RULE mode-bound-violated
 
 // §6.1, and a slice makes the reason sharper rather than different: the
 // fill is copied into every element, and a linear value cannot be copied at

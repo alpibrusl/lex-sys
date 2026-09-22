@@ -1,4 +1,5 @@
 //~ ERROR a pattern does not nest
+//~ RULE pattern-shape
 
 // `docs/tuples.md` §4. This language has no nested patterns anywhere --
 // not in a struct pattern, not in a `match` arm -- and tuples are not the

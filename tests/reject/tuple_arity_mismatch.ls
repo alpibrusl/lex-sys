@@ -1,4 +1,5 @@
 //~ ERROR destructuring takes the whole value apart
+//~ RULE arity-mismatch
 
 // `docs/tuples.md` §3.2. The same rule a struct pattern has, and the same
 // reason: destructuring is the operation that *discharges* a linear

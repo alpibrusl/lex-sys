@@ -1,4 +1,5 @@
 //~ ERROR expected `Box[?0]`, found `&p Box[int]`
+//~ RULE type-mismatch
 
 // `docs/tuples.md` §3.1, the reference case, and
 // `reading-references.md` §2.0 in the place tuples add.

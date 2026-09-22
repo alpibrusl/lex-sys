@@ -1,4 +1,5 @@
 //~ ERROR may not outlive its region
+//~ RULE reference-escapes-region
 
 // A buffer built in an arena is a slice into that arena, and §6 of
 // `linearity-and-effects.md` says nothing whose type mentions the region

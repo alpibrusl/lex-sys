@@ -1,4 +1,5 @@
 //~ ERROR does not declare
+//~ RULE effect-not-declared
 
 // §7.3 and `docs/filesystem.md` §1: the row is exact, and the label carries
 // the prefix.

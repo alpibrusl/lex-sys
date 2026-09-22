@@ -2,6 +2,7 @@
 // overflow: a zero divisor is as certain as an overflow when both
 // operands are written down.
 //~ ERROR this divides by zero
+//~ RULE constant-traps
 
 fn main(world: World) -> [] int {
     let Split { io, ffi, fs, heap, args } = split(world);

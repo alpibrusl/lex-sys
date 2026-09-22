@@ -1,4 +1,5 @@
 //~ ERROR has already been consumed
+//~ RULE linear-use-after-move
 
 // `docs/defer.md` §3: the expansion is **real**, so a value the block
 // also consumes by hand is consumed twice and refused by the ordinary

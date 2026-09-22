@@ -1,4 +1,5 @@
 //~ ERROR `shout` performs `io_write`
+//~ RULE effect-not-declared
 
 // `docs/bulk-io.md` §3.2: the bulk write is a second primitive behind the
 // **same** capability, so it is authorised exactly as `putchar` is and

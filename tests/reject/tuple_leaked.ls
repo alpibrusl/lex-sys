@@ -1,4 +1,5 @@
 //~ ERROR is still live at the end of this block
+//~ RULE linear-value-unconsumed
 
 // `docs/tuples.md` §2.3: a tuple is `res` if any component is, and every
 // obligation that follows from `res` follows here.

@@ -1,4 +1,5 @@
 //~ ERROR `Point` has no field `z`
+//~ RULE unknown-name
 
 struct Point { x: int, y: int }
 

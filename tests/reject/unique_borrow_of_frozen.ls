@@ -1,4 +1,5 @@
 //~ ERROR cannot be borrowed uniquely here
+//~ RULE borrow-conflict
 
 // The other direction of the same rule. A shared borrow promises the value
 // will not change; taking a unique one inside it would be promising to

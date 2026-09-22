@@ -1,5 +1,6 @@
 // Nothing about the call says what `T` is: it appears only in the return type.
 //~ ERROR cannot tell what `T` is in this call to `make`
+//~ RULE ambiguous-type
 
 enum Option[T] { None, Some(T) }
 

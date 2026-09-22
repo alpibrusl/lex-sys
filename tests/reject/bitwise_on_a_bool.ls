@@ -5,6 +5,7 @@
 // almost the same thing -- which is the shape of bug that is found in
 // production rather than in review.
 //~ ERROR expected `int`, found `bool`
+//~ RULE type-mismatch
 
 fn main(world: World) -> [] int {
     let Split { io, ffi, fs, heap, args } = split(world);

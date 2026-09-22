@@ -1,4 +1,5 @@
 //~ ERROR is a struct, not an enum
+//~ RULE match-on-a-non-enum
 
 struct Point { x: int }
 

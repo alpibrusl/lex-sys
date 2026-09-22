@@ -1,4 +1,5 @@
 //~ ERROR a file declares at most one module
+//~ RULE program-shape
 
 // `docs/modules.md` §3. A file is in one namespace.
 //

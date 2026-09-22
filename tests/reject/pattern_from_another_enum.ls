@@ -1,4 +1,5 @@
 //~ ERROR expected a variant of `A`, found one of `B`
+//~ RULE unknown-name
 
 enum A { One }
 enum B { Two }

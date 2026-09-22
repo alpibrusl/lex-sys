@@ -1,4 +1,5 @@
 //~ ERROR a tuple has two components or more
+//~ RULE pattern-shape
 
 // `docs/tuples.md` §2.1.
 //

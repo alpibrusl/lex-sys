@@ -7,6 +7,7 @@
 // that a fixture whose subject is "this is not a token" has a shelf life,
 // and the suite is what notices when it expires.
 //~ ERROR unexpected character `@`
+//~ RULE unexpected-character
 
 fn main(world: World) -> [] int {
     return 2 @ 3;

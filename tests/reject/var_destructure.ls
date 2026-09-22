@@ -1,4 +1,5 @@
 //~ ERROR write `let`, not `var`
+//~ RULE pattern-shape
 
 // Destructuring takes a value apart once. There is nothing left to reassign,
 // so `var` would be a binding that can never mean what it says.

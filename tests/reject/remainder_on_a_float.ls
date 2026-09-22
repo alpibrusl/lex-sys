@@ -6,6 +6,7 @@
 // belongs in `std.math` when floats get one, where it can say which
 // rounding it does.
 //~ ERROR expected `int`, found `float`
+//~ RULE type-mismatch
 
 fn main(world: World) -> [] int {
     let Split { io, ffi, fs, heap, args } = split(world);

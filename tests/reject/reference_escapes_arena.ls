@@ -1,4 +1,5 @@
 //~ ERROR a reference may not outlive its region
+//~ RULE reference-escapes-region
 
 // §6: nothing whose type mentions the arena's region leaves the block. This
 // is the same occurs-check as §5's, run by the same code -- which is the

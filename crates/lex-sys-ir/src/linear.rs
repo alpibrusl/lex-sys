@@ -25,7 +25,7 @@
 //! The replay is one walk with no fixpoint (§10): a branch is a join of its
 //! arms, and a loop is an equality check at the back edge.
 
-use lex_sys_syntax::{Diagnostic, Span};
+use lex_sys_syntax::{Diagnostic, Rule, Span};
 use lex_sys_types::{Type, Unifier};
 
 pub use lex_sys_syntax::ast::Mode;
@@ -279,6 +279,7 @@ impl Check<'_> {
                     if let Some(old) = shadows {
                         if self.state[old.0 as usize] == State::Live {
                             return Err(Diagnostic::new(
+                                Rule::LinearValueUnconsumed,
                                 format!(
                                     "`{name}` still holds a `res` value; shadowing it here would put that value out of reach with its obligation undischarged. Consume it first"
                                 ),
@@ -293,6 +294,7 @@ impl Check<'_> {
                 Event::Freeze { slot, unique, span } => {
                     if self.state[slot.0 as usize] == State::Moved {
                         return Err(Diagnostic::new(
+                            Rule::LinearUseAfterMove,
                             format!(
                                 "`{}` has already been consumed; there is nothing left to borrow",
                                 self.name(*slot)
@@ -308,6 +310,7 @@ impl Check<'_> {
                         // only way to reach the value, or it is not unique.
                         (Borrow::Locked, _) => {
                             return Err(Diagnostic::new(
+                                Rule::BorrowConflict,
                                 format!(
                                     "`{name}` is already uniquely borrowed; a `&!` reference is the only way to reach a value, so there is at most one"
                                 ),
@@ -316,6 +319,7 @@ impl Check<'_> {
                         }
                         (Borrow::Frozen(_), true) => {
                             return Err(Diagnostic::new(
+                                Rule::BorrowConflict,
                                 format!(
                                     "`{name}` is already borrowed by an enclosing `borrow`, so it cannot be borrowed uniquely here"
                                 ),
@@ -342,6 +346,7 @@ impl Check<'_> {
                 // way to reach the value.
                 Event::Use { slot, span } if self.borrowed[slot.0 as usize] == Borrow::Locked => {
                     return Err(Diagnostic::new(
+                        Rule::BorrowConflict,
                         format!(
                             "`{}` is uniquely borrowed here, so nothing else may read it; the reference is the only way to reach it",
                             self.name(*slot)
@@ -357,6 +362,7 @@ impl Check<'_> {
                     // movable, not consumable.
                     State::Live if self.borrowed[slot.0 as usize] != Borrow::Owned => {
                         return Err(Diagnostic::new(
+                            Rule::BorrowConflict,
                             format!(
                                 "`{}` is frozen by an enclosing `borrow`, so it cannot be moved or consumed here",
                                 self.name(*slot)
@@ -367,6 +373,7 @@ impl Check<'_> {
                     State::Live => self.state[slot.0 as usize] = State::Moved,
                     State::Moved => {
                         return Err(Diagnostic::new(
+                            Rule::LinearUseAfterMove,
                             format!(
                                 "`{}` has already been consumed; a `res` value is used exactly once",
                                 self.name(*slot)
@@ -381,6 +388,7 @@ impl Check<'_> {
                     // assignment is the third way to break the promise.
                     if self.borrowed[slot.0 as usize] != Borrow::Owned {
                         return Err(Diagnostic::new(
+                            Rule::BorrowConflict,
                             format!(
                                 "`{}` is borrowed by an enclosing `borrow`, so it cannot be assigned to here",
                                 self.name(*slot)
@@ -390,6 +398,7 @@ impl Check<'_> {
                     }
                     if self.state[slot.0 as usize] == State::Live {
                         return Err(Diagnostic::new(
+                            Rule::LinearValueUnconsumed,
                             format!(
                                 "assigning to `{}` would discard the `res` value it still holds; consume it first",
                                 self.name(*slot)
@@ -404,6 +413,7 @@ impl Check<'_> {
                 Event::Discard { ty, what, span } => {
                     if mode_of(self.defs, self.unifier, self.bounds, ty) == Mode::Res {
                         return Err(Diagnostic::new(
+                            Rule::LinearValueUnconsumed,
                             format!(
                                 "{what} is `res` (`{}`), so it cannot be discarded; name the function that consumes it",
                                 self.unifier.display(&self.unifier.resolve(ty))
@@ -424,6 +434,7 @@ impl Check<'_> {
                             _ => "field",
                         };
                         return Err(Diagnostic::new(
+                            Rule::LinearValueTakenApart,
                             format!(
                                 "`{}` is `res`, so a {part} cannot be read out of it; take the whole value apart with a destructuring `let` (a non-owning read is a borrow, which is §5)",
                                 self.unifier.display(&resolved)
@@ -435,6 +446,7 @@ impl Check<'_> {
                 Event::Return { span } => {
                     if let Some(slot) = self.live_slot() {
                         return Err(Diagnostic::new(
+                            Rule::LinearValueUnconsumed,
                             format!(
                                 "`{}` is still live here; a `res` value must be consumed on every path",
                                 self.name(slot)
@@ -453,6 +465,7 @@ impl Check<'_> {
                                 let (name, span) =
                                     self.names[slot.0 as usize].clone().expect("just declared");
                                 return Err(Diagnostic::new(
+                                    Rule::LinearValueUnconsumed,
                                     format!(
                                         "`{name}` is still live at the end of this block; nothing consumes it"
                                     ),
@@ -470,6 +483,7 @@ impl Check<'_> {
                     if !body_diverged && self.state != before {
                         let slot = self.differing_slot(&before).expect("the states differ");
                         return Err(Diagnostic::new(
+                            Rule::LinearValueUnconsumed,
                             format!(
                                 "`{}` is consumed inside this loop; the next iteration would use it again",
                                 self.name(slot)
@@ -506,6 +520,7 @@ impl Check<'_> {
                             .differing_slot(agreed)
                             .expect("the states differ, so some slot differs");
                         return Err(Diagnostic::new(
+                            Rule::LinearValueUnconsumed,
                             format!(
                                 "the branches disagree about `{}`: one consumes it and another does not",
                                 self.name(slot)

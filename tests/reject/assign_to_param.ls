@@ -1,4 +1,5 @@
 //~ ERROR immutable
+//~ RULE assign-to-immutable
 
 fn twice(n: int) -> [] int {
     n = n + n;

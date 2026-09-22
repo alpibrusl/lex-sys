@@ -1,4 +1,5 @@
 //~ ERROR they are numbered from 0
+//~ RULE unknown-name
 
 // `docs/tuples.md` §3.1: `t.2` on a two-tuple is not a field, and the
 // arity is in the type, so this is a compile-time question rather than the

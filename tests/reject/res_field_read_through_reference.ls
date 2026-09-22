@@ -1,4 +1,5 @@
 //~ ERROR expected `Box[?0]`, found `&r Box[int]`
+//~ RULE type-mismatch
 
 // `docs/reading-references.md` §2.0, and the fixture for a **soundness
 // hole** that this rule has now closed twice.

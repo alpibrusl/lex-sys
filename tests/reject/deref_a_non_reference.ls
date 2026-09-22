@@ -1,4 +1,5 @@
 //~ ERROR is not a reference, so there is nothing for `*` to follow
+//~ RULE not-a-reference
 
 // §3: `*` follows a reference, and there has to be one to follow.
 //

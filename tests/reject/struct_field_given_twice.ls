@@ -1,4 +1,5 @@
 //~ ERROR field `x` is given twice
+//~ RULE duplicate-declaration
 
 struct Point { x: int, y: int }
 

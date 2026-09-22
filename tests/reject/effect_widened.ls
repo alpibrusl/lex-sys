@@ -1,4 +1,5 @@
 //~ ERROR cannot be narrowed to
+//~ RULE capability-not-narrowable
 
 // §7.4: narrowing only, in both directions. The same commitment `lex-os`
 // makes for manifests, for the same reason -- a program must not be able to

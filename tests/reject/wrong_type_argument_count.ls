@@ -1,4 +1,5 @@
 //~ ERROR `Pair` takes 2 type arguments, but 1 was given
+//~ RULE arity-mismatch
 
 struct Pair[A, B] { first: A, second: B }
 

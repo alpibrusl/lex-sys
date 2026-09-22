@@ -6,6 +6,7 @@
 // table at startup. Here the index is past the end, which would trap.
 //~ ERROR cannot be evaluated
 //~ ERROR it traps
+//~ RULE constant-traps
 
 static bad: [int] {
     let table = alloc_slice[static](4, 0);

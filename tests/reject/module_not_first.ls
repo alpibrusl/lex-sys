@@ -1,4 +1,5 @@
 //~ ERROR a `module` declaration is the first item in its file
+//~ RULE program-shape
 
 // `docs/modules.md` §3.
 //

@@ -1,4 +1,5 @@
 //~ ERROR shared reference
+//~ RULE shared-reference-written
 
 // §3: `*r = v` replaces the referent, so the reference has to be unique.
 //

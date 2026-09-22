@@ -1,4 +1,5 @@
 //~ ERROR shadowing it here would put that value out of reach
+//~ RULE linear-value-unconsumed
 
 // `docs/shadowing.md` §3, through a destructuring pattern rather than a
 // plain `let`.

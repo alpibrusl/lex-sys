@@ -1,4 +1,5 @@
 //~ ERROR does not outlive
+//~ RULE reference-escapes-region
 
 // §6: nesting is the same stack as §5.2's. An inner arena may hold
 // references into an outer one -- the outer outlives it -- and never the

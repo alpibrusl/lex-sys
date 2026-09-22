@@ -1,4 +1,5 @@
 //~ ERROR is not an escape
+//~ RULE unknown-escape
 
 // `docs/strings.md` §4: five escapes and no more.
 //

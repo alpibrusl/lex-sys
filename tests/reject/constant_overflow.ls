@@ -7,6 +7,7 @@
 // the programmer is told.
 //~ ERROR this arithmetic overflows
 //~ ERROR the operands are literals
+//~ RULE constant-traps
 
 fn main(world: World) -> [] int {
     let Split { io, ffi, fs, heap, args } = split(world);

@@ -1,4 +1,5 @@
 //~ ERROR is not a uniquely borrowed `Heap`
+//~ RULE capability-misused
 
 // `docs/heap.md` §2: allocating is reached through the capability that
 // authorises it, and through nothing else.

@@ -1,4 +1,5 @@
 //~ ERROR expected `int`, found `bool`
+//~ RULE type-mismatch
 
 // The capability is fine; the character is not. An argument is checked
 // against the parameter it is passed to, and `putchar`'s second one is the

@@ -1,4 +1,5 @@
 //~ ERROR expected `[`
+//~ RULE type-mismatch
 
 // §7.2: *every* function signature declares its row. An absent row would be
 // an inferred one, and inference across a boundary is the non-local analysis

@@ -1,4 +1,5 @@
 //~ ERROR is unsized, so `unbox` has nothing to hand back
+//~ RULE unsized-type
 
 // §3: `unbox` and `unbox_slice` are different operations, and they have
 // to be.

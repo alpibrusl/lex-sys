@@ -1,4 +1,5 @@
 //~ ERROR a boxed slice holds `val` data only
+//~ RULE mode-bound-violated
 
 // `docs/collections.md` §2: the array-shaped collection cannot hold a
 // resource, and the reason is not the generics.

@@ -1,4 +1,5 @@
 //~ ERROR expected `int`, found `bool`
+//~ RULE type-mismatch
 
 struct Point { x: int, y: int }
 

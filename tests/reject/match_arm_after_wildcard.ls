@@ -1,4 +1,5 @@
 //~ ERROR unreachable
+//~ RULE match-arm-unreachable
 
 enum Shape { Circle(int), Rect(int, int) }
 

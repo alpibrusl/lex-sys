@@ -1,4 +1,5 @@
 //~ ERROR already been consumed
+//~ RULE linear-use-after-move
 
 // §4.1: `close` took ownership, so there is nothing left to pass again.
 

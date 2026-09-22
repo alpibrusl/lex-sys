@@ -1,4 +1,5 @@
 //~ ERROR expected `int`, found `bool`
+//~ RULE type-mismatch
 
 // Two arguments at one type parameter, given two different types.
 //

@@ -1,4 +1,5 @@
 //~ ERROR an arena holds `val` data only
+//~ RULE mode-bound-violated
 
 // §6.1, and the rule that keeps an arena an *allocator* rather than a
 // lifetime. Releasing one reclaims memory: it does not close files, release

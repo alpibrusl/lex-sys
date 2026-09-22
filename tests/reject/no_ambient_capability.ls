@@ -1,4 +1,5 @@
 //~ ERROR is a capability and has no literal form
+//~ RULE capability-misused
 
 // §8.2, and the rule the whole section rests on: there is no ambient
 // constructor, no `Io::global()`, no `unsafe { }` that conjures one.

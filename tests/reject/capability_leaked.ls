@@ -1,4 +1,5 @@
 //~ ERROR `io` is still live here
+//~ RULE linear-value-unconsumed
 
 // §8.3: authority is a resource, and a resource is destroyed exactly once.
 // A program that forgets to release one does not compile -- by §4's rule,

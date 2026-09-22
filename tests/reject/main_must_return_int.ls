@@ -1,4 +1,5 @@
 //~ ERROR `main` returns `int`, the process exit status
+//~ RULE program-shape
 
 // The shape of `main` is a contract with the C runtime rather than a matter
 // of taste: it takes the `World` and gives back the exit status.

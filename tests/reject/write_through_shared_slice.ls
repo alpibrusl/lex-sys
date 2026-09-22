@@ -1,4 +1,5 @@
 //~ ERROR shared slice
+//~ RULE shared-reference-written
 
 // The same promise §5 makes about a shared reference's referent, one level
 // out: a `&r [T]` says its elements will not change while it is lent, and a

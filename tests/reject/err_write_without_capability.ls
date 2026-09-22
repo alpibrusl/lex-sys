@@ -1,4 +1,5 @@
 //~ ERROR `complain` performs `err_write`
+//~ RULE effect-not-declared
 
 // `docs/standard-error.md` §2: standard error is not a seventh
 // capability, so it is authorised by the `Io` a program already holds --

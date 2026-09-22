@@ -1,4 +1,5 @@
 //~ ERROR expected `Args`, found `Io`
+//~ RULE type-mismatch
 
 // `docs/arguments.md` §2: reading the command line is reached through the
 // capability that authorises it, and through nothing else.

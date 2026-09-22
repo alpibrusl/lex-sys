@@ -1,4 +1,5 @@
 //~ ERROR destroyed by `release`, not by being taken apart
+//~ RULE capability-misused
 
 // `Io` carries no fields, so taking it apart would end a capability and
 // produce nothing -- destroying authority without naming the function that

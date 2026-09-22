@@ -6,6 +6,7 @@
 // make the diagnostic depend on what the whole program reaches, which is
 // what §4.1 of `compile-time.md` argues against for the same reason.
 //~ ERROR only legal inside a `static` item
+//~ RULE reference-escapes-region
 
 fn main(world: World) -> [] int {
     let Split { io, ffi, fs, heap, args } = split(world);

@@ -1,4 +1,5 @@
 //~ ERROR holds no capability that authorises it
+//~ RULE effect-not-declared
 
 // §8.4: the capability is the only way to reach a foreign call.
 //
