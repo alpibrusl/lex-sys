@@ -103,6 +103,31 @@ also tests a flag.
 > measured one guard and wrote "the check"; the sentence above is kept
 > because it is true of the one it measured.
 
+> **Corrected again (#64): "only the overflow check" was the same
+> mistake a second time.** [`check-cost.md`](check-cost.md) ran this
+> experiment over all **eight** checks this language emits in a loop
+> body, and **six** of them take the SIMD count to zero. The overflow
+> check is not special; it was first.
+>
+> The correction above got the mechanism right and the *scope* wrong,
+> because it had two data points and both were the ones already
+> measured. What decides it is neither memory-safety nor arithmetic:
+> `s[lo..hi]` and `s[i]` are both bounds checks and cost **2.16×** and
+> **1.00×**. Two programs with the same two comparisons and the same
+> trap, differing only in whether the bounds come from memory or from
+> the induction variable, cost 2.16× and 0.99×.
+>
+> **Provable is free, and loaded is not.** `s[i]` is free because
+> `i < n` is the loop's own condition, which is this box's last
+> sentence generalised: a branch on something the loop already proves is
+> not a branch either.
+>
+> And "vectoriser" is too narrow as well. The `int_of(f)` loop has no
+> SIMD either way at baseline and still costs 2.50×, because unguarded
+> it is unrolled four wide with four independent accumulators. What a
+> trap costs is **reassociation**; vectorisation is the largest thing
+> reassociation buys, not the only one.
+
 That is a real, structural cost, it is exactly the one the README
 promised there would not be, and it lands precisely where the README's own
 "linearity gives the optimiser stronger aliasing facts" argument wants to

@@ -285,3 +285,13 @@ Not by assertion. Every rule above is a fixture:
 | An oversized literal is refused | `crates/lex-sys-syntax` unit tests |
 
 A rule with no fixture is a rule this project does not have.
+
+And a rule with no price is a rule nobody has finished arguing for.
+[`overflow-cost.md`](overflow-cost.md) prices the overflow trap and
+[`check-cost.md`](check-cost.md) prices the rest: of the eight checks
+above that can appear in a loop body, **six** make their operation
+non-reassociable, the worst being `int_of(f)` at **3.35×**, and the
+three that are free are free for three unrelated reasons. None of that
+is an argument against the rules — a silently wrong answer is what §2.1
+exists to refuse — but the cost of a guarantee belongs next to the
+guarantee.
