@@ -5,14 +5,14 @@
 // non-owning read — a borrow, which is §5 and not in this slice. Until then
 // the whole value comes apart at once, or not at all.
 
-res struct File { fd: int }
+res struct Ticket { fd: int }
 
-fn close(f: File) -> [] int {
-    let File { fd } = f;
+fn close(f: Ticket) -> [] int {
+    let Ticket { fd } = f;
     return fd;
 }
 
-fn peek(f: File) -> [] int {
+fn peek(f: Ticket) -> [] int {
     let n = f.fd;
     return close(f);
 }

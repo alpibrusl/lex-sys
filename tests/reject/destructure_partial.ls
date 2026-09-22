@@ -4,14 +4,14 @@
 // Naming some of the fields would leave the rest with nowhere to go — a
 // partial move, which is the thing §4.1 does not have.
 
-res struct File { fd: int }
+res struct Ticket { fd: int }
 
 struct Pair {
-    a: File,
-    b: File,
+    a: Ticket,
+    b: Ticket,
 }
 
-fn first(p: Pair) -> [] File {
+fn first(p: Pair) -> [] Ticket {
     let Pair { a } = p;
     return a;
 }

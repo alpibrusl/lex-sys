@@ -8,23 +8,23 @@
 //~ STDOUT 437
 //~ EXIT 0
 
-res struct File {
+res struct Ticket {
     fd: int,
     size: int,
 }
 
-fn open(fd: int) -> [] File {
-    return File { fd: fd, size: fd * 2 };
+fn open(fd: int) -> [] Ticket {
+    return Ticket { fd: fd, size: fd * 2 };
 }
 
-fn close(f: File) -> [] int {
-    let File { fd, size } = f;
+fn close(f: Ticket) -> [] int {
+    let Ticket { fd, size } = f;
     return fd + size;
 }
 
 // Region-polymorphic, with the region written (§5.1). The caller's region is
 // substituted at the call site: one name, one assignment.
-fn size_of[&r](handle: &r File) -> [] int {
+fn size_of[&r](handle: &r Ticket) -> [] int {
     return handle.size;
 }
 

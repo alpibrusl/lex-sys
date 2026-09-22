@@ -19,16 +19,16 @@
 //~ STDOUT 211
 //~ EXIT 0
 
-res struct File {
+res struct Ticket {
     fd: int,
 }
 
-fn open(n: int) -> [] File {
-    return File { fd: n };
+fn open(n: int) -> [] Ticket {
+    return Ticket { fd: n };
 }
 
-fn close(f: File) -> [] int {
-    let File { fd } = f;
+fn close(f: Ticket) -> [] int {
+    let Ticket { fd } = f;
     return fd;
 }
 

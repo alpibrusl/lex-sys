@@ -8,21 +8,21 @@
 //~ STDOUT 5379
 //~ EXIT 0
 
-res struct File {
+res struct Ticket {
     fd: int,
 }
 
-fn open(fd: int) -> [] File {
-    return File { fd: fd };
+fn open(fd: int) -> [] Ticket {
+    return Ticket { fd: fd };
 }
 
-fn close(f: File) -> [] int {
-    let File { fd } = f;
+fn close(f: Ticket) -> [] int {
+    let Ticket { fd } = f;
     return fd;
 }
 
 // Both arms consume: the join agrees that `f` is spent.
-fn either(f: File, flag: bool) -> [] int {
+fn either(f: Ticket, flag: bool) -> [] int {
     if flag {
         return close(f);
     } else {
@@ -33,7 +33,7 @@ fn either(f: File, flag: bool) -> [] int {
 
 // One arm consumes and returns; the other falls through with `f` still live
 // and consumes it after. Divergence is what lets these disagree.
-fn take(f: File, flag: bool) -> [] int {
+fn take(f: Ticket, flag: bool) -> [] int {
     if flag {
         return close(f) + 2;
     }
@@ -43,7 +43,7 @@ fn take(f: File, flag: bool) -> [] int {
 // A `match` is a branch too, and its arms bind the payload they take apart.
 enum Slot {
     Empty,
-    Full(File),
+    Full(Ticket),
 }
 
 fn drain(s: Slot) -> [] int {

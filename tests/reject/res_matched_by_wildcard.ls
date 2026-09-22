@@ -4,11 +4,11 @@
 // §4.1: destructuring consumes by producing the parts. A `_` arm consumes the
 // scrutinee and produces nothing, which is a silent drop by another name.
 
-res struct File { fd: int }
+res struct Ticket { fd: int }
 
 enum Slot {
     Empty,
-    Full(File),
+    Full(Ticket),
 }
 
 fn size(s: Slot) -> [] int {

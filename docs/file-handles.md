@@ -1,6 +1,9 @@
 # File handles
 
-> **Status: designed, not built.**
+> **Status: built (#66).** §2.1, §4.1, §4.2 and §6 are what building it
+> settled; everything above them is the design as it stood, which was
+> right about the shape, wrong about one signature, and silent about
+> what three new names cost.
 >
 > `filesystem.md` §3 called this *"a milestone, not a paragraph"* and
 > named three questions it would have to answer. **Two of the three are
@@ -169,13 +172,44 @@ return 0;
 So the shape is available today:
 
 ```
-open_read[&c, &a](fs: &c Fs(p), path: &a [byte]) -> [fs_read(p)] Result[File, int]
-close(file: File) -> [] int
+open_read[&c, &a](fs: &c Fs(p), path: &a [byte]) -> [fs_read(p)] Opened
+file_close(file: File) -> [] int
 ```
 
 (`Fs(p)` is `filesystem.md` §3's own schema notation for "whatever
 prefix the capability carries", not literal source — real code spells a
 concrete one, as `sort.ls` does with `Fs("")`.)
+
+### 2.1 That signature cannot be written, and the reason is structural
+
+`Result[T, E]` is `std.result` — a **library** type, declared in
+`std/result.ls` and reachable only with `--std`. A builtin's signature
+is fixed in the compiler, in terms of the prelude, and has to type-check
+in a program compiled without the standard library at all. So
+`open_read` cannot return a `Result`, and no amount of care with the
+declaration changes that: the type does not exist when the signature
+does.
+
+This is not a wrinkle in the design so much as the design meeting a rule
+`standard-library.md` set and this document forgot — **`std` is opt-in,
+never a prelude.** A builtin that needed `std` would make it one.
+
+So `open_read` answers a *prelude* enum with the same two arms:
+
+```
+enum Opened {
+    Ok(File),
+    Failed(int)   // errno
+}
+```
+
+and `std.fs` is free to offer `into_result(o: Opened) -> [] Result[File, int]`
+for a program that wants the library shape. The linearity argument §2
+verified is unaffected — it was about a `res` payload surviving a
+generic enum, and `Opened` is not generic, which is strictly easier.
+
+The cost is one name. What it buys is that a program can open a file
+without `--std`, which is the same property every other builtin has.
 
 **The milestone is smaller than §3 advertised.** What is left is one
 question about reading, and one about the effect row.
@@ -195,7 +229,7 @@ language, and a bulk read needs both at once plus the ordinary one.
 The rule:
 
 ```
-read[&f, &b](file: &!f File, into: &!b [byte]) -> [?] Read
+file_read[&f, &b](file: &!f File, into: &!b [byte]) -> [file_read] Read
 ```
 
 ```
@@ -211,8 +245,8 @@ than a sentinel because **a sentinel is how `getchar` and `fs_read`
 came to disagree**. `Got(0)` is not reachable: a read that returns
 nothing and is not at the end is `End` or `Failed`, never a zero.
 
-The row is `[?]` on purpose: §4 is what goes there, and §6 keeps the
-name open.
+The row was `[?]` when this was written; §4.1 settled it as `file_read`,
+which is also the builtin's name for the reason `fs_read` is both.
 
 `match` is free here in the sense that matters. Checked rather than
 assumed — a three-constructor `Read` with `int` payloads compiles and
@@ -256,8 +290,79 @@ here for the same reason, comparing the authority report of a
 directory, and requiring the prefix to survive.
 
 What `read` performs is then a label that says *this touches a file I
-already opened*, which is not `fs_read(p)` and is not nothing. Naming it
-is open — §6.
+already opened*, which is not `fs_read(p)` and is not nothing.
+
+### 4.1 The label is `file_read`, and the vocabulary already chose it
+
+§6 said this wanted one slice's argument rather than a guess. The
+argument is short, because the rule was already there.
+
+**Every label in this language is named after the capability that
+discharges it, not after the operation.** `io_read` and `io_write` are
+discharged by owning an `Io`; `fs_read(p)` and `fs_write(p)` by owning
+an `Fs(p)`; `heap` by owning a `Heap`; `args` by owning `Args`. The
+name is the capability, lowercased, plus a direction where the
+capability has two.
+
+A `File` is a capability. It is not one `split` hands out — it is
+*manufactured* by `open_read`, out of an `Fs(p)` and a path, which is
+why `open_read`'s own row carries `fs_read(p)` and pays for the whole
+thing once. Afterwards it behaves like every other capability: owning it
+discharges what it permits, borrowing it declares it, and it is consumed
+exactly once — by `close` rather than by `release`, because ending a
+descriptor is a syscall and ending a capability is not.
+
+So the label is the capability's name plus the direction: **`file_read`**.
+
+It carries **no argument**, and that is the same rule rather than a
+concession. `heap` and `args` have none because "a heap has no parts to
+name and so nothing to narrow". A file *does* have a name — and the
+name was spent at `open`. Re-attaching it to `read` is §4's first option
+wearing a label instead of a parameter, and it would mean a handle you
+could not pass to a function that had not been told where it came from.
+
+Two consequences worth stating, because both are the existing rules
+rather than new ones:
+
+* **Owning a `File` discharges `file_read`.** `read(f, into)` borrows,
+  so a function that borrows declares `[file_read]` and a function that
+  owns the handle outright declares `[]` — exactly what `authority.md`
+  §2 established for `main` and the console.
+* **`open_read` still names the directory.** Its row is
+  `[fs_read("/var/log")]`, so the authority report of a handle program
+  and a path program over the same directory agree, which is
+  `bulk-io.md` §3.2's rule and the conformance test §4 asks for.
+
+---
+
+### 4.2 What three names cost, which nothing here had priced
+
+Adding a prelude type reserves its name in **every** program, and this
+milestone wanted the three most ordinary names in the language.
+
+| name | what it collided with |
+|---|---|
+| `File` | **31 fixtures** declared `res struct File` as a stand-in resource |
+| `read` | `examples/serve/` declares `extern fn read` — libc's, on a socket |
+| `close` | the same 31 fixtures had a `close` of their own |
+
+The type keeps its name: `File` is what the thing is, the fixtures were
+using it as a *pretend* one because a real one did not exist, and they
+now say `Ticket`, which is what the rest of the suite already calls a
+stand-in. That churn is the honest price and it is paid once.
+
+The two verbs do not. `read` and `close` are renamed **`file_read` and
+`file_close`**, which is `fs_read`/`fs_write`'s shape — the subject,
+then the verb — and shares the builtin's name with the label it
+performs, exactly as `fs_read` already does. The deciding case is
+`examples/serve/`: a program that reads a socket through `Ffi("libc")`
+*and* a file through a handle is an ordinary program, and the language
+taking `read` would have made it unwriteable.
+
+The rule worth carrying forward: **a builtin's name is reserved against
+`extern fn` too**, so a one-word builtin costs every program that wanted
+to bind that libc symbol. The prelude has ten of those already; it did
+not need three more.
 
 ---
 
@@ -279,9 +384,11 @@ that currently cannot be written correctly at all.
 
 | Question | Why it waits |
 |---|---|
-| What `read`'s effect label is called | §4 settles that the prefix is spent at `open` and that `read` performs *something*. `io_read` is taken, `fs_read(p)` is wrong without a `p`. It wants a name, and a name is worth one slice's argument rather than a guess here |
+| ~~What `read`'s effect label is called~~ | **Settled — §4.1: `file_read`.** Every label here is named after the capability that discharges it rather than after the operation, and a `File` is a capability; it carries no argument for the same reason `heap` does not, since the path was spent at `open` |
+| ~~`open_read` answers `Result[File, int]`~~ | **Corrected — §2.1.** It cannot: `Result` is `std.result`, a builtin's signature is prelude, and `standard-library.md` says `std` is opt-in rather than a prelude. It answers a prelude `Opened` instead, and `std.fs` may wrap that |
 | Writing through a handle | Symmetric, and deliberately not designed with the read side. `bulk-io.md` §3.3 declined to design the input half alongside the output half for the same reason, and that turned out right |
-| Whether `End` can be observed twice | Reading past the end: `End` again, or `Failed`? POSIX says a repeat read at EOF answers 0 again. Probably `End`, and it should be a fixture rather than a paragraph |
+| ~~Whether `End` can be observed twice~~ | **Settled: `End` again**, and it is a fixture rather than a paragraph. POSIX answers 0 at every read past the end, and `Failed(int)` carries an errno — there is no errno for *you already knew*, and inventing one would be a sentinel with a constructor around it, which is the thing §3 exists to stop |
 | ~~`examples/sort/`'s 8 MiB ceiling~~ | **Done.** §1.1 — fifteen attempts reach 1 GiB, and a fixture past the old bound is in the conformance suite. It never needed handles, which is worth noticing: the bug the design doc was written to motivate turned out to be separable from the design |
 | ~~Telling a person *that* a file failed~~ | **Done**, and not by this document — `standard-error.md`. §1.2's half-fix is a whole one: exit 3 against exit 2 for a script, and a named path on standard error for a person. The blocker was cited here as "`reach.md` §6's standard-error gap", which was a gap no document had recorded |
-| Telling a person *why* it failed | The half that is left, and the half this document owns: `fs_read` answers `-1` with no reason attached, so `sort` can name the path and not the cause where GNU names both. §3's `Failed(int)` is the designed shape — which makes it an argument for handles that survived §1's other two evaporating |
+| ~~Telling a person *why* it failed~~ | **Done.** `Failed(int)` carries the real `errno`, read through `__errno_location()` on glibc and `__error()` on macOS — the same per-platform pair `stderr`/`__stderrp` already needed. A missing file now answers `Failed(2)`, which is `ENOENT`, where `fs_read` answered `-1` and nothing else. This was the one argument for handles that survived §1's other two evaporating, and it is the one that paid |
+| Turning an `errno` into a sentence | What `Failed(2)` still is not: a program can print the number and not *No such file or directory*. `strerror` is one `Ffi("libc")` call away and that is the wrong shape — it would make a diagnostic cost the authority to call anything. A table in `std` is the likely answer and no program has asked yet |

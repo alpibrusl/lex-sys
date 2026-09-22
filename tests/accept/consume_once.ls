@@ -5,24 +5,24 @@
 //~ STDOUT 79
 //~ EXIT 0
 
-res struct File {
+res struct Ticket {
     fd: int,
 }
 
-fn open(fd: int) -> [] File {
-    return File { fd: fd };
+fn open(fd: int) -> [] Ticket {
+    return Ticket { fd: fd };
 }
 
 // Takes ownership and gives it back: the caller still owes one consumption.
-fn touch(f: File) -> [] File {
-    let File { fd } = f;
-    return File { fd: fd + 2 };
+fn touch(f: Ticket) -> [] Ticket {
+    let Ticket { fd } = f;
+    return Ticket { fd: fd + 2 };
 }
 
 // The terminal consumer. The parts are `int`, which is `val`, so nothing is
 // owed once they are out.
-fn close(f: File) -> [] int {
-    let File { fd } = f;
+fn close(f: Ticket) -> [] int {
+    let Ticket { fd } = f;
     return fd;
 }
 

@@ -10,8 +10,8 @@
 //
 // This fixture used to be `res_leaked_from_generic.ls` and asserted the
 // opposite: a parameter was `val`, the body was accepted where it was
-// written, and monomorphisation refused the copy at `File` with
-// "(instantiated at `File`)". That is the behaviour §12 of
+// written, and monomorphisation refused the copy at `Ticket` with
+// "(instantiated at `Ticket`)". That is the behaviour §12 of
 // `linearity-and-effects.md` wanted moved, and this is it moved.
 //
 // The trade is the right way round. A library ships its definitions, and
@@ -20,7 +20,7 @@
 // types says `[T: val]`, and then the refusal lands on the call site --
 // `val_bound_violated_at_the_call_site.ls` is that half.
 
-res struct File {
+res struct Ticket {
     fd: int,
 }
 
@@ -35,5 +35,5 @@ fn main(world: World) -> [] int {
     release(fs);
     release(heap);
     release(io);
-    return sink(File { fd: 5 });
+    return sink(Ticket { fd: 5 });
 }

@@ -154,6 +154,20 @@ happens to a handle at the end of a region. That is a milestone, not a
 paragraph, and whole-file operations are what M3 needs to read its own
 source and write its own output.
 
+> **Built (#66), and the milestone was smaller than this paragraph
+> says** — [`file-handles.md`](file-handles.md). Two of the three
+> questions were already answered by machinery that existed: `close`
+> consumes the handle because that is what `res` means, and a handle at
+> the end of a region is a compile error because a linear value that
+> nothing consumes already is. Only the third — what a half-read file is
+> — needed a decision, and the answer is a three-constructor `Read`
+> rather than a fourth meaning for `-1`.
+>
+> `fs_read` and `fs_write` are unchanged and stay the right call for a
+> file whose size is known. What the handle adds is the case that could
+> not be written correctly at all: reading a file whose size you do not
+> know.
+
 ---
 
 ## 4. The path is checked at runtime, and `..` is refused

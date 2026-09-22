@@ -8,14 +8,14 @@
 // static guarantee is exactly what a systems language is judged on, so this
 // is a refusal instead.
 
-res struct File { fd: int }
+res struct Ticket { fd: int }
 
-fn close(f: File) -> [] int {
-    let File { fd } = f;
+fn close(f: Ticket) -> [] int {
+    let Ticket { fd } = f;
     return fd;
 }
 
-fn disagree(f: File, flag: bool) -> [] int {
+fn disagree(f: Ticket, flag: bool) -> [] int {
     if flag {
         let fd = close(f);
     }

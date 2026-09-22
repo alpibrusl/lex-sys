@@ -4,14 +4,14 @@
 // An assignment overwrites. Overwriting a live `res` binding destroys it
 // without naming a consumer, so the binding must be spent first.
 
-res struct File { fd: int }
+res struct Ticket { fd: int }
 
-fn open(fd: int) -> [] File {
-    return File { fd: fd };
+fn open(fd: int) -> [] Ticket {
+    return Ticket { fd: fd };
 }
 
-fn close(f: File) -> [] int {
-    let File { fd } = f;
+fn close(f: Ticket) -> [] int {
+    let Ticket { fd } = f;
     return fd;
 }
 
