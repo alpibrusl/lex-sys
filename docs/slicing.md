@@ -70,7 +70,9 @@ This is the one decision, and the answer is already in
 
 So `&!` here does **not** mean what `&mut` means in Rust. It is not a
 no-aliasing invariant over references; it is a lock on the *binding* for
-the block. Within the block the referent is spilled to exactly one
+the block. (This paragraph was right and `README.md`'s performance
+section was wrong; what changing it would cost is measured in
+[`aliasing.md`](aliasing.md), and the answer is no.) Within the block the referent is spilled to exactly one
 buffer, nothing else may touch the value at all, and every reference
 derived from the borrow points into that one buffer. The write-back at
 block exit restores the whole of it.

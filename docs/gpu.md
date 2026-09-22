@@ -105,7 +105,7 @@ a program never handed one provably never launched.
 
 | | |
 |---|---|
-| **`&!` must mean unique** | Already known false (`both(s, s)` compiles) and already on `ROADMAP.md`. GPU makes it mandatory: two lanes writing through aliasing references is the race the checker should catch |
+| **`&!` must mean unique** | Since measured, and it is **the expensive row** — [`aliasing.md`](aliasing.md). Not because it refuses working code (it refuses one fixture in 82 programs) but because one of the three aliasing routes, a reference returned from a call, closes only with provenance in signatures: lifetimes, and a borrow checker the non-goals exclude. GPU is what makes it mandatory rather than optional — on one thread two aliasing writes are defined and ordered, and two lanes writing through aliasing references is the race the checker should catch — so this row is where the GPU question stops being about speed |
 | **Recursion** | GPUs have no stack for it; `std.io.print_nat` is recursive. Kernels become a subset, and no row can say a function is in it |
 | **Barriers** | A barrier reached non-uniformly is undefined behaviour on real hardware — the one thing this family of languages refuses to have. Making that checkable is the research contribution, and lex-sys has nothing to donate to it |
 | **Two backends, forever** | Cranelift stays because it is the fast dev path |
