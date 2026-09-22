@@ -12,6 +12,11 @@ designed in from day one.
 > Not a usable language yet. [`docs/ROADMAP.md`](docs/ROADMAP.md) tracks
 > what landed, what is next, and what each slice found.
 
+> **Writing lex-sys?** [`AGENTS.md`](AGENTS.md) is the one page — the rules,
+> the six things that cost this repository a compile each, and what the
+> language does not have. `lex-sys agent-guidelines` prints it, and every
+> checked code block in it is run by the test suite.
+
 ---
 
 ## What this is

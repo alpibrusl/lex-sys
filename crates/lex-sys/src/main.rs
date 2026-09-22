@@ -35,6 +35,7 @@ usage:
     lex-sys authority <file.ls>... [--std] [--output json]
     lex-sys layout    <file.ls>... [--std]
     lex-sys print <file.ls>
+    lex-sys agent-guidelines
     lex-sys --version
 
 options:
@@ -59,6 +60,11 @@ tag, the same sentence, what the rule enforces, and a position. The exit
 status is unchanged -- 1 for a refused program -- and `check` reports
 every independent refusal rather than the first. See
 docs/agent-errors.md.
+
+`agent-guidelines` prints AGENTS.md, which is how to write lex-sys in
+one page rather than in 42 documents. Every checked code block in it is
+run by the test suite, so a guideline that stops being true is a red
+build. See docs/agent-errors.md for what a refusal says as data.
 
 `ids` prints each declaration's content hash: a signature and a body for
 every function, one identity for every type. A unit hashes its content,
@@ -129,6 +135,21 @@ fn run(args: &[String]) -> Result<ExitCode, Failure> {
             let Invocation { inputs, with_std, json, .. } = parse_args(&args[1..], false)?;
             check_program(&inputs, with_std, json)
         }
+        // The one command that reads no program: it is a contract with
+        // whoever is about to write one.
+        "agent-guidelines" => {
+            if args.len() > 1 {
+                return Err(usage("`agent-guidelines` takes no arguments"));
+            }
+            let stdout = io::stdout();
+            let mut out = stdout.lock();
+            match out.write_all(AGENT_GUIDELINES.as_bytes()).and_then(|()| out.flush()) {
+                Ok(()) => Ok(ExitCode::SUCCESS),
+                // The reader stopped listening, which is their business.
+                Err(e) if e.kind() == io::ErrorKind::BrokenPipe => Ok(ExitCode::SUCCESS),
+                Err(e) => Err(environment(format!("cannot write to stdout: {e}"))),
+            }
+        }
         // `docs/many-files.md` §5: printing is about text, and text is
         // what a file is -- so this renders exactly one.
         "print" => {
@@ -195,6 +216,15 @@ fn run(args: &[String]) -> Result<ExitCode, Failure> {
 /// For a language at this stage that is the right trade -- one artifact,
 /// one thing to install, nothing to resolve -- and §2.1 records it as
 /// the first thing to revisit when a package story exists.
+/// `AGENTS.md`, compiled into the binary the way the library is.
+///
+/// `docs/agent-errors.md` §7 named the gap: lex-lang's contract says a
+/// downstream repo copies `AGENT_GUIDELINES.md`, and lex-sys is a
+/// different language, so it needs its own. Carried in the binary for
+/// the same reason `--std` is — a reader with the compiler needs
+/// nothing else, and a file on disk is a file that can be absent.
+const AGENT_GUIDELINES: &str = include_str!("../../../AGENTS.md");
+
 const STD: &[(&str, &str)] = &[
     ("<std>/bytes.ls", include_str!("../../../std/bytes.ls")),
     ("<std>/math.ls", include_str!("../../../std/math.ls")),
