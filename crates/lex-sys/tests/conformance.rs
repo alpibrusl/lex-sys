@@ -4095,7 +4095,7 @@ fn cut_reports_a_bad_field_list_like_gnu_cut() {
         .expect("the compiler runs");
     assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
 
-    let ours = Command::new(&exe).args(["-d,", "-fzzz"]).output().expect("it runs");
+    let ours = run_without_locale(&exe, &["-d,", "-fzzz"], "");
 
     // Unconditional: whatever the reference says, a diagnostic belongs on
     // standard error and nothing belongs on standard output.
@@ -4113,7 +4113,7 @@ fn cut_reports_a_bad_field_list_like_gnu_cut() {
         .map(|v| v.status.success() && String::from_utf8_lossy(&v.stdout).contains("GNU coreutils"))
         .unwrap_or(false);
     if have_reference {
-        let theirs = Command::new(reference).args(["-d,", "-fzzz"]).output().expect("it runs");
+        let theirs = run_without_locale(reference, &["-d,", "-fzzz"], "");
         assert_eq!(ours.status.code(), theirs.status.code(), "GNU cut exits differently");
         // Two differences that are not wording, so the comparison is of
         // what follows the program's own name on the first line.
@@ -4137,7 +4137,7 @@ fn cut_reports_a_bad_field_list_like_gnu_cut() {
     // GNU names the option and this does not, so only the status and the
     // stream are comparable — which is still two things that were
     // neither compared nor comparable before (§1.3).
-    let unknown = Command::new(&exe).arg("--nope").output().expect("it runs");
+    let unknown = run_without_locale(&exe, &["--nope"], "");
     assert!(unknown.stdout.is_empty(), "an unrecognised argument should print no data");
     assert_eq!(
         String::from_utf8_lossy(&unknown.stderr),
@@ -4145,7 +4145,7 @@ fn cut_reports_a_bad_field_list_like_gnu_cut() {
         "an unrecognised argument should say so on standard error"
     );
     if have_reference {
-        let theirs = Command::new(reference).arg("--nope").output().expect("it runs");
+        let theirs = run_without_locale(reference, &["--nope"], "");
         assert_eq!(unknown.status.code(), theirs.status.code(), "GNU cut exits differently");
     } else {
         assert_eq!(unknown.status.code(), Some(1));
@@ -4279,6 +4279,34 @@ fn build_example(tag: &str, relative: &str, binary: &str) -> (PathBuf, PathBuf) 
     (dir, exe)
 }
 
+/// Run a command with no locale, and hand back the whole result.
+///
+/// `LC_ALL=C` for the reason `sort_agrees_with_gnu_sort` gives — there is
+/// no locale anywhere in this language — and here it decides the
+/// *wording*, not only the ordering: GNU quotes a bad argument `'zzz'`
+/// under POSIX and `‘zzz’` under a UTF-8 locale, so an unpinned
+/// comparison passes on one machine and fails on the next. It did:
+/// this box defaults to POSIX and the CI runner does not
+/// (`docs/standard-error.md` §7.1).
+///
+/// Ours is run the same way and ignores it, which is the point.
+fn run_without_locale(command: &Path, args: &[&str], input: &str) -> std::process::Output {
+    let mut child = Command::new(command)
+        .args(args)
+        .env("LC_ALL", "C")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the program runs");
+    let text = input.to_owned();
+    let mut stdin = child.stdin.take().expect("a piped stdin");
+    std::thread::spawn(move || {
+        let _ = stdin.write_all(text.as_bytes());
+    });
+    child.wait_with_output().expect("the program finishes")
+}
+
 /// A reference tool's diagnostic, with its own name taken off the front.
 ///
 /// GNU takes that name from `argv[0]`, so a tool invoked by absolute path
@@ -4320,7 +4348,7 @@ fn sort_names_the_file_it_cannot_read() {
     let missing = dir.join("no-such-file.txt");
     let path = missing.to_string_lossy().into_owned();
 
-    let ours = Command::new(&exe).arg(&missing).output().expect("it runs");
+    let ours = run_without_locale(&exe, &[&path], "");
     assert_eq!(ours.status.code(), Some(2), "a file that is not there should exit 2");
     assert!(ours.stdout.is_empty(), "a failed read should print no data");
     assert_eq!(
@@ -4331,7 +4359,7 @@ fn sort_names_the_file_it_cannot_read() {
 
     let reference = Path::new("/usr/bin/sort");
     if is_gnu(reference) {
-        let theirs = Command::new(reference).arg(&missing).output().expect("it runs");
+        let theirs = run_without_locale(reference, &[&path], "");
         assert_eq!(ours.status.code(), theirs.status.code(), "GNU sort exits differently");
         // GNU appends the errno string, which `fs_read` does not carry
         // (§6, and `file-handles.md` §3's `Failed(int)` is the shape
@@ -4356,24 +4384,7 @@ fn sort_names_the_file_it_cannot_read() {
 fn base64_reports_invalid_input_like_gnu_base64() {
     let (dir, exe) = build_example("example-base64-bad", "examples/base64/base64.ls", "base64");
 
-    /// Feed `input` on stdin and hand back the whole result.
-    fn run(cmd: &Path, args: &[&str], input: &str) -> std::process::Output {
-        let mut child = Command::new(cmd)
-            .args(args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("the program runs");
-        let text = input.to_owned();
-        let mut stdin = child.stdin.take().expect("stdin");
-        std::thread::spawn(move || {
-            let _ = stdin.write_all(text.as_bytes());
-        });
-        child.wait_with_output().expect("it finishes")
-    }
-
-    let ours = run(&exe, &["-d"], "a@b\n");
+    let ours = run_without_locale(&exe, &["-d"], "a@b\n");
     assert_eq!(ours.status.code(), Some(1), "a byte outside the alphabet should exit 1");
     assert_eq!(
         String::from_utf8_lossy(&ours.stderr),
@@ -4383,14 +4394,14 @@ fn base64_reports_invalid_input_like_gnu_base64() {
 
     // And a valid decode stays silent, which is the half a new stream
     // makes it possible to get wrong.
-    let good = run(&exe, &["-d"], "aGVsbG8K\n");
+    let good = run_without_locale(&exe, &["-d"], "aGVsbG8K\n");
     assert_eq!(good.status.code(), Some(0));
     assert_eq!(String::from_utf8_lossy(&good.stdout), "hello\n");
     assert!(good.stderr.is_empty(), "a successful decode should say nothing");
 
     let reference = Path::new("/usr/bin/base64");
     if is_gnu(reference) {
-        let theirs = run(reference, &["-d"], "a@b\n");
+        let theirs = run_without_locale(reference, &["-d"], "a@b\n");
         assert_eq!(ours.status.code(), theirs.status.code(), "GNU base64 exits differently");
         assert_eq!(
             complaint(&ours.stderr),

@@ -302,6 +302,34 @@ table comes from. That is a fixture two CI runners would feel, so it
 stays a hand check, and `read_file`'s *other* failure — the one that
 shares its exit status with nothing — is the one the suite runs.
 
+### 7.1 Comparing a diagnostic has a locale in it
+
+The first version of those tests passed here and **failed on CI**, on
+one character:
+
+```
+left:  invalid field value 'zzz'
+right: invalid field value ‘zzz’
+```
+
+GNU quotes a bad argument with `'` under POSIX and with `‘’` — U+2018
+and U+2019 — under a UTF-8 locale. This box defaults to POSIX and the
+runner does not, so an unpinned comparison of *wording* is a coin toss
+across machines in a way a comparison of *output* never was.
+
+`sort_agrees_with_gnu_sort` had already met the general version of this
+and pinned `LC_ALL=C`, with the reason stated as ordering: *"there is no
+locale anywhere in this language to implement anything else"*
+(`ROADMAP.md` excludes locale outright). The same pin fixes this, and
+the reason turns out to be broader than ordering — a diagnostic is text,
+and GNU's text moves with the environment where these programs' does
+not. Every reference invocation in these tests now goes through one
+locale-pinned runner, ours included, which ignores it.
+
+Worth having hit at the moment a program here first had something to
+say, rather than the first time somebody compared it on a different
+machine.
+
 ---
 
 ## 8. Open
