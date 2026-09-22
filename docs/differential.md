@@ -104,7 +104,16 @@ proves nothing:
   unbuffered, and takes its starting case from `argv[1]`. When a case
   kills it, the harness records the trap and restarts at the next case.
   It needs 437 processes: one for each of the 436 traps, plus the
-  final clean run. The test also requires every trap to end the process
+  final clean run. Every trap is a crash the host has to handle (a
+  core dump, or whatever `core_pattern` pipes it to), so the loop is
+  bounded three ways. A run that neither finishes nor traps within
+  30 s is killed. More than 20 traps the folder did not predict stop
+  the test early, so a systematically broken run costs 21 crashes,
+  not one per remaining case. The whole phase has a 300 s budget. Each
+  stop reports the number of runs, the slowest run, the time per
+  trapping run and the host's `core_pattern`. This bounding was added
+  after the first CI run on linux-x86_64 sat in the test step for over
+  25 minutes with no output. The test also requires every trap to end the process
   with a signal: an exit code would be a different failure, not a trap
   ([`defined-behaviour.md`](defined-behaviour.md) §1).
 

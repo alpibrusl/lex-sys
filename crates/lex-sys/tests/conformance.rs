@@ -4221,24 +4221,107 @@ fn first[&a](a: &a Args) -> [args] int {
         .expect("the compiler runs");
     assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
 
+    // Every trap is a process the kernel kills, and each one costs
+    // whatever the host does with a crash -- a core dump, or a handler
+    // `core_pattern` pipes it to. So the loop is bounded three ways and
+    // says what it saw when it stops: a run that neither finishes nor
+    // traps is killed, a run of traps the folder did not predict stops
+    // early rather than paying for one crash per remaining case, and the
+    // whole phase has a budget.
+    let started = std::time::Instant::now();
     let mut at_run_time = std::collections::BTreeMap::new();
     let mut runtime_traps = std::collections::BTreeSet::new();
+    let mut unpredicted = Vec::new();
+    let mut runs = 0;
+    let mut slowest = (std::time::Duration::ZERO, 0, false);
+    let mut trap_time = std::time::Duration::ZERO;
+    let report = |what: &str,
+                  runs: usize,
+                  traps: usize,
+                  slowest: (std::time::Duration, usize, bool),
+                  trap_time: std::time::Duration| {
+        let pattern = std::fs::read_to_string("/proc/sys/kernel/core_pattern")
+            .map(|p| p.trim().to_owned())
+            .unwrap_or_else(|_| "unreadable".to_owned());
+        format!(
+            "{what}: {runs} runs, {traps} traps, {:.1?} elapsed; slowest run {:.1?} \
+             (from case {}, {}); {:.1?} per trapping run; core_pattern `{pattern}`",
+            started.elapsed(),
+            slowest.0,
+            slowest.1,
+            if slowest.2 { "trapped" } else { "finished" },
+            trap_time / u32::try_from(traps.max(1)).unwrap_or(1),
+        )
+    };
     let mut next = 0;
     while next < cases.len() {
-        let run = Command::new(&exe).arg(next.to_string()).output().expect("the program runs");
+        let began = std::time::Instant::now();
+        let mut child = Command::new(&exe)
+            .arg(next.to_string())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("the program runs");
+        let mut pipe = child.stderr.take().expect("a piped standard error");
+        let reader = std::thread::spawn(move || {
+            let mut text = String::new();
+            let _ = std::io::Read::read_to_string(&mut pipe, &mut text);
+            text
+        });
+        let status = loop {
+            if let Some(status) = child.try_wait().expect("the program can be waited on") {
+                break status;
+            }
+            if began.elapsed() > std::time::Duration::from_secs(30) {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!(
+                    "{}",
+                    report(
+                        &format!("a run from case {next} neither finished nor trapped in 30 s"),
+                        runs + 1,
+                        runtime_traps.len(),
+                        slowest,
+                        trap_time
+                    )
+                );
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        };
+        let stderr = reader.join().expect("the reader thread finishes");
+        runs += 1;
+        let took = began.elapsed();
         let mut reached = next;
-        for (k, v) in numbered(&String::from_utf8_lossy(&run.stderr)) {
+        for (k, v) in numbered(&stderr) {
             at_run_time.insert(k, v);
             reached = k + 1;
         }
-        if run.status.success() {
+        if took > slowest.0 {
+            slowest = (took, next, !status.success());
+        }
+        if status.success() {
             assert_eq!(reached, cases.len(), "a clean exit must have run every case");
             break;
         }
         // A trap is a signal, never an exit code (`defined-behaviour.md`
         // §1): an exit status here would be a different failure.
-        assert_eq!(run.status.code(), None, "case {reached} ended without a signal");
+        assert_eq!(status.code(), None, "case {reached} ended without a signal");
+        trap_time += took;
         runtime_traps.insert(reached);
+        if !folder_traps.contains(&reached) {
+            unpredicted.push(format!("`{}` ({})", cases[reached].literal(), cases[reached].ty));
+            assert!(
+                unpredicted.len() <= 20,
+                "{}; traps the folder did not predict, first 20:\n{}",
+                report("stopped early", runs, runtime_traps.len(), slowest, trap_time),
+                unpredicted.join("\n")
+            );
+        }
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(300),
+            "{}",
+            report("over the 300 s budget", runs, runtime_traps.len(), slowest, trap_time)
+        );
         next = reached + 1;
     }
 
