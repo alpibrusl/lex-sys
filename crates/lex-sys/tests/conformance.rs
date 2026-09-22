@@ -377,6 +377,7 @@ fn printing_preserves_every_identity_and_is_idempotent() {
         "examples/slab",
         "examples/modular",
         "examples/serve",
+        "examples/fetch",
         // The benchmarks are code too, and the pairs are the place a
         // careless edit would land without anyone reading it.
         "benches",
@@ -5693,25 +5694,21 @@ fn the_readme_commands_still_work() {
     }
 }
 
-/// `docs/net.md` §1 and §5 — the only network program here is inbound.
+/// `docs/net.md` §5 — the network programs, counted.
 ///
-/// `reach.md` §5.1 frames a `Net` capability as *"a host is a thing
-/// worth narrowing to"*, which is the **outbound** question. The one
-/// network program in this repository binds a port and waits: it
-/// declares `bind`, `listen` and `accept` and never `connect`.
-///
-/// That is the count §5 rests on — inbound 1, outbound 0 — and the
-/// reason `net.md` ends at *settled, not built*: the half that would
-/// unblock the `lex-os` join has no asker.
-///
-/// So this test exists to **fail** when one arrives. A program that
-/// connects makes the count wrong, and whoever writes it rewrites §5
-/// rather than leaving a document that quietly aged.
+/// §5 counted the askers for each half of the network and found inbound
+/// 1, outbound 0, and this test used to be `the_only_network_program_is_inbound`:
+/// written to **fail** the day a program that connects arrived, so the
+/// count could not quietly age. `examples/fetch/` arrived, it failed, and
+/// §5 was rewritten (`docs/connect.md`). It is a count now, for the same
+/// reason: the bar for building `Net` is two askers per half, and whoever
+/// adds the next network program should have to change a number here and
+/// the sentence in §5 that rests on it.
 #[test]
-fn the_only_network_program_is_inbound() {
+fn the_network_programs_are_counted() {
     let root = repo_root();
-    let mut inbound = Vec::new();
-    let mut outbound = Vec::new();
+    let mut inbound = std::collections::BTreeSet::new();
+    let mut outbound = std::collections::BTreeSet::new();
 
     let mut sources: Vec<PathBuf> = Vec::new();
     for directory in ["examples", "std", "tests/accept"] {
@@ -5730,27 +5727,265 @@ fn the_only_network_program_is_inbound() {
 
     for path in &sources {
         let text = std::fs::read_to_string(path).expect("a readable program");
+        let relative = path.strip_prefix(&root).unwrap_or(path).display().to_string();
         for line in text.lines() {
             let Some(rest) = line.trim().strip_prefix("extern fn ") else { continue };
             let Some(name) = rest.split(['[', '(']).next() else { continue };
             let name = name.trim();
             if ["bind", "listen", "accept"].contains(&name) {
-                inbound.push(format!("{}:{name}", path.display()));
+                inbound.insert(relative.clone());
             }
             if ["connect", "sendto", "getaddrinfo"].contains(&name) {
-                outbound.push(format!("{}:{name}", path.display()));
+                outbound.insert(relative.clone());
             }
         }
     }
 
-    assert!(!inbound.is_empty(), "`examples/serve/` should still declare the inbound three");
-    assert!(
-        outbound.is_empty(),
-        "an outbound network program has arrived: {outbound:?}\n\
-         `net.md` §5 counts zero of them, and that count is the reason the \
-         document ends at \"settled, not built\". Rewrite §5 rather than \
-         deleting this test."
+    assert_eq!(
+        (
+            inbound.iter().map(String::as_str).collect::<Vec<_>>(),
+            outbound.iter().map(String::as_str).collect::<Vec<_>>()
+        ),
+        (vec!["examples/serve/serve.ls"], vec!["examples/fetch/fetch.ls"]),
+        "the network programs changed: `net.md` §5 counts one per half, and \
+         two is the bar for building `Net`. Rewrite §5, then this."
     );
+}
+
+// ---------------------------------------------------------------------
+// `examples/fetch/` — the first program that connects (`docs/connect.md`)
+// ---------------------------------------------------------------------
+
+fn free_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("a free loopback port")
+        .local_addr()
+        .expect("a bound address")
+        .port()
+}
+
+/// A lex-sys client, fetching from a lex-sys server.
+///
+/// Both halves of the network in one test: `examples/serve/` binds and
+/// accepts, `examples/fetch/` connects, and neither is a Rust stand-in.
+/// `fetch` exits 3 when nothing is listening yet, so it is retried until
+/// the server is up -- the same "listening is not an event" problem the
+/// server's own test has, seen from the other side.
+#[test]
+fn a_lex_sys_client_fetches_from_a_lex_sys_server() {
+    use std::time::{Duration, Instant};
+    let (server_dir, server) = build_example("fetch-server", "examples/serve/serve.ls", "serve");
+    let (client_dir, client) = build_example("fetch-client", "examples/fetch/fetch.ls", "fetch");
+
+    // `(path, body, exit status)` -- one exchange per server run, because
+    // the server answers once and exits.
+    let exchanges =
+        [("/health", "{\"ok\":true}", 0), ("/elsewhere", "{\"error\":\"not found\"}", 1)];
+    for (path, body, status) in exchanges {
+        let port = free_port().to_string();
+        let mut child = Command::new(&server)
+            .arg(&port)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("the server runs");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let run = loop {
+            let run = Command::new(&client)
+                .args(["127.0.0.1", port.as_str(), path])
+                .output()
+                .expect("the client runs");
+            if run.status.code() != Some(3) || Instant::now() > deadline {
+                break run;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        let _ = child.wait();
+        assert_eq!(
+            String::from_utf8_lossy(&run.stdout),
+            body,
+            "`fetch {path}` should print exactly the body; stderr:\n{}",
+            String::from_utf8_lossy(&run.stderr)
+        );
+        assert_eq!(run.status.code(), Some(status), "`fetch {path}` exited wrongly");
+    }
+    let _ = std::fs::remove_dir_all(&server_dir);
+    let _ = std::fs::remove_dir_all(&client_dir);
+}
+
+/// What `fetch` sends, byte for byte, and that it survives a server that
+/// splits its header block across writes and sends more body than either
+/// of its 4 KiB buffers holds.
+///
+/// The header block's end is searched for over everything received so
+/// far, so a `\r\n\r\n` that straddles two reads is still found; and
+/// after it every byte goes straight to standard output. A 100,000-byte
+/// body is 25 of the client's reads.
+#[test]
+fn fetch_speaks_http_1_0_and_streams_the_body() {
+    use std::io::{Read, Write as _};
+    use std::time::Duration;
+    let (dir, client) = build_example("fetch-wire", "examples/fetch/fetch.ls", "fetch");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback listener");
+    let port = listener.local_addr().expect("a bound address").port().to_string();
+    let body: Vec<u8> = (0..100_000u32).map(|i| b'a' + (i % 26) as u8).collect();
+    let served = body.clone();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("the client connects");
+        stream.set_read_timeout(Some(Duration::from_secs(10))).expect("a timeout");
+        let mut request = Vec::new();
+        let mut chunk = [0u8; 512];
+        while !request.ends_with(b"\r\n\r\n") {
+            let n = stream.read(&mut chunk).expect("the request arrives");
+            assert!(n > 0, "the client closed before finishing its request");
+            request.extend_from_slice(&chunk[..n]);
+        }
+        // Split inside the blank line, so the terminator straddles reads.
+        stream.write_all(b"HTTP/1.0 200 OK\r\nX-Split: yes\r\n\r").expect("a write");
+        stream.flush().expect("a flush");
+        std::thread::sleep(Duration::from_millis(50));
+        stream.write_all(b"\n").expect("a write");
+        stream.write_all(&served).expect("the body");
+        request
+    });
+    let run = Command::new(&client)
+        .args(["127.0.0.1", port.as_str(), "/a/b?c=d"])
+        .output()
+        .expect("the client runs");
+    let request = server.join().expect("the server thread finishes");
+    assert_eq!(
+        String::from_utf8_lossy(&request),
+        "GET /a/b?c=d HTTP/1.0\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
+    );
+    assert_eq!(run.status.code(), Some(0), "{}", String::from_utf8_lossy(&run.stderr));
+    assert!(run.stdout == body, "the body came back as {} bytes, not 100000", run.stdout.len());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `docs/connect.md` §1 — a name is refused, because nothing here can
+/// resolve one, and the refusal says so rather than failing to connect.
+#[test]
+fn fetch_refuses_a_name_it_cannot_resolve() {
+    let (dir, client) = build_example("fetch-names", "examples/fetch/fetch.ls", "fetch");
+    for (args, message) in [
+        (["localhost", "80", "/"], "there is no name resolution"),
+        (["10.0.0", "80", "/"], "four decimal octets"),
+        (["10.0.0.256", "80", "/"], "four decimal octets"),
+        (["10.0.0.1", "0", "/"], "1..65535"),
+        (["10.0.0.1", "65536", "/"], "1..65535"),
+    ] {
+        let run = Command::new(&client).args(args).output().expect("the client runs");
+        assert_eq!(run.status.code(), Some(2), "`fetch {args:?}` should be a usage error");
+        assert!(
+            String::from_utf8_lossy(&run.stderr).contains(message),
+            "`fetch {args:?}` should say `{message}`:\n{}",
+            String::from_utf8_lossy(&run.stderr)
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `docs/connect.md` §3 — `struct sockaddr_in` is two different byte
+/// arrays, and the Linux one is accepted on both targets.
+///
+/// Linux starts it with a two-byte family, `2, 0`; macOS with a length
+/// byte and a one-byte family, `16, 2`. `examples/serve/` writes the Linux
+/// bytes and binds on macOS anyway, so the question was whether `connect`
+/// is as forgiving. This probe connects with one layout at a time to a
+/// listener in this process and asserts the answer for the platform it
+/// runs on: each CI runner checks its own row.
+///
+/// The first version of this test asserted that macOS **refuses** `2, 0`,
+/// and the darwin-aarch64 runner said otherwise: BSD reads family 0 as
+/// `AF_INET` in `connect` as well as in `bind`. That is what the
+/// assertions below now pin, and what `connect.md` §3 was corrected to.
+#[test]
+fn the_linux_address_layout_connects_on_both_targets() {
+    let source = "\
+extern fn socket[&f](ffi: &f Ffi(\"libc\"), domain: int, kind: int, proto: int)
+    -> [ffi(\"libc\")] int;
+extern fn connect[&f, &a](ffi: &f Ffi(\"libc\"), fd: int, addr: &a [byte])
+    -> [ffi(\"libc\")] int;
+fn main(world: World) -> [] int {
+    let Split { io, ffi, fs, heap, args } = split(world);
+    release(io); release(fs); release(heap);
+    let libc = narrow(ffi, \"libc\");
+    var status = 2;
+    borrow libc as &f in {
+        borrow args as &g in {
+            let text = arg(g, 1);
+            var port = 0;
+            var i = 0;
+            while i < len(text) { port = port * 10 + (int_of(text[i]) - '0'); i = i + 1; }
+            region r {
+                let addr = alloc_slice[r](16, byte_of(0));
+                if int_of(arg(g, 2)[0]) == 'b' {
+                    addr[0] = byte_of(16);
+                    addr[1] = byte_of(2);
+                } else {
+                    addr[0] = byte_of(2);
+                }
+                addr[2] = byte_of(port / 256);
+                addr[3] = byte_of(port % 256);
+                addr[4] = byte_of(127);
+                addr[7] = byte_of(1);
+                let fd = socket(f, 2, 1, 0);
+                status = 1;
+                if connect(f, fd, addr) == 0 { status = 0; }
+            }
+        }
+    }
+    release(libc);
+    release(args);
+    return status;
+}
+";
+    let dir = scratch("address-layout");
+    let path = dir.join("layout.ls");
+    std::fs::write(&path, source).expect("a writable fixture");
+    let exe = dir.join("layout");
+    let build = Command::new(BIN)
+        .args(["build".as_ref(), path.as_os_str(), "-o".as_ref(), exe.as_os_str()])
+        .output()
+        .expect("the compiler runs");
+    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+
+    // A listener that is never accepted from: the kernel completes the
+    // handshake into the backlog, which is all `connect` waits for.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback listener");
+    let port = listener.local_addr().expect("a bound address").port().to_string();
+    let connects = |layout: &str| {
+        Command::new(&exe).args([port.as_str(), layout]).status().expect("the probe runs").code()
+            == Some(0)
+    };
+    let (linux, bsd) = (connects("linux"), connects("bsd"));
+    if cfg!(target_os = "linux") {
+        assert!(linux, "Linux should accept its own layout, `2, 0`");
+        assert!(!bsd, "Linux should refuse `16, 2`, which it reads as family 528");
+    }
+    if cfg!(target_os = "macos") {
+        assert!(bsd, "macOS should accept its own layout, `16, 2`");
+        assert!(linux, "macOS should accept `2, 0` too, reading family 0 as `AF_INET`");
+    }
+    drop(listener);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// What the authority report says about a program that connects: the
+/// same unbounded `ffi("libc")` as the server, and a symbol list that
+/// tells the two apart -- `connect` here, `bind`/`listen`/`accept` there.
+#[test]
+fn the_client_and_the_server_differ_only_in_their_symbols() {
+    let (client_effects, client_symbols, _) = authority_of("examples/fetch/fetch.ls");
+    let (server_effects, server_symbols, _) = authority_of("examples/serve/serve.ls");
+    assert!(client_effects.contains(&"ffi".to_owned()), "{client_effects:?}");
+    assert!(server_effects.contains(&"ffi".to_owned()), "{server_effects:?}");
+    assert!(client_symbols.contains(&"connect".to_owned()), "{client_symbols:?}");
+    for inbound in ["bind", "listen", "accept"] {
+        assert!(!client_symbols.contains(&inbound.to_owned()), "{client_symbols:?}");
+        assert!(server_symbols.contains(&inbound.to_owned()), "{server_symbols:?}");
+    }
+    assert!(!server_symbols.contains(&"connect".to_owned()), "{server_symbols:?}");
 }
 
 /// Read `authority --output json` for a program, as parsed fields.

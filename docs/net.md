@@ -1,6 +1,9 @@
 # The network
 
-> **Status: settled, not built.**
+> **Status: settled, not built.** The program §5 asked for exists now,
+> [`examples/fetch/`](../examples/fetch/fetch.ls), and
+> [`connect.md`](connect.md) is what it found: two corrections to this
+> design, marked below where they apply.
 >
 > [`under-a-grant.md`](under-a-grant.md) §5 promoted
 > [`reach.md`](reach.md) §6's `Net(host)` row from a question of taste to
@@ -125,6 +128,15 @@ Against a grant, the mapping is then direct and is the thing
 | `egress: ["h:p"]` | `net_out("h:p")`, by prefix | **yes** |
 | `network: Full` | anything | trivially |
 
+> **Correction (#77).** The literal in `net_out("api.example.com:443")`
+> is a **bound**, not a destination. `examples/fetch/` takes its address
+> from `argv`, and a client always does, so no compile-time row can name
+> where it connects. The shape that works is `Fs(prefix)`'s: a static
+> bound, checked against the grant as above, and a run-time check on
+> every `connect` that traps outside it. This table is still right about
+> the bound. What the run-time check compares against, a name or an
+> address, is the question [`connect.md`](connect.md) §1 opens.
+
 ---
 
 ## 5. The uncomfortable count
@@ -139,6 +151,12 @@ asks (`standard-library.md`). Counted by reading:
 
 **The half that would unblock the `lex-os` join has no asker**, and the
 half with an asker is the one the grant does not ask about.
+
+> **Recounted (#77): inbound 1, outbound 1.** `examples/fetch/` is the
+> program the next paragraph asks for. One asker is still below the bar,
+> so the status stands. Both network programs build `struct sockaddr_in`
+> by hand, and they are portable only through a BSD compatibility rule
+> ([`connect.md`](connect.md) §3 and §6).
 
 That is the honest state and it is why this document ends at *settled,
 not built*. The bar is two and the outbound side has none, so the next
@@ -156,10 +174,15 @@ that being the step nobody can skip.
 * **No hostname resolution.** `getaddrinfo` returns a pointer. A host in
   a label is a *name to be checked*, and turning it into an address is
   either a builtin of its own or the perimeter's job — §5's program will
-  say which.
+  say which. *It did not choose one (#77).* It showed that a lex-sys
+  program can only ever connect to an address, while a grant only ever
+  names hosts, so whoever resolves also owns the check
+  ([`connect.md`](connect.md) §1).
 * **No socket type.** A descriptor is an `int`, as `File` was before
   `file-handles.md` gave it a linear type. Whether a socket wants the
-  same treatment is a question that program answers too.
+  same treatment is a question that program answers too. *It answered
+  no, for now (#77):* two `close` paths, no leak, and a linear type
+  would have caught nothing ([`connect.md`](connect.md) §5).
 * **Nothing about `exec`.** The grant's third dimension has the same
   shape as this one and none of the same operations. It waits for its own
   document.
@@ -170,4 +193,4 @@ that being the step nobody can skip.
 
 | Test | Shows | § |
 |---|---|---|
-| `the_only_network_program_is_inbound` | `examples/serve/` declares `bind`, `listen` and `accept` and **no `connect`** — the count §5 rests on, so an outbound program landing makes this fail and the count gets rewritten rather than quietly aging | 1, 5 |
+| `the_network_programs_are_counted` | The count §5 rests on, file by file: inbound `examples/serve/`, outbound `examples/fetch/`. It was `the_only_network_program_is_inbound`, written to fail when an outbound program landed. It did, and §5 was recounted rather than left to age | 1, 5 |
