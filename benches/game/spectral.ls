@@ -5,10 +5,12 @@
 // `float`, and the answer is printed to nine decimal places, which is
 // what makes this a check on the arithmetic rather than on the loop.
 //
-// `sqrt` is written here because `floating-point.md` §7 leaves
-// `std.math` over floats open -- the capability question comes first.
-// Newton's method, which `examples/newton.ls` already showed converges
-// to the limit of binary64 in five steps.
+// `sqrt` is a builtin now (`docs/float-math.md`), and this file is why
+// the slice happened: the twenty-step Newton loop that used to sit here
+// was wrong on 58.4% of values in the last place and **wrong by 143
+// orders of magnitude** on a large one -- 10^300 came back as
+// 4.77 x 10^293. The benchmark's answer never noticed, because
+// spectral-norm only ever asks for the root of something near 1.27.
 //
 //~ STDOUT 1.274219991
 //~ EXIT 0
@@ -20,27 +22,6 @@ import std.io;
 fn eval_a(i: int, j: int) -> [] float {
     let sum = i + j;
     return 1.0 / float_of(sum * (sum + 1) / 2 + i + 1);
-}
-
-// Newton, from a first guess that is right to within a factor of two:
-// halving the exponent halves the value's magnitude, which is what
-// `bits_of` is for (`float-printing.md` §2).
-fn sqrt_of(x: float) -> [] float {
-    if x <= 0.0 {
-        return 0.0;
-    }
-    var guess = x;
-    if guess > 1.0 {
-        guess = x / 2.0;
-    }
-    var n = 0;
-    // Twenty is past the point where binary64 stops changing; the
-    // benchmark's answer needs nine digits and gets seventeen.
-    while n < 20 {
-        guess = (guess + x / guess) / 2.0;
-        n = n + 1;
-    }
-    return guess;
 }
 
 fn multiply_av[&v, &o](n: int, v: &v [float], out: &!o [float]) -> [] int {
@@ -165,7 +146,7 @@ fn main(world: World) -> [] int {
             vv = vv + v[i] * v[i];
             i = i + 1;
         }
-        answer = sqrt_of(vbv / vv);
+        answer = sqrt(vbv / vv);
     }
 
     borrow mut io as &!i in {

@@ -326,6 +326,22 @@ pub enum Builtin {
     /// so the hazard has to be checkable, and `x != x` is a riddle
     /// rather than a test.
     IsNan,
+    /// `sqrt(x: float) -> [] float` — the square root, correctly rounded.
+    ///
+    /// A builtin rather than library code, which is the opposite of the
+    /// call `float-printing.md` made for printing, and the reason is
+    /// measured rather than assumed (`docs/float-math.md` §2): **a
+    /// correctly-rounded square root cannot be written in lex-sys.** The
+    /// two programs that hand-rolled one got 58.4% of values wrong in
+    /// the last place and one of them was wrong by 143 orders of
+    /// magnitude on a large input. IEEE-754 requires `sqrt` to be
+    /// correctly rounded and the hardware instruction is, so the
+    /// instruction is the only correct implementation available.
+    ///
+    /// Not a libc call, which is the whole of the capability question
+    /// (§3): `sqrtsd` and `fsqrt` are one instruction each, so this
+    /// reaches no library, needs no `Ffi`, and its row is `[]`.
+    Sqrt,
     /// `int_of(b: byte) -> [] int` — widen a byte, which is always defined
     /// and always lands in 0..255.
     IntOf,
@@ -422,6 +438,7 @@ impl Builtin {
         Builtin::FloatOf,
         Builtin::Truncate,
         Builtin::IsNan,
+        Builtin::Sqrt,
         Builtin::BitsOf,
         Builtin::FsRead,
         Builtin::FsWrite,
@@ -452,6 +469,7 @@ impl Builtin {
             Builtin::FloatOf => "float_of",
             Builtin::Truncate => "truncate",
             Builtin::IsNan => "is_nan",
+            Builtin::Sqrt => "sqrt",
             Builtin::BitsOf => "bits_of",
             Builtin::FsRead => "fs_read",
             Builtin::FsWrite => "fs_write",
@@ -619,6 +637,9 @@ impl Builtin {
             Builtin::FloatOf => (vec![Type::Int], Type::Float),
             Builtin::Truncate => (vec![Type::Float], Type::Int),
             Builtin::IsNan => (vec![Type::Float], Type::Bool),
+            // Float in, float out, and nothing else: no capability, because
+            // it reaches no library (`docs/float-math.md` §3).
+            Builtin::Sqrt => (vec![Type::Float], Type::Float),
             Builtin::BitsOf => (vec![Type::Float], Type::Int),
             // Both are checked at the call site rather than here, because a
             // fixed signature cannot say what they need. `release` ends any

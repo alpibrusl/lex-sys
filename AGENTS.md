@@ -203,18 +203,79 @@ the generics — `docs/collections.md`.
 
 ---
 
-## 6. Six things that cost this repository a compile each
+## 6. Five things that cost this repository a compile each
 
-Not rules so much as facts. Each was found by writing a program.
+Not rules so much as facts. Each was found by writing a program, and
+each is a checked block below the table — **because the table itself was
+wrong once.**
+
+> **Corrected (#63).** This section shipped with a sixth row saying
+> *"there is no unary minus; write `0 - x`."* There is one: `UnOp::Neg`
+> is in the AST, `-x` parses, and it works on `int` and `float` alike —
+> `examples/newton.ls` had been using it since before that row was
+> written. The claim came from a golden-hash fixture that used `0 - a`,
+> and reading a fixture is not reading the language.
+>
+> The checked code blocks in this document are run by the suite. This
+> table was not, which is exactly why the wrong thing survived in it. It
+> is now.
 
 | | |
 |---|---|
-| **An arena is one 64 KiB chunk, and exhaustion traps** | Not an error — SIGILL. `examples/cut/`'s line buffer is 60,000 bytes because that is what fits beside a 1,025-byte bitmap. Use `std.buffer` on the heap when the size is not known |
+| **An arena is one 64 KiB chunk, and exhaustion traps** | Not an error — SIGILL. `examples/cut/` sized a line buffer to what fit beside its bitmap, and `line-reading.md` §2 is what that cost: a longer line was silently truncated and the program answered the wrong field. **Use `std.buffer` on the heap when the size is not known** |
 | **`alloc_slice` already yields a reference** | A slice *is* a reference. `borrow mut` on one is a reference to a reference, and the refusal says `expected [byte], found &!a [byte]` |
 | **A struct field cannot be `[T]`** | *"`[T]` has no size of its own."* Use a reference, or keep the slice beside the struct rather than in it |
-| **There is no unary minus** | Write `0 - x`. The refusal for `-x` is a parse error and reads like a typo |
 | **Six escapes, and no `\x` or `\u`** | `\n \r \t \\ \" \0`. A source file is already UTF-8, so `"café 日 😀"` needs none — `docs/strings.md` §8 |
 | **`len` is a builtin and may not be redeclared** | Nor may any other prelude name. `std.buffer` calls its length `size` for this reason |
+
+Each of those, in a program the suite compiles:
+
+```lex-sys
+fn facts(x: float) -> [] float {
+    // Unary minus exists, on `int` and `float` alike -- see the
+    // correction above.
+    let negated = -x;
+    // `sqrt` is a builtin and needs no capability: it is one
+    // instruction, so it reaches no library, and its row is `[]`
+    // (`docs/float-math.md` §3).
+    return negated + sqrt(4.0);
+}
+
+fn main(world: World) -> [] int {
+    let Split { io, ffi, fs, heap, args } = split(world);
+    release(io); release(ffi); release(fs); release(args);
+
+    // Six escapes and no `\x`; a source file is already UTF-8, so a
+    // literal says what it means rather than spelling it out.
+    let text = "café 日 😀";
+    var size = len(text);
+
+    // `alloc_slice` already yields a reference: no `borrow mut`.
+    region a {
+        let room = alloc_slice[a](16, byte_of(0));
+        size = size + len(room);
+    }
+    release(heap);
+
+    if facts(2.0) < 0.0 {
+        return size;
+    }
+    return 0;
+}
+```
+
+```lex-sys-refused
+//~ RULE unsized-type
+
+// A struct field cannot be `[T]`: it has no size of its own.
+struct Holder { bytes: [byte] }
+
+fn main(world: World) -> [] int {
+    let Split { io, ffi, fs, heap, args } = split(world);
+    release(io); release(ffi); release(fs); release(heap); release(args);
+    return 0;
+}
+```
 
 ---
 
