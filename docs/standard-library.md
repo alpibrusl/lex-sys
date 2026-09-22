@@ -239,6 +239,17 @@ Three things, and the second is a language bug this slice fixed.
    boundary and they were not the same. One definition, in one place,
    is most of what a standard library is *for*.
 
+   > **Corrected (#57).** "One definition, in one place" was the plan,
+   > not the outcome. `wordcount.ls` moved to `std.bytes`; **`tally.ls`
+   > did not** — it kept a private `is_blank`, byte-identical, under a
+   > comment arguing that a word boundary is a policy belonging in the
+   > program. That argument was against putting it in the *compiler*,
+   > and it was written before there was a library to be the third
+   > option. So there were still two definitions for a year. They
+   > agreed, and nothing checked that they did — which is the failure
+   > mode this entry is about, surviving inside the entry that named it.
+   > `tally.ls` imports `std.bytes` now.
+
 ---
 
 ## 6. Open
@@ -246,6 +257,7 @@ Three things, and the second is a language bug this slice fixed.
 | Question | Why it waits |
 |---|---|
 | A writer abstraction — format into a buffer or a file, not just the console | Wants something like a trait, and there are none |
+| `split` returning a collection | `utf8.md` §1 verified `vec.Vec[&t [byte]]` compiles, so this is writable. `bytes.field` covers the case `examples/cut/` had without allocating, and nothing has yet needed the whole list at once — which is the bar the other four cleared |
 | `Option` / `Result` over `res` types | Mode polymorphism, §12 |
 | Versioning the library separately from the compiler | §2.1. A package story, which is `modules.md` §7's open question too |
 | An enum instead of `-1` | `standard-input.md` §6, now for a third set of operations |

@@ -3953,3 +3953,92 @@ fn main(world: World) -> [] int {
     assert_eq!(got.lines().count(), cases.len(), "every case should have answered");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `examples/cut/` — the third port, checked against GNU `cut`.
+///
+/// It exists as a probe rather than a demonstration: `utf8.md` §1 said
+/// the rest of a string library is "code, not design", and the way to
+/// find out *which* code is to write a program that needs it. This one
+/// asked for `bytes.count_byte` and `bytes.field`, which is how they
+/// arrived — the same route `vec.set` and `vec.swap` took.
+///
+/// The field specs below are the ones where a hand-rolled splitter goes
+/// wrong: empty leading and trailing fields, a line with no delimiter at
+/// all (which GNU passes through whole without `-s`), and a field past
+/// the end.
+#[test]
+fn cut_agrees_with_gnu_cut() {
+    let dir = scratch("example-cut");
+    let exe = dir.join("cut");
+    let build = Command::new(BIN)
+        .args([
+            "build".as_ref(),
+            repo_root().join("examples/cut/cut.ls").as_os_str(),
+            "--std".as_ref(),
+            "-o".as_ref(),
+            exe.as_os_str(),
+        ])
+        .output()
+        .expect("the compiler runs");
+    assert!(
+        build.status.success(),
+        "`cut` should compile, but the compiler said:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+
+    let data = "alpha,beta,gamma,delta,epsilon\n\
+                one,two,three\n\
+                a,b,c,d,e,f,g\n\
+                ,leading,empty\n\
+                trailing,empty,\n\
+                nodelimiterhere\n\
+                x,y\n";
+
+    /// Feed `input` on stdin and hand back stdout.
+    fn run(cmd: &std::path::Path, args: &[&str], input: &str) -> String {
+        use std::io::Write;
+        let mut child = Command::new(cmd)
+            .args(args)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("the program runs");
+        let text = input.to_owned();
+        let mut stdin = child.stdin.take().expect("stdin");
+        std::thread::spawn(move || {
+            let _ = stdin.write_all(text.as_bytes());
+        });
+        let out = child.wait_with_output().expect("it finishes");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    // Same rule as the `base64` and `sort` tests: BSD's `cut` is a
+    // different program, so the reference only counts when it is GNU's.
+    let reference = std::path::Path::new("/usr/bin/cut");
+    let have_reference = Command::new(reference)
+        .arg("--version")
+        .output()
+        .map(|v| v.status.success() && String::from_utf8_lossy(&v.stdout).contains("GNU coreutils"))
+        .unwrap_or(false);
+
+    for spec in ["-f1", "-f2", "-f2,4", "-f1-3", "-f3-", "-f2-4", "-f1,3-5", "-f9"] {
+        let ours = run(&exe, &["-d,", spec], data);
+        // Shape checks, which run with or without a reference: every
+        // input line produces exactly one output line.
+        assert_eq!(
+            ours.lines().count(),
+            data.lines().count(),
+            "`{spec}` should answer one line per input line"
+        );
+        if have_reference {
+            let theirs = run(reference, &["-d,", spec], data);
+            assert_eq!(ours, theirs, "`cut -d, {spec}` differs from GNU cut");
+        }
+    }
+
+    // A malformed list is an error, as it is for GNU.
+    let bad = Command::new(&exe).args(["-d,", "-fzzz"]).output().expect("it runs");
+    assert_eq!(bad.status.code(), Some(2), "a malformed `-f` list should exit 2");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

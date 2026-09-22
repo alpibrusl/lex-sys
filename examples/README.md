@@ -28,6 +28,7 @@ cargo run -p lex-sys -- run examples/tour.ls
 | [`buffer/`](buffer/) | A growable byte buffer, written as a library |
 | [`slab/`](slab/) | Shared ownership, as far as this language reaches |
 | [`modular/`](modular/) | Two modules and a root |
+| [`cut/`](cut/) | `cut -d -f`, ported to **ask** what a string library needs |
 | [`wordfreq/`](wordfreq/) | The capstone: three files, every capability doing real work |
 
 ---
@@ -258,6 +259,26 @@ had.
 
 `docs/porting.md` is the report, including §6 on what one small port does
 not establish.
+
+### `cut/` — the port written to find out what was missing
+
+GNU `cut -d<delim> -f<list>`, checked against it on eight field specs
+including the ones a hand-rolled splitter gets wrong: empty leading and
+trailing fields, a line with no delimiter at all, a field past the end.
+
+It is here as a **probe**. `docs/utf8.md` §1 said the rest of a string
+library is "code, not design", and the way to learn *which* code is to
+write a program that needs it — the route `vec.set` and `vec.swap` took.
+This one asked for two functions, `bytes.count_byte` and `bytes.field`,
+and neither existed before it was written.
+
+The other thing it found is the **arena as a line-length limit**. A
+region is one 64 KiB chunk, the field bitmap is already in it, and a
+65 000-byte line buffer beside a 1 025-byte bitmap traps on exhaustion.
+So the 60 000 in the source is what fits, not what was wanted, and the
+comment says so. GNU has no such limit because it grows; so would this,
+on the heap with `std.buffer`, the way `sort/` does. The arena version
+is the one that shows what an arena costs.
 
 ### `sort/` — the port with resources in it
 

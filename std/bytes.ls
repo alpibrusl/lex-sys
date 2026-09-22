@@ -123,3 +123,98 @@ pub fn find[&t, &n](text: &t [byte], needle: &n [byte]) -> [] int {
     }
     return 0 - 1;
 }
+
+// How many times the byte `b` occurs in `text`.
+//
+// Takes an `int` for the same reason the classifiers do: it is what
+// `int_of` and `getchar` produce, and a caller that has one should not
+// have to build a `byte` to ask a question about it.
+//
+// `examples/cut/` is why this exists: the number of fields in a line is
+// the number of delimiters plus one, and counting them was the first
+// thing that program wrote by hand.
+pub fn count_byte[&t](text: &t [byte], b: int) -> [] int {
+    var n = 0;
+    var at = 0;
+    while at < len(text) {
+        if int_of(text[at]) == b {
+            n = n + 1;
+        }
+        at = at + 1;
+    }
+    return n;
+}
+
+// Where the `n`-th field of `text` begins and ends, splitting on `b`.
+//
+// Fields are **1-based**, because that is how `cut` counts them and
+// this function exists for `cut`. Asking for a field past the end
+// answers an empty slice rather than trapping: a short line is an
+// ordinary thing for a cutter to meet, not a bug in the program.
+//
+// The slice comes back bound to `&t`, so a field cannot outlive the
+// line it was cut from — the escape check does that, and it is the same
+// property `slicing.md` §1 gave every other subslice.
+pub fn field[&t](text: &t [byte], b: int, n: int) -> [] &t [byte] {
+    if n < 1 {
+        return text[0..0];
+    }
+    var at = 0;
+    var seen = 1;
+    while seen < n && at < len(text) {
+        if int_of(text[at]) == b {
+            seen = seen + 1;
+        }
+        at = at + 1;
+    }
+    if seen < n {
+        return text[0..0];
+    }
+    var end = at;
+    while end < len(text) && int_of(text[end]) != b {
+        end = end + 1;
+    }
+    return text[at..end];
+}
+
+// `text` without leading or trailing blanks (`is_blank`).
+//
+// Bound to `&t` like `field`, and for the same reason. Named `trim`
+// rather than `strip` because every tool this library is measured
+// against spells it that way.
+pub fn trim[&t](text: &t [byte]) -> [] &t [byte] {
+    var at = 0;
+    while at < len(text) && is_blank(int_of(text[at])) {
+        at = at + 1;
+    }
+    var end = len(text);
+    while end > at && is_blank(int_of(text[end - 1])) {
+        end = end - 1;
+    }
+    return text[at..end];
+}
+
+// Byte order: negative when `a` sorts first, 0 when they are equal,
+// positive when `b` does. Shorter first when one is a prefix of the
+// other.
+//
+// This is `LC_ALL=C` and nothing else, because the language has no
+// locale to implement anything else — and `utf8.md` §5 records that
+// byte order and code-point order agree for UTF-8, so this sorts text
+// correctly without decoding it.
+//
+// `examples/sort/` had this inline, over `(text, at, len)` triples
+// rather than slices, because it sorts indices into one buffer. It
+// still does; what changed is that the *rule* is written down once.
+pub fn compare[&a, &b](a: &a [byte], b: &b [byte]) -> [] int {
+    var i = 0;
+    while i < len(a) && i < len(b) {
+        let x = int_of(a[i]);
+        let y = int_of(b[i]);
+        if x != y {
+            return x - y;
+        }
+        i = i + 1;
+    }
+    return len(a) - len(b);
+}
