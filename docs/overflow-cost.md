@@ -90,6 +90,19 @@ reassociated, so a reduction cannot be split across lanes. The unchecked
 loop adds four at a time; the checked loop adds one at a time and then
 also tests a flag.
 
+> **Corrected (#62): "the check" is too general — it is *this* check.**
+> `gpu.md` §2 ran the same experiment with the two guards switched
+> independently, and a **bounds** check is free: 1.01×, with the SIMD
+> count unmoved at 10. The index condition is provably true inside a
+> loop the compiler already proved bounded, so it is deleted outright.
+>
+> A branch on a constant is not a branch, and it was never a
+> reassociation barrier. What costs the vectoriser is a trap on a value
+> the compiler cannot bound — which is the overflow check and, as far as
+> anything here has measured, only the overflow check. This section
+> measured one guard and wrote "the check"; the sentence above is kept
+> because it is true of the one it measured.
+
 That is a real, structural cost, it is exactly the one the README
 promised there would not be, and it lands precisely where the README's own
 "linearity gives the optimiser stronger aliasing facts" argument wants to

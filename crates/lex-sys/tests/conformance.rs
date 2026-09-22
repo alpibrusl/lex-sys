@@ -2267,7 +2267,7 @@ fn every_benchmark_pair_agrees() {
     let scratch = scratch("benches");
     let mut pairs = 0;
 
-    for name in ["sum", "sieve", "scan", "fib"] {
+    for name in ["sum", "sieve", "scan", "fib", "reduce"] {
         for half in ["checked", "wrapping"] {
             let source = dir.join(format!("{name}_{half}.ls"));
             let exe = scratch.join(format!("{name}_{half}"));
@@ -2291,7 +2291,14 @@ fn every_benchmark_pair_agrees() {
         pairs += 1;
     }
 
-    assert_eq!(pairs, 4, "every pair in `benches/` should be covered here");
+    // Counted from the directory rather than written down twice: a pair
+    // added to `benches/` and forgotten here would otherwise never run.
+    let on_disk = std::fs::read_dir(&dir)
+        .expect("benches/ is readable")
+        .filter_map(|entry| Some(entry.ok()?.file_name().to_string_lossy().into_owned()))
+        .filter(|name| name.ends_with("_checked.ls"))
+        .count();
+    assert_eq!(pairs, on_disk, "every pair in `benches/` should be covered here");
     let _ = std::fs::remove_dir_all(&scratch);
 }
 
