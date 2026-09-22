@@ -109,7 +109,13 @@ the language exists to refuse.
 ### 3.4 `std.buffer` — bytes, growable
 
 A growable byte buffer: `Buffer`, `empty`, `reserve`, `push`, `append`,
-`push_nat`, `size`, `write` and `drop`.
+`push_nat`, `size`, `write`, `clear` and `drop`.
+
+`clear` arrived last and is the clearest case any of these has:
+`examples/cut/` reads a line at a time and has to reuse its buffer, and
+nothing here could move `used` back — `filled` only goes forward. The
+alternative, `drop` plus `empty` on every line, is **13.0× slower**
+(`docs/line-reading.md` §4). A gap rather than a convenience.
 
 `size` rather than `len`, because `len` is a builtin and a program may
 not redeclare one — which is the right refusal, and worth having hit
@@ -259,6 +265,7 @@ Three things, and the second is a language bug this slice fixed.
 | Question | Why it waits |
 |---|---|
 | A writer abstraction — format into a buffer or a file, not just the console | Wants something like a trait, and there are none |
+| A line reader | **Answered, no** — `line-reading.md`. Five programs call `getchar` and one reads a line at a time; the bar is two. The row that asked for it named a second program that keeps nothing at all, which is what §5's rule costs when the count is taken from memory rather than by reading |
 | `split` returning a collection | `utf8.md` §1 verified `vec.Vec[&t [byte]]` compiles, so this is writable. `bytes.field` covers the case `examples/cut/` had without allocating, and nothing has yet needed the whole list at once — which is the bar the other four cleared |
 | `Option` / `Result` over `res` types | Mode polymorphism, §12 |
 | Versioning the library separately from the compiler | §2.1. A package story, which is `modules.md` §7's open question too |

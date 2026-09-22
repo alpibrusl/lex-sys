@@ -14,10 +14,18 @@
 //     lex-sys run examples/cut/cut.ls --std -- -d, -f2,4 < data.csv
 //
 // The fields themselves are `bytes.field`, which this program is the
-// reason for.
+// reason for -- and so is `buffer.clear`, which it asked for by not
+// being able to reuse a line buffer without one (`line-reading.md` §4).
+//
+// It also asked for something it did **not** get. `ROADMAP.md` wanted a
+// `read_line` in `std` because two programs supposedly hand-rolled this
+// loop; one of them keeps no buffer at all, so this is the only program
+// that reads a line at a time and the bar is two. §1 there is the
+// count, taken by reading them.
 
 import std.io;
 import std.bytes;
+import std.buffer;
 
 // ---------------------------------------------------------- the list -----
 
@@ -125,7 +133,7 @@ fn cut_line[&i, &l, &o](io: &!i Io, line: &l [byte], delim: int,
 
 fn main(world: World) -> [] int {
     let Split { io, ffi, fs, heap, args } = split(world);
-    release(ffi); release(fs); release(heap);
+    release(ffi); release(fs);
 
     var delim = 9;
     var spec = "1";
@@ -180,44 +188,51 @@ fn main(world: World) -> [] int {
                 // primitive there is (`standard-input.md`), and a line
                 // is the unit `cut` works in.
                 //
-                // **60 000 bytes, and that is a real limit.** A region
-                // is one 64 KiB chunk (`heap.md`), and the bitmap above
-                // is already in this one, so the line buffer is what
-                // fits beside it — asking for 65 000 here traps on
-                // arena exhaustion, which is how this number was found
-                // rather than chosen. A longer line is truncated.
-                //
-                // GNU `cut` has no such limit because it grows. So
-                // would this, on the heap with `std.buffer`, the way
-                // `examples/sort/` does — and the reason not to here is
-                // that the arena version is the one that shows what an
-                // arena costs.
-                var line = alloc_slice[a](60000, byte_of(0));
-                var used = 0;
-                borrow mut io as &!i in {
-                    var c = getchar(i);
-                    while c >= 0 {
-                        if c == 10 {
-                            cut_line(i, line[0..used], delim, bits, from_open);
-                            used = 0;
-                        } else {
-                            if used < len(line) {
-                                line[used] = byte_of(c);
-                                used = used + 1;
+                // **On the heap, because the arena version was wrong.**
+                // A region is one 64 KiB chunk (`heap.md`), so the line
+                // buffer was 60 000 bytes — what fits beside the bitmap
+                // — and a longer line was truncated *silently*. That is
+                // not merely a limit: a truncated line loses its
+                // delimiters, so this program switched to the
+                // no-delimiter rule and printed 60 KB of the wrong
+                // field with exit 0. `docs/line-reading.md` §2 has the
+                // table. `std.buffer` grows, the way `examples/sort/`
+                // does, and there is no limit left to get wrong.
+                borrow mut heap as &!h in {
+                    var line = buffer.empty(h, 4096);
+                    borrow mut io as &!i in {
+                        var c = getchar(i);
+                        while c >= 0 {
+                            if c == 10 {
+                                borrow line as &l in {
+                                    cut_line(i, buffer.bytes(l), delim, bits, from_open);
+                                }
+                                // `clear` keeps the allocation, so the
+                                // next line writes into room this one
+                                // already grew (§4).
+                                borrow mut line as &!l in { buffer.clear(l); }
+                            } else {
+                                line = buffer.push(h, line, byte_of(c));
+                            }
+                            c = getchar(i);
+                        }
+                        // A final line with no newline still counts, and
+                        // gets one on the way out -- as GNU does.
+                        var last = 0;
+                        borrow line as &l in { last = buffer.size(l); }
+                        if last > 0 {
+                            borrow line as &l in {
+                                cut_line(i, buffer.bytes(l), delim, bits, from_open);
                             }
                         }
-                        c = getchar(i);
                     }
-                    // A final line with no newline still counts, and
-                    // gets one on the way out -- as GNU does.
-                    if used > 0 {
-                        cut_line(i, line[0..used], delim, bits, from_open);
-                    }
+                    buffer.drop(h, line);
                 }
             }
         }
     }
 
+    release(heap);
     release(io);
     return status;
 }

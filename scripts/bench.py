@@ -31,7 +31,7 @@ import tempfile
 import time
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-BENCHES = ["sum", "sieve", "scan", "fib"]
+BENCHES = ["sum", "sieve", "scan", "fib", "reduce"]
 # Each benchmark returns `result - expected`, so a non-zero exit is a wrong
 # answer and the run is not reported as a time.
 EXPECTED_EXIT = 0

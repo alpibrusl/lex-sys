@@ -165,6 +165,22 @@ pub fn room[&b](b: &!b Buffer) -> [] &!b [byte] {
     return s[b.used..len(s)];
 }
 
+// Empty it, keeping the allocation.
+//
+// The one function `examples/cut/` asked for, and it asked by not being
+// able to do without it: a program reading a line at a time has to
+// reuse a buffer, and `drop` plus `empty` per line is an allocation per
+// line rather than one for the program. There was no other way to move
+// `used` back — `filled` only goes forward — so this is a gap rather
+// than a convenience (`docs/line-reading.md` §4).
+//
+// The allocation stays, which is the point: the next line writes into
+// the room the last one already grew.
+pub fn clear[&b](b: &!b Buffer) -> [] int {
+    b.used = 0;
+    return 0;
+}
+
 // Commit `n` bytes that `room` was just filled with.
 //
 // Separate from `room` because the two answer different questions and

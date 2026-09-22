@@ -37,7 +37,8 @@ are known to be the same program.
 | `sieve` | strided writes and cache | The check when it is not on the critical path |
 | `scan` | comparisons and branches | Text-handling systems code — and the one that came out backwards |
 | `fib` | calls and returns | Arithmetic looks different when the frame pointer is the bottleneck |
-| `reduce.c` | — | The same guarantee given to a mature backend, which is how we know the cost is the semantics rather than Cranelift |
+| `reduce` | a memory-fed reduction | The shape a GPU runs, and the one `reduce.c` gives to clang — so the two languages meet on one algorithm rather than on the same words (`docs/gpu.md`) |
+| `reduce.c` | — | The same guarantee given to a mature backend, which is how we know the cost is the semantics rather than Cranelift. `BOUNDS` and `CHECKED` switch its two guards independently, which is how `gpu.md` §2 separates their costs |
 
 ## Against C and Rust
 
