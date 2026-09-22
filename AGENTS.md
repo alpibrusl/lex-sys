@@ -226,6 +226,7 @@ wrong once.**
 | **`alloc_slice` already yields a reference** | A slice *is* a reference. `borrow mut` on one is a reference to a reference, and the refusal says `expected [byte], found &!a [byte]` |
 | **A struct field cannot be `[T]`** | *"`[T]` has no size of its own."* Use a reference, or keep the slice beside the struct rather than in it |
 | **Six escapes, and no `\x` or `\u`** | `\n \r \t \\ \" \0`. A source file is already UTF-8, so `"café 日 😀"` needs none — `docs/strings.md` §8 |
+| **A character is written as one: `'a'` is 97** | A third spelling of an integer, not a type — so `'0' + n % 10`, and `byte_of('\n')` where a `byte` is wanted. Same six escapes with `\'` for `\"`, and non-ASCII is refused — `docs/character-literals.md` |
 | **`len` is a builtin and may not be redeclared** | Nor may any other prelude name. `std.buffer` calls its length `size` for this reason |
 
 Each of those, in a program the suite compiles:
@@ -254,6 +255,10 @@ fn main(world: World) -> [] int {
     region a {
         let room = alloc_slice[a](16, byte_of(0));
         size = size + len(room);
+        // A character literal is an `int`, so it adds to one directly and
+        // needs `byte_of` to become a byte -- the same conversion a
+        // number needed, with an argument that can be read.
+        room[0] = byte_of('0' + size % 10);
     }
     release(heap);
 

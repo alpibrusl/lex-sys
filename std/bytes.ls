@@ -21,19 +21,24 @@ module std.bytes;
 // was written down once, which is most of what a standard library is
 // for (`docs/standard-library.md` §5.3).
 pub fn is_blank(c: int) -> [] bool {
-    return c == 32 || c == 9 || c == 10 || c == 13 || c == 11 || c == 12;
+    // 11 and 12 are the vertical tab and the form feed, and they stay
+    // numbers: the escape set is `strings.md` §4's six and neither has
+    // one (`docs/character-literals.md` §4). Before this line could name
+    // the other four, all six were numbers and the sixth was either
+    // correct or a typo for something else with no way to tell.
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == 11 || c == 12;
 }
 
 pub fn is_digit(c: int) -> [] bool {
-    return c >= 48 && c <= 57;
+    return c >= '0' && c <= '9';
 }
 
 pub fn is_upper(c: int) -> [] bool {
-    return c >= 65 && c <= 90;
+    return c >= 'A' && c <= 'Z';
 }
 
 pub fn is_lower(c: int) -> [] bool {
-    return c >= 97 && c <= 122;
+    return c >= 'a' && c <= 'z';
 }
 
 pub fn is_alpha(c: int) -> [] bool {

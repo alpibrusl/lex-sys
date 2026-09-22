@@ -86,7 +86,7 @@ fn value_of(c: int) -> [] int {
 fn emit[&o](out: &!o [byte], at: int, column: int, c: int) -> [] (int, int) {
     out[at] = byte_of(c);
     if column + 1 == 76 {
-        out[at + 1] = byte_of(10);
+        out[at + 1] = byte_of('\n');
         return (at + 2, 0);
     }
     return (at + 1, column + 1);
@@ -155,7 +155,7 @@ fn encode[&i](io: &!i Io) -> [io_read, io_write] int {
         // A final newline unless the last line already ended with one,
         // which is what `column == 0` means here.
         if column != 0 {
-            out[at] = byte_of(10);
+            out[at] = byte_of('\n');
             at = at + 1;
         }
         if at > 0 {
@@ -172,10 +172,10 @@ fn decode[&i](io: &!i Io) -> [io_read, io_write] int {
 
     var c = getchar(io);
     while c >= 0 {
-        if c == 61 {
+        if c == '=' {
             padded = true;
         } else {
-            if c != 10 && c != 13 {
+            if c != '\n' && c != '\r' {
                 // A character after the padding is malformed even if it is
                 // in the alphabet: `=` means the stream ended.
                 if padded {
@@ -231,7 +231,7 @@ fn main(world: World) -> [] int {
         var n = 1;
         while n < arg_count(g) {
             let flag = arg(g, n);
-            if len(flag) == 2 && int_of(flag[0]) == 45 && int_of(flag[1]) == 100 {
+            if len(flag) == 2 && int_of(flag[0]) == '-' && int_of(flag[1]) == 'd' {
                 decoding = true;
             }
             n = n + 1;

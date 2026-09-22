@@ -31,7 +31,7 @@ fn banner[&i](io: &!i Io) -> [io_write] int {
 fn run[&i](io: &!i Io) -> [io_write] int {
     banner(io);
     // A pure call inside an effectful function adds nothing to the row.
-    let last = emit(io, 48 + double(3));
+    let last = emit(io, '0' + double(3));
     emit(io, 10);
     return last - 54;
 }

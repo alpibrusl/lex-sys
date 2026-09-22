@@ -83,13 +83,13 @@ fn put[&s, &d](dst: &!d [byte], at: int, src: &s [byte]) -> [] int {
 // thing a `Content-Length` header costs when there is no string type.
 fn put_nat[&d](dst: &!d [byte], at: int, n: int) -> [] int {
     if n == 0 {
-        dst[at] = byte_of(48);
+        dst[at] = byte_of('0');
         return at + 1;
     }
     var rest = n;
     var end = at;
     while rest > 0 {
-        dst[end] = byte_of(48 + rest - (rest / 10) * 10);
+        dst[end] = byte_of('0' + rest - (rest / 10) * 10);
         rest = rest / 10;
         end = end + 1;
     }
@@ -183,7 +183,7 @@ fn read_request[&f, &b](libc: &f Ffi("libc"), conn: int, buffer: &!b [byte])
         }
         let end = filled + got;
         while filled < end {
-            if int_of(buffer[filled]) == 10 {
+            if int_of(buffer[filled]) == '\n' {
                 return end;
             }
             filled = filled + 1;

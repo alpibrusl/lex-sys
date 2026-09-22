@@ -76,7 +76,7 @@ fn run[&h, &i](heap: &!h Heap, io: &!i Io) -> [heap, io_write] int {
     b = buffer.append(heap, b, "counting");
     var n = 1;
     while n < 4 {
-        b = buffer.push(heap, b, byte_of(32));
+        b = buffer.push(heap, b, byte_of(' '));
         b = buffer.push_nat(heap, b, n * n);
         n = n + 1;
     }

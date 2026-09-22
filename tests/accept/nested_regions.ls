@@ -28,10 +28,10 @@ fn run[&i](io: &!i Io) -> [io_write] int {
     borrow big as &outer in {
         borrow small as &inner in {
             // A reference from the enclosing block, used inside this one.
-            putchar(io, 48 + len_of(outer));
-            putchar(io, 48 + len_of(inner));
+            putchar(io, '0' + len_of(outer));
+            putchar(io, '0' + len_of(inner));
             // And the declared relation, satisfied: `outer` outlives `inner`.
-            putchar(io, 48 + merged(outer, inner) / 2);
+            putchar(io, '0' + merged(outer, inner) / 2);
         }
     }
 

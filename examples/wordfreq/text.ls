@@ -9,7 +9,7 @@ fn print_nat[&i](io: &!i Io, n: int) -> [io_write] int {
     if n >= 10 {
         print_nat(io, n / 10);
     }
-    return putchar(io, 48 + n % 10);
+    return putchar(io, '0' + n % 10);
 }
 
 fn write_all[&r, &i](io: &!i Io, s: &r [byte]) -> [io_write] int {
@@ -24,7 +24,7 @@ fn write_all[&r, &i](io: &!i Io, s: &r [byte]) -> [io_write] int {
 // A space, a tab or a newline. `==` on `byte` compares storage, which is
 // allowed; `+` on one is arithmetic, which is not (`docs/strings.md` §2).
 fn is_space(b: byte) -> [] bool {
-    return b == byte_of(32) || b == byte_of(10) || b == byte_of(9) || b == byte_of(13);
+    return b == byte_of(' ') || b == byte_of('\n') || b == byte_of('\t') || b == byte_of('\r');
 }
 
 // Are the two ranges of `text` the same bytes?

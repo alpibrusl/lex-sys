@@ -68,7 +68,7 @@ fn parse_list[&r, &o](spec: &r [byte], bits: &!o [byte]) -> [] int {
         if !saw { bad = true; }
         else {
             var hi = lo;
-            if at < len(spec) && int_of(spec[at]) == 45 {
+            if at < len(spec) && int_of(spec[at]) == '-' {
                 at = at + 1;
                 hi = 0;
                 var saw_hi = false;
@@ -90,7 +90,7 @@ fn parse_list[&r, &o](spec: &r [byte], bits: &!o [byte]) -> [] int {
                 n = n + 1;
             }
             if at < len(spec) {
-                if int_of(spec[at]) == 44 { at = at + 1; }
+                if int_of(spec[at]) == ',' { at = at + 1; }
                 else { bad = true; }
             }
         }
@@ -203,7 +203,7 @@ fn main(world: World) -> [] int {
                     borrow mut io as &!i in {
                         var c = getchar(i);
                         while c >= 0 {
-                            if c == 10 {
+                            if c == '\n' {
                                 borrow line as &l in {
                                     cut_line(i, buffer.bytes(l), delim, bits, from_open);
                                 }

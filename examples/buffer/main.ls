@@ -42,11 +42,11 @@ fn run[&h, &i](heap: &!h Heap, io: &!i Io) -> [heap, io_write] int {
     text = push_all(heap, text, "counting:");
     var n = 1;
     while n <= 8 {
-        text = push_byte(heap, text, byte_of(32));
+        text = push_byte(heap, text, byte_of(' '));
         text = push_nat(heap, text, n * n);
         n = n + 1;
     }
-    text = push_byte(heap, text, byte_of(10));
+    text = push_byte(heap, text, byte_of('\n'));
 
     // Read it back before ending it. `write_buffer` takes the buffer by
     // value and hands it back, which is not a style choice: a `Buffer`

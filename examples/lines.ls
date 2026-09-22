@@ -58,7 +58,7 @@ fn append_nat[&b](into: &!b [byte], at: int, n: int) -> [] int {
     if n >= 10 {
         next = append_nat(into, at, n / 10);
     }
-    into[next] = byte_of(48 + n % 10);
+    into[next] = byte_of('0' + n % 10);
     return next + 1;
 }
 
@@ -100,7 +100,7 @@ fn tally[&b](text: &b [byte], length: int) -> [] Counts {
     var start = 0;
     var i = 0;
     while i < length {
-        if text[i] == byte_of(10) {
+        if text[i] == byte_of('\n') {
             let width = i - start;
             lines = lines + 1;
             if width > longest {

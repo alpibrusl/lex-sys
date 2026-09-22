@@ -2484,6 +2484,44 @@ fn ids_are_stable_across_the_operator_set() {
     let _ = std::fs::remove_dir_all(&scratch);
 }
 
+/// `docs/character-literals.md` §5 — the third spelling moved no hash.
+///
+/// `'a'` is the integer 97 and nothing past `int_value` knows which
+/// spelling was written, so the two programs below are one program. This
+/// is the same claim `ids_are_stable_across_the_operator_set` makes for
+/// hexadecimal, checked the way `bitwise.md` §1.1 says it should be:
+/// against the other spelling rather than against a number written down.
+///
+/// Checking it against its sibling rather than against a literal hash is
+/// deliberate. A frozen hash here would fail on any future encoder
+/// change, including a correct one, and say nothing about the property
+/// this slice is responsible for — which is that *these two texts agree*,
+/// whatever they agree on.
+#[test]
+fn a_character_literal_hashes_as_its_integer() {
+    let scratch = scratch("ids-character-literal");
+    let spellings = [
+        ("numbers", "fn f(c: int) -> [] int { return c + 48 + 10; }\n"),
+        ("characters", "fn f(c: int) -> [] int { return c + '0' + '\\n'; }\n"),
+    ];
+
+    let mut hashes = Vec::new();
+    for (name, source) in spellings {
+        let path = scratch.join(format!("{name}.ls"));
+        std::fs::write(&path, source).expect("a writable fixture");
+        let output = Command::new(BIN).arg("ids").arg(&path).output().expect("the compiler runs");
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        hashes.push(String::from_utf8(output.stdout).expect("hashes are ascii"));
+    }
+
+    assert_eq!(
+        hashes[0], hashes[1],
+        "`'0'` and `48` should be one node, so these should be one program"
+    );
+
+    let _ = std::fs::remove_dir_all(&scratch);
+}
+
 /// `examples/base64/` — the port, checked against the program it ports.
 ///
 /// `docs/porting.md`'s claim is that this is GNU coreutils' `base64`, and

@@ -287,7 +287,7 @@ fn put_digit[&o](out: &!o [byte], at: int, digit: int) -> [] int {
     if at < 0 || at + 1 > len(out) {
         return 0 - 1;
     }
-    out[at] = byte_of(48 + digit);
+    out[at] = byte_of('0' + digit);
     return at + 1;
 }
 

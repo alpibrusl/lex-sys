@@ -15,7 +15,7 @@
 
 // Frame three: performs the effect.
 fn digit[&i](io: &!i Io, n: int) -> [io_write] int {
-    return putchar(io, 48 + n);
+    return putchar(io, '0' + n);
 }
 
 // Frame two: performs nothing itself, borrows on the way through.

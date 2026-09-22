@@ -72,11 +72,11 @@ fn document() -> [] &static [byte] {
 }
 
 fn newline_byte() -> [] byte {
-    return byte_of(10);
+    return byte_of('\n');
 }
 
 fn space_byte() -> [] byte {
-    return byte_of(32);
+    return byte_of(' ');
 }
 
 // `std.bytes.is_blank` takes an `int`, because that is what `getchar`
@@ -206,9 +206,9 @@ fn report[&i](io: &!i Io) -> [io_write] int {
     // say which kind it is holding.
     var thes = 0;
     region a {
-        let needle = alloc_slice[a](3, byte_of(116));   // 't'
-        needle[1] = byte_of(104);                       // 'h'
-        needle[2] = byte_of(101);                       // 'e'
+        let needle = alloc_slice[a](3, byte_of('t'));
+        needle[1] = byte_of('h');
+        needle[2] = byte_of('e');
         thes = count_word(text, needle);
     }
 

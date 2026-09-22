@@ -27,7 +27,7 @@ pub fn print_nat[&i](io: &!i Io, n: int) -> [io_write] int {
     if n >= 10 {
         print_nat(io, n / 10);
     }
-    return putchar(io, 48 + n % 10);
+    return putchar(io, '0' + n % 10);
 }
 
 pub fn newline[&i](io: &!i Io) -> [io_write] int {

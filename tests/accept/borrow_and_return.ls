@@ -33,12 +33,12 @@ fn run[&i](io: &!i Io) -> [io_write] int {
 
     borrow f as &r in {
         // `r` is the region in a type and the reference in an expression.
-        putchar(io, 48 + r.fd);
-        putchar(io, 48 + size_of(r) / 2 - 1);
+        putchar(io, '0' + r.fd);
+        putchar(io, '0' + size_of(r) / 2 - 1);
     }
 
     // Owned again: the block closed, so the freeze lifted.
-    putchar(io, 48 + close(f) - 5);
+    putchar(io, '0' + close(f) - 5);
     putchar(io, 10);
     return 0;
 }
