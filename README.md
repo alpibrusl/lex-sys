@@ -1,52 +1,131 @@
 # lex-sys
 
-A **systems dialect carrying Lex's philosophy**: native compilation, no GC,
-linear ownership and capability-typed effects unified into one resource
-system, fully defined behaviour, and a canonical content-addressable AST
-designed in from day one.
+A **native systems language in which resource ownership and authority are
+part of the program's type-level contract.** Linear ownership and
+capability-typed effects are one system rather than two; behaviour is
+fully defined, with no UB; and the AST is canonical and
+content-addressable, designed in from day one rather than retrofitted.
 
-> **Status: M0–M3 complete**, and post-milestone work is shipping one slice
-> at a time. A bootstrap compiler takes a `.ls` file to a real native
-> executable, and CI proves it on **linux-x86_64 and darwin-aarch64**.
+> **Status.** M0–M3 complete, and post-milestone work ships one slice at a
+> time. A bootstrap compiler takes a `.ls` file to a real native
+> executable, green on **linux-x86_64 and darwin-aarch64**.
 >
-> Not a usable language yet. [`docs/ROADMAP.md`](docs/ROADMAP.md) tracks
-> what landed, what is next, and what each slice found.
+> **What works today:** the thesis, built and enforced —
+> capabilities, exact effect rows, one-way narrowing, lexical borrowing,
+> arenas and a general heap, file handles, the console in three
+> directions, libc FFI, compile-time evaluation, a standard library
+> written in lex-sys, and `lex-sys authority`, which computes what a
+> program can reach from the same reachability that decides what goes in
+> the binary. Real programs: GNU `base64` and `sort` ported and checked
+> byte-for-byte against the originals, and a REST endpoint answered over
+> a real socket.
+>
+> **What does not:** it is **not a usable language yet** — no threads, no
+> `Net` capability, no TLS, and a **1.17×–2.58×** gap to C that is a
+> property of the backend rather than of the design
+> ([below](#performance-honestly)). [`docs/ROADMAP.md`](docs/ROADMAP.md)
+> tracks what landed, what is next, and what each slice found.
 
-> **Writing lex-sys?** [`AGENTS.md`](AGENTS.md) is the one page — the rules,
-> the six things that cost this repository a compile each, and what the
-> language does not have. `lex-sys agent-guidelines` prints it, and every
-> checked code block in it is run by the test suite.
+> **Writing lex-sys?** [`AGENTS.md`](AGENTS.md) is the one page — the
+> rules, the six things that cost this repository a compile each, and
+> what the language does not have. `lex-sys agent-guidelines` prints it,
+> and every checked code block in it is run by the test suite.
 
 ---
 
-## What this is
+## Where this sits
 
-`lex-sys` is **not** Lex, and **not** a subset of it. Lex is the high-level,
-functional, GC'd, interpreted language the ecosystem's libraries are written
-in. `lex-sys` is a *second, lower-level language* sharing Lex's worldview —
-effects and capabilities in the type system, determinism as a first-class
-property — targeting the work Lex can't do: native binaries, manual and
-region memory, syscalls, embedding, FFI.
+Three repositories share one idea. **Two of them are wired together, and
+this is the third.**
 
-The two are designed to interoperate over C FFI, with Lex remaining the
-application layer.
+```
+                    lex-lang
+             the high-level language
+       16 crates: syntax, ast, types, store,
+          vcs, jit, lsp, bytecode, trace
+                       │
+                       │  Grant, and the real Lex front end
+                       ▼
+                    lex-os
+           the autonomous-agent runtime
+     manifest + grant → static check → perimeter
+            → supervisor → audit chain
+
+
+                    lex-sys
+                    this repo
+       a second, native language, same worldview
+```
+
+**`lex-lang`** is the high-level, functional, GC'd, interpreted language
+the ecosystem's libraries are written in.
+
+**`lex-os`** is the runtime that takes an agent's goal, seals it in a
+microVM, and mediates everything it does against **one** declaration —
+the trust `Grant`. That grant is enforced twice: statically, by
+`lex-os-check`, which rejects a program whose effects exceed it *before
+it loads*; and at run time, by a supervisor the agent cannot reach,
+which logs every request to a hash-chained audit file outside the box
+before deciding it. Its demo runs an agent as root, lets it attempt
+three escapes, and stops each with a different mechanism.
+
+**`lex-sys`** — this repository — is a *second, lower-level language*
+sharing that worldview, targeting the work Lex cannot do: native
+binaries, manual and region memory, syscalls, embedding, FFI. It shares
+the idea and **no code**: `lex-os` takes its grant from `lex-lang` and
+checks `.lex`, and does not depend on this repository at all. Two joins
+are named and both are gated —
+
+| Join | State |
+|---|---|
+| lex-sys code in `lex-vcs` | 81% of that crate is already language-agnostic; gated on a **plateau** in the effect vocabulary rather than on a feature — [`hash-stability.md`](docs/hash-stability.md) |
+| lex-sys code under a lex-os grant | `lex-os-check` reads `.lex` through the Lex front end. Reading `.ls` the same way is **not built** |
+
+Saying so plainly is deliberate: a reader of an earlier version of this
+page could not tell that `lex-os` existed at all, which is what
+[`docs/first-page.md`](docs/first-page.md) measures.
+
+---
 
 ## Why
 
-Three things Lex's philosophy buys that no systems language currently
+Three things this philosophy buys that no systems language currently
 combines:
 
 1. **Capabilities all the way down.** Ownership and effects are the same
-   idea — both are resource tracking. A from-scratch language can unify
-   them: allocation is an effect, a heap value is a linear resource, FFI is
-   a capability you must be granted.
-2. **Determinism as a language property.** No UB, defined evaluation order,
-   deterministic layout. This is what makes replay, attestation and
-   content-addressing mean anything — and it is exactly what C throws away.
+   idea — both are resource tracking. Allocation is an effect, a heap
+   value is a linear resource, FFI is a capability you must be granted.
+   Owning a capability *discharges* its effects and borrowing *declares*
+   them, so `main`'s row is `[]` however much it does.
+2. **Determinism as a language property.** No UB, defined evaluation
+   order, deterministic layout — which is what makes replay, attestation
+   and content-addressing mean anything, and exactly what C throws away.
    Written out operation by operation in
    [`docs/defined-behaviour.md`](docs/defined-behaviour.md).
-3. **A checker that is fast and total,** because the guarantee is only worth
-   what it costs to verify.
+3. **A checker that is fast and total,** because the guarantee is only
+   worth what it costs to verify.
+
+---
+
+## What exists
+
+| | | Settled by |
+|---|---|---|
+| **Capabilities** | `World`, `Io`, `Fs(prefix)`, `Ffi(lib)`, `Heap`, `Args`, `File` — linear values, `split` once, released by name | [`linearity-and-effects.md`](docs/linearity-and-effects.md) |
+| **Effect rows** | A canonically ordered set, exact in both directions, every label tracing to a builtin | [`linearity-and-effects.md`](docs/linearity-and-effects.md) |
+| **Narrowing** | Prefix extension, one way, and it *consumes* what it attenuates | [`filesystem.md`](docs/filesystem.md), [`reach.md`](docs/reach.md) |
+| **Authority report** | `lex-sys authority`, computed from reachability; `--output json` for a supervisor | [`authority.md`](docs/authority.md) |
+| **Borrowing** | Lexical regions, no borrow checker; `&!` is a lock on the binding, answered with a measurement | [`aliasing.md`](docs/aliasing.md) |
+| **Memory** | Arenas, a general heap with recursive types, boxed slices, growable buffers | [`heap.md`](docs/heap.md), [`boxed-slices.md`](docs/boxed-slices.md) |
+| **Types** | `int` `byte` `bool` `float`, structs, enums with exhaustive `match`, tuples, generics with `[T: val]` bounds | [`floating-point.md`](docs/floating-point.md), [`tuples.md`](docs/tuples.md) |
+| **Defined behaviour** | Checked arithmetic that traps, left-to-right evaluation, every C hole named and closed | [`defined-behaviour.md`](docs/defined-behaviour.md) |
+| **Program identity** | `lex-sys ids` — per-declaration content hashes, 35 golden fixtures | [`canonical-ast.md`](docs/canonical-ast.md), [`hash-stability.md`](docs/hash-stability.md) |
+| **Compile time** | Pure calls on constant arguments folded; `static` items whose bodies run during compilation | [`compile-time-data.md`](docs/compile-time-data.md) |
+| **I/O** | The console in three directions, file handles as linear resources, bulk reads and writes | [`file-handles.md`](docs/file-handles.md), [`bulk-io.md`](docs/bulk-io.md) |
+| **Refusals** | 53 rules, each with a stable tag; `check --output json` reports every independent one | [`agent-errors.md`](docs/agent-errors.md) |
+| **Standard library** | 11 modules written in lex-sys, including shortest round-trip float printing and a UTF-8 decoder | [`standard-library.md`](docs/standard-library.md) |
+
+What is **not** there yet, and why, is [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ---
 
@@ -182,26 +261,8 @@ intended.
 
 ---
 
-## What exists
 
-`int`, `byte`, `bool` and `float`; functions and calls; arithmetic and
-comparison; `&&`/`||` with short-circuiting; the bit operators and
-hexadecimal literals; `if`/`else`, `while`, `let`/`var`; structs,
-enums with exhaustive `match`, tuples, and generics over all of them with
-`[T: val]` mode bounds; `res`/`val` linearity with destructuring `let` and
-liveness-checked shadowing; shared and unique borrows with lexical regions;
-exact effect rows, capabilities, narrowing, and capability-gated foreign
-calls; arenas, a general heap with recursive types, boxed slices and the
-growable buffers they allow; slices and strings; file IO through a
-path-carrying capability; the console in both directions; the command line;
-programs spread over several files; modules with visibility; `static` items
-whose bodies run during compilation and become read-only data
-([`docs/compile-time-data.md`](docs/compile-time-data.md)); and a standard
-library of ten modules — one of which prints a `float` as the shortest
-decimal that reads back to the same bits, written in lex-sys rather than in
-the compiler ([`docs/float-printing.md`](docs/float-printing.md)).
-
-What is **not** there yet, and why, is [`docs/ROADMAP.md`](docs/ROADMAP.md).
+---
 
 ### What that adds up to
 
@@ -252,6 +313,9 @@ program waiting on it.
 
 ---
 
+
+---
+
 ## Design commitments
 
 | Area | Commitment | Why |
@@ -279,183 +343,43 @@ the function's contract.
   end-state, not a starting point.
 - **Not a replacement for Lex.** Different layer, different job.
 
-## Performance expectation
 
-Linearity and effects are erased at compile time; generics monomorphise; an
-LLVM backend inherits rustc's own optimiser.
+## Performance, honestly
 
-**One sentence that used to be here was false**, and it is worth replacing
-rather than deleting, because it was the reason to expect speed from
-ownership: *"linearity can hand the optimiser stronger aliasing facts than
-`&mut` does."* It cannot, and
-[`slicing.md`](docs/slicing.md) §4 had already said so in the opposite
-direction — `&!` is a lock on the *binding*, not a no-aliasing invariant
-over references. Four lines falsify it:
+Linearity and effects are erased at compile time; generics monomorphise.
 
-```
-fn both[&a, &b](p: &!a [int], q: &!b [int]) -> [] int {
-    p[0] = 1;  q[0] = 2;  return p[0];
-}
-both(s, s)      // compiles, and prints 2
-```
+The gap to C is **1.17×–2.58×** across five kernels, and it tracks how
+much of the run is in code Cranelift generated
+([`benchmarks-game.md`](docs/benchmarks-game.md)). Rust sits within 4% of
+C on the same programs, so the gap is **Cranelift against LLVM rather
+than the price of ownership**
+([`against-c-and-rust.md`](docs/against-c-and-rust.md)).
 
-Two unique references, one object, writes that alias. So lex-sys cannot
-emit `noalias` where Rust can, and on the axis everyone expects ownership
-to pay, it is *behind* Rust rather than ahead of C.
+Two claims this page used to make were false, and both were corrected by
+measuring rather than by deleting:
 
-**What that would cost has now been measured too**
-([`docs/aliasing.md`](docs/aliasing.md)), and the cost this section used
-to name — *"it refuses programs that compile today"* — was the wrong
-one. Across all 82 programs the repository builds, the rule refuses
-**one fixture**, written to document the behaviour it would change. The
-real price is in two places, and either alone would settle it:
+- *"Linearity can hand the optimiser stronger aliasing facts than `&mut`
+  does."* It cannot — `&!` is a lock on the *binding*, and `both(s, s)`
+  compiles. There is no aliasing fact to emit, and Cranelift has no
+  `noalias` to emit it to ([`aliasing.md`](docs/aliasing.md)).
+- *The overflow trap costs a never-taken branch.* It costs up to **40.5%**
+  in a pure arithmetic loop, because a trap is observable and the loop
+  therefore cannot vectorise — and **six of eight** loop-body checks have
+  the same property ([`overflow-cost.md`](docs/overflow-cost.md),
+  [`check-cost.md`](docs/check-cost.md)).
 
-- **Closing the last of the three aliasing routes is a borrow checker.**
-  `both(s, s)` and `let t = s; both(s, t)` close syntactically.
-  `both(head(s), s)` does not: nothing in `head`'s signature says the
-  result borrows its argument, and regions do not say it either — a
-  shared region is a shared *arena*, not a shared object. Carrying that
-  fact across a call is what lifetimes are. The design commitments table
-  above rules that out by name, two sections before this one asked.
-- **Cranelift has no `noalias`.** Its whole aliasing vocabulary is three
-  fixed WebAssembly regions; `AbiParam` carries no such attribute. A
-  proved fact would have nowhere to go until the LLVM backend the same
-  table names for release builds.
+Removing the trap is necessary and **not sufficient**: without it lex-sys
+is still scalar, 2.27× off vectorised clang and 1.55× off *scalar* clang,
+so everything remaining is the backend ([`gpu.md`](docs/gpu.md) §2.3).
+Cranelift has no aliasing fact to accept, no call-purity attribute to
+carry this language's checked purity proof, and no pass that makes
+vectors out of scalar code — each a property of its design rather than a
+version it has not reached
+([`backend-limits.md`](docs/backend-limits.md)).
 
-So this is answered rather than open, and the answer is *not with this
-design, and not with this backend* — with the two conditions that would
-reopen it written down in `aliasing.md` §6.
-
-The one structural cost is defining away UB — principally integer-overflow
-semantics — and it has now been **measured** rather than estimated
-([`docs/overflow-cost.md`](docs/overflow-cost.md)):
-
-| what dominates the loop | checked arithmetic costs |
-|---|---|
-| calls and returns | +2.8% |
-| memory and cache | +3.6% |
-| comparisons and branches | −9.1% (checked was *faster*) |
-| arithmetic, nothing else | **+40.5%** |
-
-So it is not a percentage, it is a rule: **the cost is whether arithmetic is
-on the critical path.** For most systems code it is not, and the price is
-the low single digits this file used to promise across the board. For a
-tight reduction it is large, and the reason is not the never-taken branch —
-it is that a trap is observable, so the loop cannot vectorise. Measured in C
-at `-O2`, the same guarantee costs clang 46% and gcc 74% on the same shape,
-which is how we know it is the semantics and not the young backend.
-
-This is where "the ceiling is Rust's" needs a qualifier, and the qualifier
-is real: Rust's release profile *wraps*, so on arithmetic-bound code the
-ceiling is Rust's only if you are comparing against a Rust build that also
-checks.
-
-**And the gap today is measured, not asserted**
-([`docs/against-c-and-rust.md`](docs/against-c-and-rust.md)). On the same
-algorithm written three times, at the same semantics:
-
-| | Mandelbrot (compute) | sieve (memory) |
-|---|---|---|
-| lex-sys | **1.69×** | **1.56×** |
-| C `-O2` | 1.00× | 1.00× |
-| Rust `-O` | 1.04× | 0.80× |
-
-Rust carries ownership, bounds checks and monomorphisation and pays
-essentially nothing for them, so **the 1.6× is not the price of safety or
-effect rows — it is Cranelift against LLVM.**
-
-**And 1.6× was two kernels' midpoint.**
-[`benchmarks-game.md`](docs/benchmarks-game.md) added three programs from
-the Computer Language Benchmarks Game, each checked against the answer
-the Game publishes, and across five kernels the gap runs **1.17× to
-2.58×**:
-
-| | what dominates | lex-sys / C |
-|---|---|---|
-| binary-trees | `malloc` and `free` | **1.17×** |
-| fannkuch-redux | integer arrays, branches | 1.32× |
-| sieve | memory and cache | 1.56× |
-| Mandelbrot | float compute | 1.69× |
-| spectral-norm | a float loop with a division | **2.58×** |
-
-The range is legible rather than noisy: **it tracks how much of the run
-is in code Cranelift generated.** Where the program is mostly inside
-libc's allocator, the backend has less of the run to be slower at. That
-makes the falsifier sharper rather than weaker — if an LLVM backend
-lands and the *range* does not collapse toward its low end, the claim was
-wrong.
-
-**Some of the gap was ours and has been closed.**
-[`compile-time.md`](docs/compile-time.md) found `2 + 3 * 4 - 14` — which
-is zero — compiling to a multiply, an add, a subtract, three overflow
-checks and a constant-pool load, where C `-O2` emits `xor %eax,%eax`. The
-cause was `overflow-cost.md` §3.2's mechanism in a second place: a checked
-add is `sadd_overflow` plus a `trapnz`, and Cranelift's folding rules are
-written for the plain form, so **the trap made the arithmetic opaque to
-the optimiser**. The front end has the literals, so it folds them itself —
-and a trap it finds while folding is now a compile error rather than a
-`SIGILL`, which is a correctness dividend rather than a speed one.
-
-That brings constant arithmetic *up to* C and matches C on the calls C
-already inlines. It goes **past** C in one narrow place: clang gives up on
-recursion, so `fib(23)` is a runtime call at `-O2` and a constant here.
-§7 of that document is the honest scorecard, including the shapes where
-the answer is parity and the one where the estimate that motivated the
-work turned out to be four times too optimistic.
-
-**And some of it was a capability bug wearing a performance costume.**
-[`bulk-io.md`](docs/bulk-io.md) found that printing went one byte per
-libc call, which costs 12.8× — and that the fast path had existed for
-four slices. `examples/serve/` writes whole slices through
-`Ffi("libc")`, and [`reach.md`](docs/reach.md) §5 is explicit that a
-library is not an authority domain, so `Ffi("libc")` is the filesystem,
-the network and `exec` all at once. **The cheap thing to grant was the
-expensive thing to run** — which is the wrong lesson for a capability
-language to teach anyone who profiles it. The fix is a second primitive
-behind the *same* `Io`: `write_bytes(io, bytes)`, same effect label, and
-a conformance test pins the authority report byte-identical before and
-after, because a faster program must not be a more powerful one. Output
-is now within **1.1×** of C's `fwrite`. §4 declines the headline: the
-`base64` example gains 1.6× of that 12.8×, and names where the rest
-went — and §4.1 then corrects §4, because `examples/sort/` writes 9 MB
-and gains **1.22×**. **Volume written is not time spent writing**, and
-the gain is only ever the share of the runtime that was libc call
-overhead.
-
-**And one place it might have been ahead turned out not to be.**
-[`layout.md`](docs/layout.md) went looking for a win in the fact that
-lex-sys promises no struct layout where C's is part of its ABI, so a
-compiler here could transpose array-of-structs to struct-of-arrays and
-C's cannot. Measured, the transform is worth **1.43×** in lex-sys and
-**1.31×** in C — the same size in both, so it moves the two along
-together rather than closing the gap, and a C programmer can write it by
-hand in an afternoon. The half that *would* have been a real win needs a
-vectoriser, which `overflow-cost.md` §3.2 already established a trapping
-add does not get. The roadmap entry claiming otherwise is corrected
-rather than deferred.
-
-Packing narrow fields is the half that survives — up to 2.6× on a struct
-that is mostly `byte` or `bool` — and **3 of the 83 struct fields in this
-repository are**, so it is filed with a falsifier rather than built:
-`lex-sys layout` prints what each type costs and what it would cost
-packed, and the day those columns differ on a program someone cares
-about is the day the deferral stops being right.
-
-There is one thing this language can do that neither of the other two
-can, and it is not tuning. **An effect row of `[]` is a purity proof the
-type checker produced** — C can only *promise* the same fact with
-`__attribute__((const))`, which nothing verifies, and Rust has no way to
-state it at all. 35% of the functions in this repository qualify, and on
-a pure call across a compilation boundary the fact is worth 1.94× as
-common-subexpression elimination, or 158× where the call is also
-loop-invariant. Nothing collects it today, and §4.2 of that document is honest about why
-it may not matter soon: **lex-sys compiles whole programs**, and a purity
-fact only earns anything across a boundary the optimiser cannot see past.
-Give LLVM the whole program and it infers the same thing itself. The row
-is a real advantage over C and Rust *if* separate compilation ever
-arrives, and mostly redundant until then.
-[`docs/purity.md`](docs/purity.md) is the measurement and the
-correction.
+So **a vectoriser, or a backend with one, is the single largest open
+item**, and it is the answer to the number above rather than a
+performance nicety. It is not next; `ROADMAP.md` says what is.
 
 ---
 
@@ -475,11 +399,13 @@ quietly rotting.
 
 ```sh
 lex-sys build <file.ls>... [-o <output>] [--emit exe|obj] [--std]
-lex-sys check <file.ls>... [--std]    # refuse, or say nothing
+lex-sys check <file.ls>... [--std] [--output json]   # refuse, or say nothing
 lex-sys run   <file.ls>... [--std]    # build, run, exit with the program's status
 lex-sys ids   <file.ls>... [--std]    # each declaration's content hash
 lex-sys authority <file.ls>... [--std] [--output json]  # what it can reach
+lex-sys layout    <file.ls>... [--std]  # what every leaf costs, and what packing would save
 lex-sys print <file.ls>               # the unit, rendered in canonical form
+lex-sys agent-guidelines              # AGENTS.md, from inside the binary
 ```
 
 `authority` is the one worth trying on something you did not write:
