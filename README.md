@@ -79,7 +79,7 @@ are named and both are gated —
 | Join | State |
 |---|---|
 | lex-sys code in `lex-vcs` | 81% of that crate is already language-agnostic; gated on a **plateau** in the effect vocabulary rather than on a feature — [`hash-stability.md`](docs/hash-stability.md) |
-| lex-sys code under a lex-os grant | `lex-os-check` reads `.lex` through the Lex front end. Reading `.ls` the same way is **not built** |
+| lex-sys code under a lex-os grant | Not a compiler integration: `authority --output json` is already the right interface, and the grant's **filesystem** dimension works through it today. Blocked instead on the effect vocabulary — `network` and `exec` are invisible behind `ffi("libc")` — [`under-a-grant.md`](docs/under-a-grant.md) |
 
 Saying so plainly is deliberate: a reader of an earlier version of this
 page could not tell that `lex-os` existed at all, which is what
@@ -426,7 +426,12 @@ The surface is the union of what everything `main` reaches performs, so
 it is precise rather than conservative — rows are exact in both
 directions. An absent label is a proof: the capability was released, and
 nothing in the language creates another. `--output json` gives the same
-report as data, for a supervisor checking it against a grant.
+report as data, for a supervisor checking it against a grant — which
+[`docs/under-a-grant.md`](docs/under-a-grant.md) finally tried, with
+`lex-os`'s real grant. One of its three dimensions is enforceable and
+**more precisely than the grant can express**; two are not, because
+sockets and processes are libc and `Ffi(lib)` is the one capability whose
+label does not bound what it authorises.
 [`docs/authority.md`](docs/authority.md).
 
 A program is the **set of files named on the command line**, in any order.

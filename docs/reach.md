@@ -302,6 +302,15 @@ it is "a host is a thing worth narrowing to", which is exactly what
 
 Filed in §6 rather than answered here.
 
+> **Promoted (#74): [`under-a-grant.md`](under-a-grant.md) §5.** The
+> argument above frames this as a question of taste — whether a host is
+> worth narrowing to — and that framing is now incomplete. Measured
+> against `lex-os`'s real grant, **two of its three dimensions cannot be
+> decided without it**: a lex-sys program that runs a network server
+> reports `args` and `ffi`, so a grant saying `network: None` has nothing
+> to refuse it with. The row is the prerequisite for lex-sys code running
+> under a grant at all, not a refinement of the report.
+
 ### 5.2 What covers the difference today
 
 The **foreign symbol list**, which exists for a different reason and turns
@@ -320,6 +329,24 @@ A supervisor reading `socket`, `bind`, `listen`, `accept` knows it is
 being asked to run a server, and knows it without trusting a word the
 program says about itself: the list is what pass 2 emitted, which is what
 `main` reaches, which is what the binary can call (`authority.md` §2).
+
+> **Corrected (#74): [`under-a-grant.md`](under-a-grant.md) §3.** The
+> first half of that sentence stands and the second does not. The list is
+> a proof about **names** — every foreign call needs a declaration, so it
+> is exactly the set reachable from `main` — and a **heuristic** about
+> domains, because the step from a name to a domain is the *declaration*,
+> and the declaration is the program's to write. Six lines make the point:
+>
+> ```
+> extern fn syscall[&f](ffi: &f Ffi("libc"), n: int, a: int, b: int, c: int)
+>     -> [ffi("libc")] int;
+> r = syscall(f, 41, 2, 1, 0);        // SYS_socket
+> ```
+>
+> It type-checks, opens a socket, and reports
+> `{"effects": ["ffi"], "foreign_symbols": ["syscall"]}`. Against a
+> cooperative program the heuristic is worth having. Against the threat
+> model `lex-os` exists for, it is not a wall.
 The row is a *grant* question and the symbol list is a *what will it
 actually do* question, and at the foreign boundary the second is the one
 with the answer.
