@@ -248,6 +248,16 @@ more structural than one bad check:
   one check when it was written. It is now about six, which makes it the
   largest open question in the design rather than a GPU detail.
 
+  > **Answered (#65): [`poison.md`](poison.md).** For five of the six,
+  > yes and by a lot — `a << b` and `-x` become **free**, and
+  > `int_of(f)` drops from 3.28× to 1.33×. For the sixth, the overflow
+  > check carried by a reduction, poison does not help and is **worse**,
+  > because its condition is not a per-element property: four lanes
+  > compute four different partial sums, so the flag would record a
+  > different question. The rule there is this section's rule again one
+  > level up — poison rescues a check exactly when the check is about
+  > one element.
+
 And it sharpens the roadmap's vectoriser row. An LLVM backend would
 vectorise the loops Cranelift leaves scalar — `gpu.md` §2.3 measured
 lex-sys at 2.27× off vectorised C *with the trap removed* — but it would

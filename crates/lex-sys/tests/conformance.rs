@@ -2302,36 +2302,42 @@ fn every_benchmark_pair_agrees() {
     let _ = std::fs::remove_dir_all(&scratch);
 }
 
-/// `benches/guards.c` — the guarded and unguarded halves of every kernel
-/// compute the same answer.
+/// `benches/guards.c` — all three modes of every kernel compute the same
+/// answer.
 ///
-/// `docs/check-cost.md` reads a cost out of the gap between them, and the
-/// gap means "what the check costs" only while both halves are the same
-/// program. If a guard ever *fires*, the number measured is the trap
-/// rather than the check, and the kernel's data needs fixing rather than
-/// its timing believing — which already happened once, to `byte_of`,
-/// whose first fill held a `-1`.
+/// `docs/check-cost.md` and `docs/poison.md` read a cost out of the gaps
+/// between unchecked, trapping and poison, and a gap means "what the
+/// check costs" only while the three are the same program. If a check
+/// ever *fires*, the number measured is the trap rather than the check,
+/// and the kernel's data needs fixing rather than its timing believing —
+/// which already happened once, to `byte_of`, whose first fill held a
+/// `-1`.
+///
+/// Poison has a second way to be wrong that trapping does not: its
+/// operation has to stay **defined** where the check would have fired —
+/// a masked shift, a truncated byte, a clamped conversion — so a
+/// disagreement here is as likely to be a bad fallback as bad data.
 ///
 /// Built with a small `ROUNDS`, because the shape of the loop is what the
 /// measurement is about and that does not depend on how many times the
 /// outer one goes round. Not a timing gate, for the reason
 /// `every_benchmark_pair_agrees` gives.
 #[test]
-fn every_guard_kernel_agrees_with_its_unguarded_half() {
+fn every_guard_kernel_agrees_across_its_three_modes() {
     let source = repo_root().join("benches").join("guards.c");
     let scratch = scratch("guards");
     let mut kernels = 0;
 
-    for kernel in 0..=8 {
+    for kernel in 0..=11 {
         let mut answers = Vec::new();
-        for guarded in [0, 1] {
-            let exe = scratch.join(format!("k{kernel}g{guarded}"));
+        for mode in 0..=2 {
+            let exe = scratch.join(format!("k{kernel}m{mode}"));
             let cc = Command::new("cc")
                 .args([
                     "-O2".as_ref(),
                     "-DROUNDS=2".as_ref(),
                     format!("-DKERNEL={kernel}").as_ref(),
-                    format!("-DGUARDED={guarded}").as_ref(),
+                    format!("-DMODE={mode}").as_ref(),
                     source.as_os_str(),
                     "-o".as_ref(),
                     exe.as_os_str(),
@@ -2340,28 +2346,26 @@ fn every_guard_kernel_agrees_with_its_unguarded_half() {
                 .expect("a C compiler");
             assert!(
                 cc.status.success(),
-                "kernel {kernel} guarded={guarded} should compile:\n{}",
+                "kernel {kernel} mode={mode} should compile:\n{}",
                 String::from_utf8_lossy(&cc.stderr)
             );
             let run = Command::new(&exe).output().expect("the kernel runs");
             assert_eq!(
                 run.status.code(),
                 Some(0),
-                "kernel {kernel} guarded={guarded} should exit 0; a guard that fires means \
-                 the data trips the check, so the gap would measure the trap"
+                "kernel {kernel} mode={mode} should exit 0; a check that fires means \
+                 the data trips it, so the gap would measure the trap"
             );
             answers.push(String::from_utf8_lossy(&run.stdout).into_owned());
         }
-        assert_eq!(
-            answers[0], answers[1],
-            "kernel {kernel}: the guarded and unguarded halves must compute the same thing"
+        assert!(
+            answers.windows(2).all(|pair| pair[0] == pair[1]),
+            "kernel {kernel}: unchecked, trapping and poison must compute the same thing, \
+             and they printed {answers:?}"
         );
         kernels += 1;
     }
 
-    // Counted from the source rather than written down twice, the way the
-    // pair test counts `benches/`: a kernel added to `guards.c` and
-    // forgotten here would otherwise never run.
     // One `noinline run` per kernel. Counting the `#elif KERNEL ==` lines
     // instead would over-count: `main` switches on the same macro to fill
     // each kernel's data.

@@ -66,6 +66,22 @@ the bounds taken from the induction variable instead of from memory:
 same two comparisons, same trap, **2.16× against 0.99×**. That pair is
 the finding, and the rest of the table is it happening seven more times.
 
+`-DMODE=2` is the third form, **poison**: the condition is OR-ed into a
+flag tested once after the loop, and the operation keeps a defined
+result where the check would have fired — a masked shift, a truncated
+byte, a clamped conversion. A flag is a reduction and reductions
+reassociate, so the loop vectorises again;
+[`docs/poison.md`](../docs/poison.md) is what that buys and where it
+does not.
+
+Kernels 9 to 11 are that document's controls, and they are the reason it
+can say something sharper than "poison is faster". The same overflow
+check written four ways — carried by the reduction or element-wise,
+spelled as `__builtin_saddl_overflow` or as sign logic — separates a
+compiler limitation (the builtin is opaque to the vectoriser; the sign
+test is free) from a fact no compiler can fix (a reduction's overflow
+condition is about one association order).
+
 ## Against C and Rust
 
 `benches/three/` is a different comparison: the same algorithm written in
