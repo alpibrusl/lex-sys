@@ -324,6 +324,26 @@ its row says so.
 `docs/reach.md` is the argument the program is evidence for, including
 what this **cannot** reach and why it is one sentence rather than a list.
 
+### `fetch/` — the other direction
+
+```sh
+cargo run -p lex-sys -- build --std examples/fetch/fetch.ls -o fetch
+./fetch 127.0.0.1 8080 /health
+```
+
+An HTTP client, and the first program here that connects. It sends
+`GET <path>` over HTTP/1.0 and streams the body to standard output:
+header bytes are held until the blank line, and every later byte is
+written straight through, so it needs no `Heap`. The test suite points
+it at `serve/`, so a lex-sys client fetches from a lex-sys server.
+
+Its comments mark the three places where it works around the language,
+and `docs/connect.md` is the report. The address has to be four octets
+because nothing can resolve a name. `connect_to` tries two byte layouts
+for `struct sockaddr_in` because Linux and macOS disagree about the
+first two bytes. And *could not connect* is all it can say, because
+`errno` is behind a pointer.
+
 ### `buffer/` — growing, written out
 
 ```sh

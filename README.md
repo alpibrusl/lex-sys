@@ -272,9 +272,15 @@ makes the request over a real socket:
 
 ```sh
 $ ./serve 8080 &
-$ curl -s http://127.0.0.1:8080/health
+$ ./fetch 127.0.0.1 8080 /health
 {"ok":true}
 ```
+
+Both ends of that exchange are lex-sys: `examples/fetch/` is the client,
+written the same way. It takes `127.0.0.1` and not `localhost`, because
+resolving a name means `getaddrinfo`, which answers a pointer. Writing it
+also showed that `struct sockaddr_in` is different bytes on Linux and
+macOS ([`docs/connect.md`](docs/connect.md)).
 
 There is no socket type, no `Net` capability and no HTTP library. Sockets
 are libc, libc has a name, and the capability that names it has existed
