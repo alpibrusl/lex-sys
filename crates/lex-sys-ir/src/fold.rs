@@ -64,8 +64,14 @@ fn of_float(x: f64) -> Expr {
 /// reading of the same rules: overflow on `+ - * -x`, a zero divisor and
 /// `int::MIN / -1` on `/` and `%`, and a shift amount outside `0..64`.
 /// Getting one of these wrong would be the silently-wrong answer the
-/// language exists to refuse, so `bin_traps_exactly_where_the_backend_does`
-/// checks them against a running program rather than against this comment.
+/// language exists to refuse, so `the_folder_agrees_with_the_backend`
+/// checks every operator on every pair of boundary operands against a
+/// running program rather than against this comment.
+///
+/// This paragraph used to name `bin_traps_exactly_where_the_backend_does`,
+/// a test that never existed. The disagreement it would have caught --
+/// `int::MIN % -1` -- shipped, and was found by reading the disassembly
+/// instead (`docs/differential.md` §1).
 pub(crate) fn bin(op: BinOp, lhs: &Expr, rhs: &Expr) -> Folded {
     if let (Some(a), Some(b)) = (int(lhs), int(rhs)) {
         return int_bin(op, a, b);

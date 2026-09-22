@@ -166,6 +166,15 @@ Not a conversion at all: no value changes, only the type that reads it.
 `bits_of(1.0)` is `4607182418800017408`, which is `1.0`'s sign, exponent
 and mantissa laid end to end.
 
+**Except for NaN, which has one representation (#76).** IEEE-754 leaves
+a generated NaN's sign and payload to the hardware, and x86-64 sets the
+sign where aarch64 does not. A bare reinterpretation therefore made
+`bits_of(0.0 / 0.0)` the one expression in the language whose value
+depended on the target. Every NaN now reads as `0x7ff8000000000000`.
+Nothing is lost by this, because no program can construct a NaN payload
+without `float_of_bits`, which is missing on purpose (below). See
+[`differential.md`](differential.md) §4.
+
 It exists so that **taking a float apart is a program's job rather than
 the compiler's**. The sign, the exponent and the mantissa are what a
 printer needs, and `float-printing.md` is the proof that having them is

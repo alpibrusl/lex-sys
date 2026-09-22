@@ -277,12 +277,23 @@ legitimate if the two agree, and C's do not have to:
 | Float format | not required to be IEEE-754 | IEEE-754 binary64, stated |
 | Reassociation | permitted under `-ffast-math`, and contraction by default | **never** (`floating-point.md` §3) |
 | `a * b + c` → `fma` | permitted (`FP_CONTRACT`), and changes the result | not emitted — verified in the disassembly |
+| A NaN's sign and payload | left to the hardware | **one pattern**, `0x7ff8000000000000`, wherever `bits_of` can see it ([`differential.md`](differential.md) §4) |
 
 Every row of the right-hand column was decided for a different reason,
 and together they say something this document did not have to argue for:
 **an expression has one value, and it is the same value on every host and
 every target.** That is what makes running it early a compilation step
 rather than a gamble.
+
+> **Correction (#76).** Until the last row was added, this sentence was
+> false for one builtin. IEEE-754 does not fix a generated NaN's sign,
+> and the two supported targets disagree about it, so
+> `bits_of(0.0 / 0.0)` printed `-2251799813685248` on x86-64 and
+> `9221120237041090560` on aarch64. The folder was never wrong, because
+> it always runs on the target. The claim was. `bits_of` now answers
+> one pattern for every NaN, and it is the only operation in the
+> language that could see the difference, so the sentence is true
+> again. [`differential.md`](differential.md) §4 has the measurement.
 
 The float row is the one worth checking rather than asserting, and it was
 checked: `a * b + c` compiles to `mulsd` then `addsd`, not to `vfmadd`.
