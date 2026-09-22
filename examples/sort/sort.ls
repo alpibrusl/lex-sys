@@ -22,6 +22,7 @@
 import std.buffer;
 import std.vec;
 import std.io;
+import std.bytes;
 
 // ---------------------------------------------------------------------
 // Reading
@@ -136,18 +137,15 @@ fn find_lines[&h, &t](heap: &!h Heap, text: &t [byte], starts: vec.Vec[int],
 // Byte order, shorter first when one is a prefix of the other. That is
 // `LC_ALL=C` -- and the reason the suite sets it, because a locale would
 // compare these differently and this program does not have one.
+//
+// The rule is `std.bytes.compare` now; this is the call site that made
+// it worth writing down. Two slices rather than the `(text, at, len)`
+// triples this used to take, because `slicing.md` §1's subslice is
+// exactly that triple with the arithmetic done once -- and a subslice
+// cannot outlive `text`, which the triples could not promise.
 fn before[&t](text: &t [byte], a_at: int, a_len: int, b_at: int, b_len: int)
     -> [] bool {
-    var i = 0;
-    while i < a_len && i < b_len {
-        let x = int_of(text[a_at + i]);
-        let y = int_of(text[b_at + i]);
-        if x != y {
-            return x < y;
-        }
-        i = i + 1;
-    }
-    return a_len < b_len;
+    return bytes.compare(text[a_at..a_at + a_len], text[b_at..b_at + b_len]) < 0;
 }
 
 // ---------------------------------------------------------------------

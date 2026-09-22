@@ -23,26 +23,27 @@
 //
 // There is no `read_line` and no buffered read. `getchar` is the only
 // primitive, and a word boundary is a policy -- where one ends, what
-// counts as blank -- which belongs in this file rather than in a
-// compiler (§3.2). `is_blank` below *is* that policy, in four bytes.
-
-// Space, tab, newline, carriage return, vertical tab, form feed. The
-// whole definition of a word boundary this program has, written down
-// where it can be argued with -- which is the point of it being here
-// rather than in the compiler.
+// counts as blank -- which does not belong in the compiler (§3.2).
 //
-// These are exactly C's `isspace` in the C locale, and getting there took
-// running this against GNU `wc` on a real file: the first two attempts
-// omitted vertical tab and form feed, which nothing in the test fixture
-// contained and every implementation of `wc` splits on.
-fn is_blank(c: int) -> [] bool {
-    return c == 32 || c == 9 || c == 10 || c == 13 || c == 11 || c == 12;
-}
+// It used to live *here*, in a private `is_blank`, and the comment on
+// it argued that a policy belongs in the program that holds it. That
+// argument was against the **compiler**, and it was made before there
+// was a library to be the third option. `std.bytes.is_blank` is that
+// third option and it is the same six bytes.
+//
+// Keeping the copy was not free. `standard-library.md` §5.3 said this
+// file and `wordcount.ls` "each had their own idea of a word boundary
+// and they were not the same", and claimed "one definition, in one
+// place" as the fix. `wordcount.ls` moved; this file did not, so there
+// were still two definitions. They happened to agree, and nothing
+// checked that they did.
 
 // No tuples in the return here -- three counts and a `res`-free struct
 // reads better than `(int, int, int)`, which is the honest use of
 // `docs/tuples.md` §4: a tuple is for a pair that has no name, not for
 // three things that do.
+import std.bytes;
+
 val struct Counts {
     lines: int,
     words: int,
@@ -64,7 +65,7 @@ fn count[&i](io: &!i Io) -> [io_read] Counts {
         if c == 10 {
             lines = lines + 1;
         }
-        if is_blank(c) {
+        if bytes.is_blank(c) {
             inside = false;
         } else {
             if inside == false {
