@@ -5013,6 +5013,171 @@ fn the_readme_commands_still_work() {
     }
 }
 
+/// Read `authority --output json` for a program, as parsed fields.
+///
+/// Returns `(effect names, foreign symbols, labels as name=argument)`.
+fn authority_of(relative: &str) -> (Vec<String>, Vec<String>, Vec<String>) {
+    let out = Command::new(BIN)
+        .args([
+            "authority".as_ref(),
+            repo_root().join(relative).as_os_str(),
+            "--std".as_ref(),
+            "--output".as_ref(),
+            "json".as_ref(),
+        ])
+        .output()
+        .expect("the compiler runs");
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let text = String::from_utf8(out.stdout).expect("the report is utf-8");
+
+    // A small reader rather than a JSON dependency: this crate has none,
+    // and the three fields below are flat arrays of strings and objects.
+    fn array(text: &str, key: &str) -> Vec<String> {
+        let Some(at) = text.find(&format!("\"{key}\"")) else { return Vec::new() };
+        let rest = &text[at..];
+        let Some(open) = rest.find('[') else { return Vec::new() };
+        let Some(close) = rest[open..].find(']') else { return Vec::new() };
+        let body = &rest[open + 1..open + close];
+        body.split(',')
+            .filter_map(|piece| {
+                let piece = piece.trim();
+                let start = piece.find('"')?;
+                let end = piece[start + 1..].find('"')? + start + 1;
+                Some(piece[start + 1..end].to_owned())
+            })
+            .collect()
+    }
+
+    // `labels` is objects, so read the pairs out of the same slice.
+    let mut labels = Vec::new();
+    if let Some(at) = text.find("\"labels\"") {
+        let rest = &text[at..];
+        if let (Some(open), Some(close)) = (rest.find('['), rest.find(']')) {
+            for row in rest[open + 1..close].split('}') {
+                let Some(name_at) = row.find("\"name\":") else { continue };
+                let name: String = row[name_at + 7..]
+                    .trim_start()
+                    .trim_start_matches('"')
+                    .chars()
+                    .take_while(|c| *c != '"')
+                    .collect();
+                let argument = row.find("\"argument\":").map(|a| {
+                    let tail = row[a + 11..].trim_start();
+                    if tail.starts_with("null") {
+                        String::new()
+                    } else {
+                        tail.trim_start_matches('"').chars().take_while(|c| *c != '"').collect()
+                    }
+                });
+                match argument.as_deref() {
+                    Some("") | None => labels.push(name),
+                    Some(value) => labels.push(format!("{name}={value}")),
+                }
+            }
+        }
+    }
+
+    (array(&text, "effects"), array(&text, "foreign_symbols"), labels)
+}
+
+/// `docs/under-a-grant.md` §2 — a network program reports no network.
+///
+/// `examples/serve/` binds a TCP port, listens, accepts a connection and
+/// answers HTTP. Its effect row is `args` and `ffi`, because sockets are
+/// libc and libc is not an authority domain (`reach.md` §5).
+///
+/// This is pinned rather than merely written down because it is a **gap**,
+/// and a gap that nothing observes is one that closes silently. When
+/// `reach.md` §6's `Net(host)` row lands, this test fails, and the person
+/// who lands it writes the new row here — which is the moment the
+/// `lex-os` join in `ROADMAP.md` becomes possible.
+#[test]
+fn a_network_program_reports_no_network() {
+    let (effects, symbols, _) = authority_of("examples/serve/serve.ls");
+    assert_eq!(
+        effects,
+        vec!["args", "ffi"],
+        "a program that runs a network server should still report only these \
+         two — if it now reports a network label, `under-a-grant.md` §2 and §5 \
+         are out of date and so is the roadmap's lex-os row"
+    );
+    // The symbol list is what covers the difference today, and §3 is why
+    // that is a heuristic rather than a wall.
+    for expected in ["socket", "bind", "listen", "accept"] {
+        assert!(
+            symbols.contains(&expected.to_owned()),
+            "`{expected}` should be reachable and listed"
+        );
+    }
+}
+
+/// `docs/under-a-grant.md` §3 — the symbol list is a proof about *names*.
+///
+/// `reach.md` §5.2 said a supervisor reading `socket`, `bind`, `listen`
+/// and `accept` knows what it is being asked to run "without trusting a
+/// word the program says about itself". The first half is right. The
+/// second is not: every foreign call needs a declaration, and the
+/// *declaration* is the program's to name.
+///
+/// Six lines open a socket and report `["syscall"]`. Not a hole to be
+/// plugged — refusing this one name would be theatre, since the next
+/// spelling is a wrapper. The hole is `Ffi(lib)`'s width (§4).
+#[test]
+fn the_symbol_list_is_a_proof_about_names() {
+    let dir = scratch("under-a-grant");
+    let source = dir.join("opaque.ls");
+    std::fs::write(
+        &source,
+        "extern fn syscall[&f](ffi: &f Ffi(\"libc\"), n: int, a: int, b: int, c: int)\n\
+             -> [ffi(\"libc\")] int;\n\
+         fn main(world: World) -> [] int {\n\
+             let Split { io, ffi, fs, heap, args } = split(world);\n\
+             release(io); release(fs); release(heap); release(args);\n\
+             var r = 0;\n\
+             let libc = narrow(ffi, \"libc\");\n\
+             borrow libc as &f in { r = syscall(f, 41, 2, 1, 0); }\n\
+             release(libc);\n\
+             if r < 0 { return 1; }\n\
+             return 0;\n\
+         }\n",
+    )
+    .expect("a writable fixture");
+
+    let out = Command::new(BIN)
+        .args(["authority".as_ref(), source.as_os_str(), "--output".as_ref(), "json".as_ref()])
+        .output()
+        .expect("the compiler runs");
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let report = String::from_utf8_lossy(&out.stdout);
+
+    assert!(
+        report.contains("\"effects\": [\"ffi\"]"),
+        "a program that opens a socket through `syscall` reports only `ffi`:\n{report}"
+    );
+    assert!(
+        report.contains("\"foreign_symbols\": [\"syscall\"]"),
+        "and its symbol list names nothing a supervisor could map to a domain:\n{report}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `docs/under-a-grant.md` §2 and §4 — the dimension that *does* work.
+///
+/// `filesystem.md` §2 took files out of libc and made them builtins under
+/// `Fs(p)`, so the path survives into the report. That is the whole reason
+/// the grant's filesystem dimension is enforceable while its network and
+/// exec dimensions are not — someone already did, for files, what §5 asks
+/// for sockets.
+#[test]
+fn the_filesystem_dimension_is_enforceable() {
+    let (_, _, labels) = authority_of("tests/accept/fs_narrowed.ls");
+    assert!(
+        labels.iter().any(|label| label.starts_with("fs_write=/")),
+        "the report should carry the path prefix, not just the dimension: {labels:?}"
+    );
+}
+
 fn build_example(tag: &str, relative: &str, binary: &str) -> (PathBuf, PathBuf) {
     let dir = scratch(tag);
     let exe = dir.join(binary);
