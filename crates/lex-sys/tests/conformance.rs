@@ -2769,16 +2769,20 @@ fn sort_agrees_with_gnu_sort() {
 
     // Past the ceiling the growth loop used to stop at.
     //
-    // `read_file` doubles from 64 KiB until a read comes back strictly
+    // `read_file` *doubled* from 64 KiB until a read came back strictly
     // shorter than the buffer, because `fs_read` cannot report
     // truncation (`docs/file-handles.md` §1). It stopped after eight
     // attempts, so the largest capacity was 8 MiB and *any* file of
     // 8,388,608 bytes or more was refused — under a comment claiming the
-    // limit was 16 MiB, which is why nothing caught it.
+    // limit was 16 MiB, which is why nothing caught it. Raising it to
+    // fifteen attempts moved the bound to 1 GiB; reading through a
+    // **handle** removed it, because `file_read` says when the file is
+    // over and nothing has to guess (`porting.md` §10).
     //
     // 9 MB rather than something just over the line, so this keeps
-    // testing the loop rather than an off-by-one: it needs two doublings
-    // past where the old bound was.
+    // testing a file read in many chunks rather than an off-by-one: it
+    // is two doublings past where the old bound was, and 130 reads
+    // through the handle.
     //
     // `u64` and not the inferred `i32`: 300_000 * 7919 is 2.4 billion,
     // which overflows an `i32`. The first version of this line did not
