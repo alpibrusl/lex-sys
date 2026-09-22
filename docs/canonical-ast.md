@@ -241,6 +241,17 @@ empty.
   how often these actually move, and nothing was measuring that. The 61
   tests beside the encoder are all relational — they compare two hashes to
   each other and none of them says what a hash *is*.
+
+  > **Measured (#69): [`hash-stability.md`](hash-stability.md), and the
+  > instrument has never been exercised.** Twenty commits have touched
+  > the encoder and **none of them since the fixtures landed**, so
+  > fourteen green commits are worth less than they look — the
+  > measurement was installed after the movement stopped. What *has*
+  > moved is the vocabulary a body is written in: across 67 commits,
+  > **71% of this repository's own `.ls` revisions no longer type-check**
+  > under today's build, and one label rename (`io` into `io_read` and
+  > `io_write`) accounts for 42% of that. The rate a hash-keyed tool
+  > would experience is the second one.
 - **`BodyId` across a type-checker change.** Bodies hash from the AST, not the
   typed IR, so inference changes do not move them today. Whether that survives
   M2 — where a body's meaning depends on effects and linearity that are not
