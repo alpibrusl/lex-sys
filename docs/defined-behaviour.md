@@ -295,3 +295,11 @@ three that are free are free for three unrelated reasons. None of that
 is an argument against the rules — a silently wrong answer is what §2.1
 exists to refuse — but the cost of a guarantee belongs next to the
 guarantee.
+
+[`poison.md`](poison.md) prices the one alternative anybody has
+proposed, a flag reduced at a boundary instead of a stop, and finds it a
+good trade for per-element checks and **no help at all** for the
+overflow check carried by a reduction. It would be a change to §2.1
+rather than an optimisation underneath it, because what it gives up is
+*where* — and a defined-but-wrong fallback used until the boundary is
+the silently wrong answer §2.1 is about.

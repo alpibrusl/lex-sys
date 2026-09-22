@@ -1,18 +1,28 @@
-// What every *other* check costs a vectoriser.
+// What every check costs a vectoriser, and whether poison costs less.
 //
 // `docs/overflow-cost.md` §3.2 found that a check costs the vectoriser
 // rather than a branch, measured the overflow one, and generalised.
-// `docs/gpu.md` §2.1 falsified half of that generalisation -- a bounds
-// check is free -- and left the rest as an open row: whether any *other*
-// check this language emits is also free is unmeasured.
+// `docs/gpu.md` §2.1 falsified half of that -- a bounds check is free --
+// and `docs/check-cost.md` falsified the rest: six of the eight checks
+// this language emits in a loop body take the SIMD count to zero, and
+// what decides it is whether the loop already proves the condition.
 //
-// This is that measurement. One kernel per check lex-sys emits inside a
-// loop body, each written so the *unguarded* form is as vectorisable as
-// the instruction set allows, so that what the guard costs is visible
-// rather than hidden behind a loop that was scalar anyway.
+// This file is one kernel per check, each written so the *unchecked*
+// form is as vectorisable as the instruction set allows, so that what
+// the check costs is visible rather than hidden behind a loop that was
+// scalar anyway.
 //
 //   -DKERNEL=n   which check (see the table below)
-//   -DGUARDED=1  emit the trap this language emits
+//   -DMODE=m     0 unchecked, 1 the trap this language emits, 2 poison
+//
+// Mode 2 is `gpu.md` §4.1's option (2), measured rather than assumed:
+// the condition is OR-ed into a flag instead of trapping, the operation
+// keeps a **defined** result, and the flag is tested once after the
+// loop. A flag OR-ed across elements is a reduction, so unlike a trap it
+// is reassociable -- which is the hypothesis. What it gives up is
+// *where*: the program learns that something went wrong, not which
+// element, and it computes with the defined-but-wrong value until the
+// boundary.
 //
 // Built and counted by `scripts/guards.py`, which reads the SIMD count
 // out of the emitted `run` rather than inferring it from the clock --
@@ -27,14 +37,17 @@
 //   6  float_to_int  `int_of(f)`, which traps on NaN and on out of range
 //   7  divide        `a / b`, where the trap is the hardware's already
 //   8  subslice_iv   the same two tests, on the induction variable
+//   9  overflow_each the same overflow check, element-wise not carried
+//  10  overflow_signs the same again, as sign logic rather than a builtin
+//  11  overflow_carried the sign spelling on the reduction of kernel 0
 #include <stdio.h>
 #include <stdlib.h>
 #include <limits.h>
 
 // The conformance suite builds this with a small `ROUNDS` so that
-// checking the two halves agree costs a second rather than a minute. The
-// shape of the loop is what the measurement is about, and that does not
-// depend on how many times the outer one goes round.
+// checking the modes agree costs a second rather than a minute. The shape
+// of the loop is what the measurement is about, and that does not depend
+// on how many times the outer one goes round.
 #ifndef N
 #define N 1000000
 #endif
@@ -45,31 +58,81 @@
 #ifndef KERNEL
 #define KERNEL 0
 #endif
-#ifndef GUARDED
-#define GUARDED 0
+
+// `GUARDED` is the older spelling, kept because `reduce.c` and the first
+// round of measurements used it.
+#ifndef MODE
+#ifdef GUARDED
+#define MODE GUARDED
+#else
+#define MODE 0
+#endif
 #endif
 
-#if GUARDED
-#define TRAP_IF(c) do { if (c) __builtin_trap(); } while (0)
+#define MODE_OFF 0
+#define MODE_TRAP 1
+#define MODE_POISON 2
+
+// The flag, tested once after the loop. `static` rather than local so
+// nothing can prove the whole thing dead.
+static long poisoned;
+
+#if MODE == MODE_TRAP
+#define GUARD(c) do { if (c) __builtin_trap(); } while (0)
+#elif MODE == MODE_POISON
+#define GUARD(c) do { bad |= (long)(c); } while (0)
 #else
-#define TRAP_IF(c) do { } while (0)
+#define GUARD(c) do { } while (0)
+#endif
+
+#if MODE == MODE_POISON
+#define POISON_BEGIN long bad = 0;
+#define POISON_END   poisoned |= bad; if (poisoned) __builtin_trap();
+#else
+#define POISON_BEGIN
+#define POISON_END
+#endif
+
+// What the operation does when the check would have fired. Mode 1 never
+// reaches these -- it has already trapped -- and mode 0 never needs them,
+// so they exist so that **mode 2 stays defined**: a masked shift, a
+// truncated byte, a wrapped negation, a clamped conversion. Each is one
+// instruction and vectorises, which is part of what is being priced.
+#if MODE == MODE_POISON
+#define SAFE_SHIFT(x, k) ((unsigned long)(x) << ((unsigned long)(k) & 63))
+#define SAFE_BYTE(n)     ((unsigned long)(unsigned char)(n))
+#define SAFE_DOUBLE(x)   ((x) > 9.2233720368547748e18 ? 9.2233720368547748e18 \
+                          : ((x) > -9.2233720368547748e18 ? (x) : -9.2233720368547748e18))
+#else
+#define SAFE_SHIFT(x, k) ((unsigned long)(x) << (unsigned long)(k))
+#define SAFE_BYTE(n)     ((unsigned long)(unsigned char)(n))
+#define SAFE_DOUBLE(x)   (x)
 #endif
 
 #if KERNEL == 0
 // Overflow on a running sum: the reduction `overflow-cost.md` measured,
-// repeated here so this file carries its own control.
+// repeated here so this file carries its own control. In mode 2 the
+// builtin still writes the wrapped result, so poison is wrapping
+// arithmetic plus a flag.
 __attribute__((noinline))
 long run(const long *v, const long *w, long n) {
+    POISON_BEGIN
     long total = 0;
     for (long r = 0; r < ROUNDS; r++)
         for (long i = 0; i < n; i++) {
             (void)w;
-#if GUARDED
+#if MODE == MODE_TRAP
             if (__builtin_saddl_overflow(total, v[i], &total)) __builtin_trap();
+#elif MODE == MODE_POISON
+            long sum;
+            bad |= __builtin_saddl_overflow(total, v[i], &sum);
+            total = (long)((unsigned long)total + (unsigned long)v[i]);
+            (void)sum;
 #else
             total = (long)((unsigned long)total + (unsigned long)v[i]);
 #endif
         }
+    POISON_END
     return total;
 }
 
@@ -78,13 +141,15 @@ long run(const long *v, const long *w, long n) {
 // provably true inside a loop the compiler already proved bounded.
 __attribute__((noinline))
 long run(const long *v, const long *w, long n) {
+    POISON_BEGIN
     long total = 0;
     for (long r = 0; r < ROUNDS; r++)
         for (long i = 0; i < n; i++) {
             (void)w;
-            TRAP_IF((unsigned long)i >= (unsigned long)n);
+            GUARD((unsigned long)i >= (unsigned long)n);
             total = (long)((unsigned long)total + (unsigned long)v[i]);
         }
+    POISON_END
     return total;
 }
 
@@ -95,13 +160,14 @@ long run(const long *v, const long *w, long n) {
 // anything at all.
 __attribute__((noinline))
 long run(const long *v, const long *w, long n) {
+    POISON_BEGIN
     long total = 0;
     for (long r = 0; r < ROUNDS; r++)
         for (long i = 0; i < n; i++) {
-            TRAP_IF((unsigned long)w[i] >= 64);
-            total = (long)((unsigned long)total
-                           + ((unsigned long)v[i] << (unsigned long)w[i]));
+            GUARD((unsigned long)w[i] >= 64);
+            total = (long)((unsigned long)total + SAFE_SHIFT(v[i], w[i]));
         }
+    POISON_END
     return total;
 }
 
@@ -111,31 +177,36 @@ long run(const long *v, const long *w, long n) {
 // vectoriser is good at, so this is a fair place to ask.
 __attribute__((noinline))
 long run(const long *v, const long *w, long n) {
+    POISON_BEGIN
     long total = 0;
     for (long r = 0; r < ROUNDS; r++)
         for (long i = 0; i < n; i++) {
             (void)w;
-            TRAP_IF((unsigned long)v[i] > 255);
-            total = (long)((unsigned long)total + (unsigned long)(unsigned char)v[i]);
+            GUARD((unsigned long)v[i] > 255);
+            total = (long)((unsigned long)total + SAFE_BYTE(v[i]));
         }
+    POISON_END
     return total;
 }
 
 #elif KERNEL == 4
 // `s[lo..hi]`: **two** comparisons where indexing has one -- `hi > len`
 // and `lo > hi` -- so if a count of comparisons were what mattered this
-// is where it would show.
+// is where it would show. It is not: kernel 8 is the same two on the
+// induction variable, and it is free.
 __attribute__((noinline))
 long run(const long *v, const long *w, long n) {
+    POISON_BEGIN
     long total = 0;
     for (long r = 0; r < ROUNDS; r++)
         for (long i = 0; i < n; i++) {
             long lo = w[i] & 1;
             long hi = lo + 1;
-            TRAP_IF((unsigned long)hi > (unsigned long)n);
-            TRAP_IF((unsigned long)lo > (unsigned long)hi);
+            GUARD((unsigned long)hi > (unsigned long)n);
+            GUARD((unsigned long)lo > (unsigned long)hi);
             total = (long)((unsigned long)total + (unsigned long)v[i]);
         }
+    POISON_END
     return total;
 }
 
@@ -145,13 +216,15 @@ long run(const long *v, const long *w, long n) {
 // the overflow check again in a different spelling.
 __attribute__((noinline))
 long run(const long *v, const long *w, long n) {
+    POISON_BEGIN
     long total = 0;
     for (long r = 0; r < ROUNDS; r++)
         for (long i = 0; i < n; i++) {
             (void)w;
-            TRAP_IF(v[i] == LONG_MIN);
+            GUARD(v[i] == LONG_MIN);
             total = (long)((unsigned long)total - (unsigned long)v[i]);
         }
+    POISON_END
     return total;
 }
 
@@ -162,15 +235,17 @@ long run(const long *v, const long *w, long n) {
 // test itself; the C spelling makes it explicit.
 __attribute__((noinline))
 long run(const long *v, const long *w, long n) {
+    POISON_BEGIN
     const double *f = (const double *)w;
     long total = 0;
     for (long r = 0; r < ROUNDS; r++)
         for (long i = 0; i < n; i++) {
             (void)v;
             double x = f[i];
-            TRAP_IF(!(x >= -9.2233720368547758e18 && x <= 9.2233720368547758e18));
-            total = (long)((unsigned long)total + (unsigned long)(long)x);
+            GUARD(!(x >= -9.2233720368547758e18 && x <= 9.2233720368547758e18));
+            total = (long)((unsigned long)total + (unsigned long)(long)SAFE_DOUBLE(x));
         }
+    POISON_END
     return total;
 }
 
@@ -182,30 +257,127 @@ long run(const long *v, const long *w, long n) {
 // also proves these.
 __attribute__((noinline))
 long run(const long *v, const long *w, long n) {
+    POISON_BEGIN
     long total = 0;
     for (long r = 0; r < ROUNDS; r++)
         for (long i = 0; i < n; i++) {
             (void)w;
             long lo = i;
             long hi = i + 1;
-            TRAP_IF((unsigned long)hi > (unsigned long)n);
-            TRAP_IF((unsigned long)lo > (unsigned long)hi);
+            GUARD((unsigned long)hi > (unsigned long)n);
+            GUARD((unsigned long)lo > (unsigned long)hi);
             total = (long)((unsigned long)total + (unsigned long)v[i]);
         }
+    POISON_END
+    return total;
+}
+
+#elif KERNEL == 9
+// Overflow again, on an **element-wise** addition rather than on the
+// running sum. This is the control that separates two things kernel 0
+// runs together: whether poison fails on *arithmetic*, or on a condition
+// the reduction itself carries.
+//
+// In kernel 0 the question "does `total + v[i]` overflow" depends on
+// `total`, so it is as serial as the sum is and there is no per-lane
+// flag to compute. Here the question is about `v[i] + w[i]` and nothing
+// else, so if poison works at all it works here.
+__attribute__((noinline))
+long run(const long *v, const long *w, long n) {
+    POISON_BEGIN
+    long total = 0;
+    for (long r = 0; r < ROUNDS; r++)
+        for (long i = 0; i < n; i++) {
+            long each;
+#if MODE == MODE_TRAP
+            if (__builtin_saddl_overflow(v[i], w[i], &each)) __builtin_trap();
+#elif MODE == MODE_POISON
+            bad |= __builtin_saddl_overflow(v[i], w[i], &each);
+#else
+            each = (long)((unsigned long)v[i] + (unsigned long)w[i]);
+#endif
+            total = (long)((unsigned long)total + (unsigned long)each);
+        }
+    POISON_END
+    return total;
+}
+
+#elif KERNEL == 10
+// The same element-wise addition again, with the overflow condition
+// written as **sign logic** instead of as `__builtin_saddl_overflow`.
+//
+// Kernel 9 says poison does not rescue the overflow check. This asks
+// whether that is a fact about overflow or about the *builtin*: a signed
+// add overflows exactly when both operands differ in sign from the
+// result, which is three XORs, an AND and a compare -- every one of them
+// an operation a vectoriser has. If this vectorises and kernel 9 does
+// not, then the barrier is the spelling rather than the semantics, and a
+// backend that emits its own IR can choose the other spelling.
+__attribute__((noinline))
+long run(const long *v, const long *w, long n) {
+    POISON_BEGIN
+    long total = 0;
+    for (long r = 0; r < ROUNDS; r++)
+        for (long i = 0; i < n; i++) {
+            long each;
+#if MODE == MODE_TRAP
+            if (__builtin_saddl_overflow(v[i], w[i], &each)) __builtin_trap();
+#elif MODE == MODE_POISON
+            each = (long)((unsigned long)v[i] + (unsigned long)w[i]);
+            bad |= ((v[i] ^ each) & (w[i] ^ each)) < 0;
+#else
+            each = (long)((unsigned long)v[i] + (unsigned long)w[i]);
+#endif
+            total = (long)((unsigned long)total + (unsigned long)each);
+        }
+    POISON_END
+    return total;
+}
+
+#elif KERNEL == 11
+// The sign spelling applied to the **reduction** of kernel 0, which is
+// the last thing that could rescue it.
+//
+// Kernel 10 shows the sign test vectorises where the builtin does not.
+// If that were the whole story this kernel would vectorise too. If it
+// does not, the reduction case is structural rather than a spelling
+// problem -- "no partial sum overflowed" is a claim about *this*
+// association order, and four lanes compute four different partial sums,
+// so the property is not the same property after reassociation.
+__attribute__((noinline))
+long run(const long *v, const long *w, long n) {
+    POISON_BEGIN
+    long total = 0;
+    for (long r = 0; r < ROUNDS; r++)
+        for (long i = 0; i < n; i++) {
+            (void)w;
+#if MODE == MODE_TRAP
+            if (__builtin_saddl_overflow(total, v[i], &total)) __builtin_trap();
+#elif MODE == MODE_POISON
+            long sum = (long)((unsigned long)total + (unsigned long)v[i]);
+            bad |= ((total ^ sum) & (v[i] ^ sum)) < 0;
+            total = sum;
+#else
+            total = (long)((unsigned long)total + (unsigned long)v[i]);
+#endif
+        }
+    POISON_END
     return total;
 }
 
 #else
 // Division. lex-sys emits no comparison at all here: the hardware faults
 // on a zero divisor and on `LONG_MIN / -1`, so the guarantee is already
-// in the instruction. GUARDED is the same program either way, which is
-// the finding rather than a gap in the harness.
+// in the instruction. All three modes are the same program, which is the
+// finding rather than a gap in the harness.
 __attribute__((noinline))
 long run(const long *v, const long *w, long n) {
+    POISON_BEGIN
     long total = 0;
     for (long r = 0; r < ROUNDS; r++)
         for (long i = 0; i < n; i++)
             total = (long)((unsigned long)total + (unsigned long)(v[i] / w[i]));
+    POISON_END
     return total;
 }
 #endif
@@ -217,7 +389,7 @@ int main(int argc, char **argv) {
     double *f = (double *)w;
     for (long i = 0; i < N; i++) {
 #if KERNEL == 3
-        // In range for a byte, because the guard is the point and a value
+        // In range for a byte, because the check is the point and a value
         // that trips it would measure the trap rather than the check.
         v[i] = (i % 256) + (argc - 1);
 #else

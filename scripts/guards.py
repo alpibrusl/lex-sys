@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""What every check costs a vectoriser, counted rather than inferred.
+"""What every check costs a vectoriser, and whether poison costs less.
 
 `docs/overflow-cost.md` §3.2 found that a check costs the *vectoriser*
 rather than a branch. It measured the overflow check and wrote "the
@@ -7,11 +7,13 @@ check"; `docs/gpu.md` §2.1 falsified half of that -- a bounds check is
 free -- and left the rest open. This runs the same experiment over every
 check lex-sys emits inside a loop body.
 
-For each kernel in `benches/guards.c` it builds the program twice, with
-and without the guard, counts the SIMD instructions in the emitted `run`
-with `objdump`, and times both interleaved. Counting the instructions is
-the point: a timing difference says something got slower, and only the
-disassembly says the vectoriser is what was lost.
+For each kernel in `benches/guards.c` it builds the program three ways —
+unchecked, trapping, and `gpu.md` §4.1's **poison**, where the condition
+is OR-ed into a flag tested once after the loop — counts the SIMD
+instructions in the emitted `run` with `objdump`, and times them
+interleaved. Counting the instructions is the point: a timing difference
+says something got slower, and only the disassembly says the vectoriser
+is what was lost.
 
     python3 scripts/guards.py                 # baseline x86-64 (SSE2)
     python3 scripts/guards.py --march native  # and with the machine's own
@@ -43,7 +45,13 @@ KERNELS = [
     (6, "float_to_int", "`int_of(f)` traps on NaN and out of range"),
     (7, "divide", "`a / b` traps on a zero divisor -- in the hardware"),
     (8, "subslice_iv", "the same two tests, on the induction variable"),
+    (9, "overflow_each", "the same overflow check, element-wise not carried"),
+    (10, "overflow_signs", "the same again, as sign logic rather than a builtin"),
+    (11, "overflow_carried", "the sign spelling on the reduction of kernel 0"),
 ]
+
+# Unchecked, trapping, and poison. `gpu.md` §4.1 numbers them the same way.
+MODES = (0, 1, 2)
 
 # Two counts, because one is not enough across this range of kernels.
 #
@@ -72,14 +80,14 @@ def compilers(cc: str) -> str:
     return found
 
 
-def build(cc: str, march: str | None, kernel: int, guarded: int, out: pathlib.Path) -> None:
-    argv = [cc, "-O2", f"-DKERNEL={kernel}", f"-DGUARDED={guarded}"]
+def build(cc: str, march: str | None, kernel: int, mode: int, out: pathlib.Path) -> None:
+    argv = [cc, "-O2", f"-DKERNEL={kernel}", f"-DMODE={mode}"]
     if march:
         argv.append(f"-march={march}")
     argv += [str(SOURCE), "-o", str(out)]
     done = subprocess.run(argv, capture_output=True, text=True)
     if done.returncode != 0:
-        sys.exit(f"kernel {kernel} guarded={guarded} did not build:\n{done.stderr}")
+        sys.exit(f"kernel {kernel} mode={mode} did not build:\n{done.stderr}")
 
 
 def simd_in_run(exe: pathlib.Path) -> tuple[int, int]:
@@ -121,7 +129,7 @@ def time_once(exe: pathlib.Path) -> tuple[float, str]:
     done = subprocess.run([str(exe)], capture_output=True, text=True)
     elapsed = time.perf_counter() - start
     if done.returncode != 0:
-        sys.exit(f"{exe.name} exited {done.returncode} -- a guard fired, which is a bug in the data")
+        sys.exit(f"{exe.name} exited {done.returncode} -- a check fired, which is a bug in the data")
     return elapsed, done.stdout.strip()
 
 
@@ -135,44 +143,48 @@ def main() -> int:
 
     version = subprocess.run([cc, "--version"], capture_output=True, text=True).stdout.splitlines()
     print(version[0] if version else cc)
-    print(f"-O2{' -march=' + args.march if args.march else ''}, minimum of {args.runs} runs\n")
+    print(f"-O2{' -march=' + args.march if args.march else ''}, minimum of {args.runs} runs")
+    print("packed SIMD and time are printed unchecked / trap / poison\n")
     print(
-        f"{'check':<14}{'packed off':>12}{'packed on':>11}"
-        f"{'off (ms)':>11}{'on (ms)':>10}{'cost':>8}"
+        f"{'check':<14}{'packed':>22}{'unchecked':>11}{'trap':>9}{'poison':>9}"
+        f"{'trap':>8}{'poison':>9}"
     )
-    print("-" * 66)
+    print("-" * 82)
 
     rows = []
     with tempfile.TemporaryDirectory() as tmp:
         tmp = pathlib.Path(tmp)
         for kernel, name, _ in KERNELS:
-            off, on = tmp / f"{name}_off", tmp / f"{name}_on"
-            build(cc, args.march, kernel, 0, off)
-            build(cc, args.march, kernel, 1, on)
-            regs_off, packed_off = simd_in_run(off)
-            regs_on, packed_on = simd_in_run(on)
+            exes, packed, regs, best = {}, {}, {}, {}
+            for mode in MODES:
+                exes[mode] = tmp / f"{name}_{mode}"
+                build(cc, args.march, kernel, mode, exes[mode])
+                regs[mode], packed[mode] = simd_in_run(exes[mode])
 
-            # Interleaved, so drift lands on both halves.
-            times_off, times_on, answers = [], [], set()
+            # Interleaved across all three, so drift lands on each equally.
+            times = {mode: [] for mode in MODES}
+            answers = set()
             for _ in range(args.runs):
-                t, a = time_once(off)
-                times_off.append(t)
-                answers.add(a)
-                t, a = time_once(on)
-                times_on.append(t)
-                answers.add(a)
+                for mode in MODES:
+                    elapsed, answer = time_once(exes[mode])
+                    times[mode].append(elapsed)
+                    answers.add(answer)
             if len(answers) != 1:
-                sys.exit(f"{name}: the two forms disagree {answers}")
-            best_off, best_on = min(times_off) * 1000, min(times_on) * 1000
+                sys.exit(f"{name}: the three modes disagree {answers}")
+            for mode in MODES:
+                best[mode] = min(times[mode]) * 1000
+
+            shape = f"{packed[0]} / {packed[1]} / {packed[2]}"
             print(
-                f"{name:<14}{packed_off:>12}{packed_on:>11}"
-                f"{best_off:>11.1f}{best_on:>10.1f}{best_on / best_off:>7.2f}x"
+                f"{name:<14}{shape:>22}"
+                f"{best[0]:>11.1f}{best[1]:>9.1f}{best[2]:>9.1f}"
+                f"{best[1] / best[0]:>7.2f}x{best[2] / best[0]:>8.2f}x"
             )
-            rows.append((name, regs_off, regs_on, packed_off, packed_on, best_off, best_on))
+            rows.append((name, regs, packed, best))
 
     print("\nvector-register counts, which is what `gpu.md` §2 reported:")
-    for name, regs_off, regs_on, *_ in rows:
-        print(f"  {name:<14}{regs_off:>4} -> {regs_on}")
+    for name, regs, _, _ in rows:
+        print(f"  {name:<14}{regs[0]:>4} / {regs[1]} / {regs[2]}")
     return 0
 
 

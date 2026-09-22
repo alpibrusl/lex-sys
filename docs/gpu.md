@@ -135,6 +135,15 @@ A GPU cannot stop — no signals, no per-lane abort. Three answers:
 2. **Poison, reduced at the launch boundary** — each lane sets a flag,
    `launch` answers *some lane trapped*. The claim survives; *where* does
    not.
+
+   > **Measured (#65): [`poison.md`](poison.md), and the awkward part is
+   > which half it saves.** Element-wise arithmetic under poison is
+   > **free** on a wide vector ISA — `a + b` inside a loop costs 0.98×
+   > once the overflow test is spelled as sign logic rather than as an
+   > opaque builtin. A **reduction** is not saved and cannot be: four
+   > lanes compute four different partial sums, so "no partial sum
+   > overflowed" is not the same property after vectorising, and poison
+   > there is *worse* than trapping. A reduction is what a GPU is for.
 3. **Refuse trapping operations in kernels** — a narrower language
    inside the braces.
 
@@ -183,7 +192,7 @@ recognisable way for a project to end.
 | Signal | Why it would settle it |
 |---|---|
 | An LLVM backend exists | §2.3's remaining 2.27× is Cranelift. With LLVM, the wrapping half reaching vectorised C makes the GPU question purely about the failure model, which is a language question and answerable |
-| Poison measured, not assumed | §4.1's option (2) has no number. A CPU prototype — a flag per lane, reduced at the end — is measurable on the existing bench harness and would price the thesis's survival |
+| ~~Poison measured, not assumed~~ | **Done** — [`poison.md`](poison.md). It has numbers now, on two instruction sets, and they say the trade is good for per-element work, no help for a reduction, and a net loss on a narrow vector unit |
 | A program that wants it | Nothing in this repository is data-parallel. `benchmarks-game.md`'s kernels are the nearest, and they are single-threaded on purpose |
 
 ---
@@ -192,7 +201,7 @@ recognisable way for a project to end.
 
 | Question | Why it waits |
 |---|---|
-| Does poison cost less than trapping? | §5.1. The one number that decides whether the thesis survives a GPU, and it is measurable on a CPU today. [`check-cost.md`](check-cost.md) §7 **raises it**: this was a question about one check when it was written and is now about six, with the worst at 3.35× |
+| ~~Does poison cost less than trapping?~~ | **Answered, and it splits** — [`poison.md`](poison.md). On a wide vector ISA poison is a large win for every check whose condition is per-element: two become free and the worst drops from 3.28× to 1.33×. On the overflow check **carried by a reduction** it does not help and is worse, 1.37× → 1.73×, and four kernels show that is structural rather than a compiler limitation — "no partial sum overflowed" is a claim about one association order. On baseline x86-64 the whole win disappears: poison loses in eleven of twelve kernels |
 | Checked barriers | §4. A real research problem — roughly structured concurrency for lanes — and the part nobody else has done either |
 | ~~`overflow-cost.md` §3.2's generalisation~~ | **Answered** — [`check-cost.md`](check-cost.md). Six of the eight checks this language emits in a loop body take the SIMD count to zero, not one, and the axis is neither memory-safety nor arithmetic but whether the loop already proves the condition. §2.1 above is corrected in place: it measured the one check whose condition a loop always proves |
 | A host-side GPU probe through `Ffi` | The `reach.md` move: can a lex-sys program drive a GPU at all, with no new backend? It would answer a different question — reach, not speed — and would report `ffi("libcuda")` and nothing about the device, which is §5's narrowing gap in a third domain |
