@@ -63,13 +63,15 @@ printing the one place the language forgot.
 
 `float_into` is **written in lex-sys**, in `std/fmt.ls`. It is not a
 builtin, not a call into libc, and not a special case in the code
-generator. The compiler's entire contribution is one instruction:
+generator. The compiler's entire contribution is one builtin:
 
 ```
 bits_of(x: float) -> int          // the same 64 bits, read as an integer
 ```
 
-A bitcast. From there the algorithm is ordinary lex-sys: masks and
+A bitcast, plus two instructions that give every NaN one pattern
+(`movq`, `ucomisd`, `cmovp` on x86-64; [`differential.md`](differential.md)
+§4, #PR). From there the algorithm is ordinary lex-sys: masks and
 shifts to pull the mantissa and exponent apart (`bitwise.md`), a
 `region` to hold the working numbers, `while` loops, and a `[byte]` to
 write into. Its effect row is `[]` — printing a float performs nothing,

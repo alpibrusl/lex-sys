@@ -217,6 +217,13 @@ const RETURN_SLOT_STRIDE: i32 = 8;
 /// the answer honest until then.
 const ARENA_CHUNK: i64 = 64 * 1024;
 
+/// What `bits_of` answers for every NaN: the positive quiet NaN with an
+/// empty payload, which is aarch64's default NaN and RISC-V's canonical
+/// one. x86-64 generates the same pattern with the sign bit set (its
+/// "QNaN floating-point indefinite"), which is the one reason `bits_of`
+/// needs this at all.
+const CANONICAL_NAN: i64 = 0x7ff8_0000_0000_0000;
+
 /// Every lex-sys function is emitted under this prefix, so a program may define
 /// a function called `write` or `exit` without colliding with libc.
 const PREFIX: &str = "lexs_";
@@ -2158,9 +2165,24 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
                     }
                     // A reinterpretation, so `bitcast` and no arithmetic
                     // (`docs/float-printing.md` §2). The bits are the
-                    // same sixty-four; only the type changes.
+                    // same sixty-four; only the type changes -- except for
+                    // NaN, which answers one pattern on every target.
+                    //
+                    // IEEE-754 leaves a generated NaN's sign and payload to
+                    // the hardware, and the two targets disagree: `0.0 /
+                    // 0.0` is `0xfff8...` on x86-64 and `0x7ff8...` on
+                    // aarch64, so a bare `bitcast` made `bits_of` the one
+                    // operation whose answer depended on where the program
+                    // ran (`docs/differential.md` §4). Nothing a program
+                    // can do reaches a NaN's payload -- there is no
+                    // `float_of_bits` -- so the only thing canonicalising
+                    // loses is the hardware's accident.
                     Callee::Builtin(Builtin::BitsOf) => {
-                        vec![self.builder.ins().bitcast(types::I64, MemFlags::new(), args[0])]
+                        let x = args[0];
+                        let raw = self.builder.ins().bitcast(types::I64, MemFlags::new(), x);
+                        let nan = self.builder.ins().fcmp(FloatCC::Unordered, x, x);
+                        let canonical = self.builder.ins().iconst(types::I64, CANONICAL_NAN);
+                        vec![self.builder.ins().select(nan, canonical, raw)]
                     }
                     // `x != x`, which is true for NaN and nothing else.
                     // A riddle as an expression (§5), which is why it has

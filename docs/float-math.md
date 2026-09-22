@@ -106,7 +106,8 @@ correct.**
 Printing a float is a *decision procedure* — Steele and White over exact
 integers — and lex-sys can express it, so `std.fmt.float_into` is
 library code and the compiler's whole contribution is `bits_of`, a
-bitcast. A correctly-rounded square root is *not* expressible here,
+bitcast (plus a select that gives every NaN one pattern,
+[`differential.md`](differential.md) §4). A correctly-rounded square root is *not* expressible here,
 because the only correct implementation is an instruction. One goes in
 the library because it can; the other goes in the compiler because it
 cannot.

@@ -156,7 +156,8 @@ is the routine every other language keeps in its runtime, in C or Rust,
 a thousand lines behind whatever interface it chose. Here it is
 `std/fmt.ls`, written in lex-sys, with an effect row of `[]` and no
 `Heap` — the working numbers live in a `region`. The compiler's entire
-contribution is `bits_of`, a bitcast. Anything `float_into` does, a
+contribution is `bits_of`, a bitcast that gives every NaN one pattern
+([`differential.md`](differential.md) §4). Anything `float_into` does, a
 program could have done.
 
 **`std.bignum` is underneath, and has no division.** Exact integers to
