@@ -122,7 +122,7 @@ also tests a flag.
 > sentence generalised: a branch on something the loop already proves is
 > not a branch either.
 >
-> And "vectoriser" is too narrow as well. The `int_of(f)` loop has no
+> And "vectoriser" is too narrow as well. The `truncate(f)` loop has no
 > SIMD either way at baseline and still costs 2.50×, because unguarded
 > it is unrolled four wide with four independent accumulators. What a
 > trap costs is **reassociation**; vectorisation is the largest thing

@@ -106,8 +106,18 @@ wrapping would help with (see below).
 `/` and `%` trap on two inputs:
 
 * a **zero divisor** — there is no answer, and C's answer is undefined;
-* `int::MIN / -1` and `int::MIN % -1` — the quotient has no representation,
-  which is the same overflow as §2.1 and traps for the same reason.
+* `int::MIN / -1` — the quotient has no representation, which is the same
+  overflow as §2.1 and traps for the same reason.
+
+`int::MIN % -1` was in that second row until
+[`emitted-checks.md`](emitted-checks.md) §4.1 read the binary, and it does
+not trap: **`a % -1` is 0**, for every dividend including `int::MIN`, and
+0 is representable where the quotient is not. The reason this document
+gave was the quotient's, borrowed by an operator that produces no
+quotient. The compiler was right and the rule was wrong, and §4.2 there
+records that the constant folder had copied the rule rather than the
+compiler — so the same expression was a compile error written down and a
+0 computed.
 
 Otherwise division **truncates toward zero** and the remainder takes the sign
 of the dividend, which is C99's rule and Rust's:
@@ -290,7 +300,7 @@ And a rule with no price is a rule nobody has finished arguing for.
 [`overflow-cost.md`](overflow-cost.md) prices the overflow trap and
 [`check-cost.md`](check-cost.md) prices the rest: of the eight checks
 above that can appear in a loop body, **six** make their operation
-non-reassociable, the worst being `int_of(f)` at **3.35×**, and the
+non-reassociable, the worst being `truncate(f)` at **3.35×**, and the
 three that are free are free for three unrelated reasons. None of that
 is an argument against the rules — a silently wrong answer is what §2.1
 exists to refuse — but the cost of a guarantee belongs next to the

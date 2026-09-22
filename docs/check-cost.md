@@ -34,11 +34,16 @@ where a comparison is not what the time goes on.
 | `a + b`, `a - b`, `a * b` | the operation overflowed |
 | `-x` | the one value with no negation |
 | `a << b`, `a >> b` | the amount is outside `0..64` |
-| `a / b`, `a % b` | **nothing** — see §5 |
+| `a / b`, `a % b` | one comparison each, and not the same one — see §5 |
 | `s[i]` | the index is inside the slice |
 | `s[lo..hi]` | `hi > len`, and `lo > hi` |
 | `byte_of(n)` | `n` is outside `0..255` |
-| `int_of(f)` | `f` is NaN, infinite, or out of range |
+| `truncate(f)` | `f` is NaN, infinite, or out of range |
+
+The last row was written `int_of(f)` until [`emitted-checks.md`](emitted-checks.md) §3
+read the binary. `int_of` widens a `byte` and emits **no check at all**;
+the float conversion is `truncate`, and five documents had copied the
+wrong name from this one.
 
 | once, not per element | what it tests |
 |---|---|
@@ -73,7 +78,7 @@ interleaved. clang 18.1.3, minimum of nine runs.
 | `byte_of(n)` | 11 | 0 | 61.3 ms | 117.2 ms | 1.91× |
 | `-x` | 8 | 0 | 63.5 ms | 121.8 ms | 1.92× |
 | `s[lo..hi]` | 8 | 0 | 62.2 ms | 134.3 ms | **2.16×** |
-| `int_of(f)` | 0 | 0 | 88.9 ms | 222.5 ms | **2.50×** |
+| `truncate(f)` | 0 | 0 | 88.9 ms | 222.5 ms | **2.50×** |
 
 **`-march=native`** (this machine has AVX-512), to show the answer is not
 an artifact of the instruction set:
@@ -87,7 +92,7 @@ an artifact of the instruction set:
 | `byte_of(n)` | 18 | 0 | 1.55× |
 | `-x` | 26 | 0 | 1.82× |
 | `s[lo..hi]` | 26 | 0 | **2.14×** |
-| `int_of(f)` | 13 | 0 | **3.35×** |
+| `truncate(f)` | 13 | 0 | **3.35×** |
 
 Same ordering, same six zeros, and the float conversion — which had no
 SIMD to lose at baseline — becomes the most expensive check in the
@@ -156,7 +161,7 @@ axis is provability.**
 
 ## 4. "Vectoriser" is too narrow as well
 
-The baseline `int_of(f)` row has **no packed instructions either way**
+The baseline `truncate(f)` row has **no packed instructions either way**
 and still costs **2.50×**. Nothing was vectorised, so nothing
 vectorisable was lost. Reading the two loops says what was:
 
@@ -196,6 +201,19 @@ with no comparison emitted at all. Cranelift says so in a boolean —
 zero divisor and on `int::MIN / -1` because **the hardware does** — an
 `idiv` with a zero divisor faults, and the language gets its guarantee
 from an instruction that was going to fault anyway.
+
+> **Corrected (#71): [`emitted-checks.md`](emitted-checks.md) §4.** The
+> paragraph above is a fact about the *IR* stated as a fact about the
+> *emitted code*, and the two differ. Both operators emit exactly one
+> comparison, and not the same one: `a / b` emits `test %rsi,%rsi` and
+> branches to its own `ud2`, so a zero divisor is **SIGILL** rather than
+> the hardware's SIGFPE; `a % b` emits `cmp $-1` and **answers 0**,
+> reaching `idiv` — and the hardware — for a zero divisor. One IR
+> instruction is not one machine instruction.
+>
+> The **1.00×** stands, for a fourth reason rather than the third: not
+> because nothing is emitted, but because one predictable compare is
+> nothing beside a 40-cycle `idiv` with no packed form to lose.
 
 There is also nothing to lose: integer division has no packed form on
 SSE2, AVX2 or AVX-512, so the loop is scalar unguarded and scalar
@@ -243,8 +261,19 @@ more structural than one bad check:
 * **Six of eight** loop-body checks make their operation
   non-reassociable. This is a property of "an operation that may trap on
   a value the compiler cannot bound", not a property of addition.
-* The worst is **`int_of(f)` at 3.35×**, not the overflow trap. Nothing
+* The worst is **`truncate(f)` at 3.35×**, not the overflow trap. Nothing
   had looked.
+
+  > **Corrected (#71): [`emitted-checks.md`](emitted-checks.md) §3.**
+  > Nothing had looked at the *emitted* guard either. The C kernel tests
+  > the range with two `ucomisd` comparisons on every element; Cranelift
+  > emits `cvttsd2si` plus one `cmp $0x1`/`jno`, because the conversion
+  > answers a sentinel that `rax - 1` overflows on and nothing else. So
+  > 3.35× is an upper bound for a guard this language does not emit, and
+  > the *ranking* — that this is the worst check — does not survive.
+  > What does survive is the direction: a data-dependent trap on a
+  > loaded value does not vectorise, whichever of the two spellings
+  > carries it.
 * `gpu.md` §5.1 asks whether **poison** — a per-lane flag reduced at the
   launch boundary — costs less than trapping. That question was about
   one check when it was written. It is now about six, which makes it the
@@ -252,7 +281,7 @@ more structural than one bad check:
 
   > **Answered (#65): [`poison.md`](poison.md).** For five of the six,
   > yes and by a lot — `a << b` and `-x` become **free**, and
-  > `int_of(f)` drops from 3.28× to 1.33×. For the sixth, the overflow
+  > `truncate(f)` drops from 3.28× to 1.33×. For the sixth, the overflow
   > check carried by a reduction, poison does not help and is **worse**,
   > because its condition is not a per-element property: four lanes
   > compute four different partial sums, so the flag would record a

@@ -833,6 +833,151 @@ fn division_by_zero_traps_rather_than_being_undefined() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// `docs/emitted-checks.md` §4 — the three division traps nothing tested.
+///
+/// `division_by_zero_traps_rather_than_being_undefined` above covers
+/// `1 / 0` and predates this. The other three were rules in
+/// `defined-behaviour.md` §2.3 that no test had ever run, and reading the
+/// emitted code found one of them false — so these exist to make the
+/// section falsifiable on **both** targets rather than on the one a
+/// disassembly happened to be taken on.
+///
+/// The operands come out of variables, because literals are folded and a
+/// certain trap written down is a compile error rather than a run
+/// (`compile-time.md` §4). §4.2 is what happens when those two paths
+/// disagree.
+#[test]
+fn the_other_division_traps() {
+    let dir = scratch("division-traps");
+    // `(source, should it die)`.
+    let cases = [("1", "0", "%", true), ("-9223372036854775808", "-1", "/", true)];
+
+    for (a, b, op, dies) in cases {
+        let name = if op == "%" { "rem" } else { "div" };
+        let source = dir.join(format!("{name}.ls"));
+        std::fs::write(
+            &source,
+            format!(
+                "fn op(a: int, b: int) -> [] int {{ return a {op} b; }}\n\
+                 fn main(world: World) -> [] int {{\n\
+                     let Split {{ io, ffi, fs, heap, args }} = split(world);\n\
+                     release(args); release(heap); release(fs); release(ffi); release(io);\n\
+                     var x = {a}; var y = {b};\n\
+                     return op(x, y);\n\
+                 }}\n"
+            ),
+        )
+        .expect("a writable fixture");
+        let exe = dir.join(name);
+        let build = Command::new(BIN)
+            .args(["build".as_ref(), source.as_os_str(), "-o".as_ref(), exe.as_os_str()])
+            .output()
+            .expect("the compiler runs");
+        assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+
+        let run = Command::new(&exe).output().expect("the compiled program runs");
+        assert_eq!(
+            run.status.code(),
+            if dies { None } else { Some(0) },
+            "`{a} {op} {b}` should {}",
+            if dies { "be killed by a signal" } else { "exit 0" }
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `docs/emitted-checks.md` §4.1 and §4.2 — `a % -1` is 0, both ways.
+///
+/// `defined-behaviour.md` §2.3 said `int::MIN % -1` traps, borrowing the
+/// quotient's reason for an operator that produces no quotient. It does
+/// not: the emitted code is `cmp $-1` and a `mov $0`, and 0 is the right
+/// answer.
+///
+/// Both spellings in one program on purpose. The constant folder had
+/// Rust's `checked_rem` rule and the backend had the hardware's, so the
+/// same expression was a compile error written down and a 0 computed.
+/// This fails if either half moves.
+#[test]
+fn a_remainder_by_minus_one_is_zero() {
+    let dir = scratch("rem-minus-one");
+    let source = dir.join("rem.ls");
+    std::fs::write(
+        &source,
+        "fn main(world: World) -> [] int {\n\
+             let Split { io, ffi, fs, heap, args } = split(world);\n\
+             release(args); release(heap); release(fs); release(ffi); release(io);\n\
+             let folded = -9223372036854775808 % -1;\n\
+             var a = -9223372036854775808; var b = -1;\n\
+             let computed = a % b;\n\
+             return folded + computed;\n\
+         }\n",
+    )
+    .expect("a writable fixture");
+    let exe = dir.join("rem");
+
+    let build = Command::new(BIN)
+        .args(["build".as_ref(), source.as_os_str(), "-o".as_ref(), exe.as_os_str()])
+        .output()
+        .expect("the compiler runs");
+    assert!(
+        build.status.success(),
+        "folding `int::MIN % -1` should agree with running it:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+
+    let run = Command::new(&exe).output().expect("the compiled program runs");
+    assert_eq!(run.status.code(), Some(0), "both spellings should answer 0");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `docs/emitted-checks.md` §1 — folding a `byte`-returning call.
+///
+/// A pure call on constant arguments is folded to a literal, and `Expr`
+/// has no `byte` literal, so the fold used to put an `int`-shaped node
+/// where the backend expects one machine byte. Each of the three
+/// expressions below then failed the Cranelift verifier with no span and
+/// no rule tag.
+///
+/// Kept as three because they fail in three different places — a widen, a
+/// comparison and a return — and a repair that fixed one without the
+/// others would look right.
+#[test]
+fn folding_a_byte_returning_call() {
+    let dir = scratch("fold-byte");
+    let source = dir.join("fold.ls");
+    std::fs::write(
+        &source,
+        "fn g(n: int) -> [] byte { return byte_of(n); }\n\
+         fn h() -> [] byte { return g(65); }\n\
+         fn main(world: World) -> [] int {\n\
+             let Split { io, ffi, fs, heap, args } = split(world);\n\
+             release(args); release(heap); release(fs); release(ffi); release(io);\n\
+             var same = 0;\n\
+             if g(65) == byte_of(66) { same = 1; }\n\
+             return int_of(g(65)) + int_of(h()) - 130 + same;\n\
+         }\n",
+    )
+    .expect("a writable fixture");
+    let exe = dir.join("fold");
+
+    let build = Command::new(BIN)
+        .args(["build".as_ref(), source.as_os_str(), "-o".as_ref(), exe.as_os_str()])
+        .output()
+        .expect("the compiler runs");
+    assert!(
+        build.status.success(),
+        "a folded `byte` should keep its width:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+
+    let run = Command::new(&exe).output().expect("the compiled program runs");
+    assert_eq!(run.status.code(), Some(0), "`'A'` twice is 130, and 65 is not 66");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn a_path_outside_the_granted_prefix_traps() {
     // `docs/filesystem.md` §4. The prefix lives in the type and is known at

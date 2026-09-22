@@ -103,6 +103,15 @@ fn int_bin(op: BinOp, a: i64, b: i64) -> Folded {
         BinOp::Div if b == 0 => Folded::Trapped("this divides by zero"),
         BinOp::Rem if b == 0 => Folded::Trapped("this divides by zero"),
         BinOp::Div => checked(a.checked_div(b)),
+        // `a % -1` is **0**, including `int::MIN % -1`, and the backend
+        // answers 0 there rather than trapping: the remainder is
+        // representable even where the quotient is not. Rust's
+        // `checked_rem` calls it overflow, so using it unchanged made the
+        // evaluator refuse a program the runtime computes — the two
+        // halves of one compiler giving two answers for one expression.
+        // Found by `docs/emitted-checks.md` §4, and it corrects
+        // `defined-behaviour.md` §2.3 along with this line.
+        BinOp::Rem if b == -1 => Folded::Value(Expr::Int(0)),
         BinOp::Rem => checked(a.checked_rem(b)),
         // `docs/bitwise.md` §3: the amount traps outside `0..64`, and a
         // negative amount is a huge unsigned one, which is why the
@@ -385,7 +394,23 @@ fn fold_in(e: &mut Expr, program: &Program, tally: &mut Tally) {
             if !args.is_empty() && args.iter().all(constant) =>
         {
             let func = program.func(*id);
-            if func.is_pure() {
+            // Purity is not the whole condition, and this is the half that
+            // was missing: a folded call becomes a **literal**, and `Expr`'s
+            // literals are `int`, `bool` and `float`. There is no `byte`
+            // one, because `byte_of` is where a byte comes from
+            // (`strings.md` §2) -- so folding a `byte`-returning call put
+            // an `Expr::Int` where the backend expects one machine byte,
+            // and `int_of(g(65))`, `g(65) == byte_of(66)` and returning it
+            // from a `byte` function each failed the Cranelift verifier
+            // with no span and no rule. Found by
+            // `docs/emitted-checks.md` §1, writing a program that did it
+            // by accident.
+            //
+            // Refusing to fold is the repair rather than inventing a byte
+            // literal: a new literal node moves every hash
+            // (`canonical-ast.md` §3), and this is the one call shape in
+            // the repository that it costs.
+            if func.is_pure() && matches!(func.ret, Type::Int | Type::Bool | Type::Float) {
                 was_call = true;
                 let mut machine = Machine::folding(program);
                 let values = args.iter().cloned().map(Val::Scalar).collect();
