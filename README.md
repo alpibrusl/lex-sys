@@ -301,9 +301,30 @@ both(s, s)      // compiles, and prints 2
 
 Two unique references, one object, writes that alias. So lex-sys cannot
 emit `noalias` where Rust can, and on the axis everyone expects ownership
-to pay, it is *behind* Rust rather than ahead of C. Whether `&!` should
-mean what `&mut` means is a real question with a real cost — it refuses
-programs that compile today — and it is open rather than answered.
+to pay, it is *behind* Rust rather than ahead of C.
+
+**What that would cost has now been measured too**
+([`docs/aliasing.md`](docs/aliasing.md)), and the cost this section used
+to name — *"it refuses programs that compile today"* — was the wrong
+one. Across all 82 programs the repository builds, the rule refuses
+**one fixture**, written to document the behaviour it would change. The
+real price is in two places, and either alone would settle it:
+
+- **Closing the last of the three aliasing routes is a borrow checker.**
+  `both(s, s)` and `let t = s; both(s, t)` close syntactically.
+  `both(head(s), s)` does not: nothing in `head`'s signature says the
+  result borrows its argument, and regions do not say it either — a
+  shared region is a shared *arena*, not a shared object. Carrying that
+  fact across a call is what lifetimes are. The design commitments table
+  above rules that out by name, two sections before this one asked.
+- **Cranelift has no `noalias`.** Its whole aliasing vocabulary is three
+  fixed WebAssembly regions; `AbiParam` carries no such attribute. A
+  proved fact would have nowhere to go until the LLVM backend the same
+  table names for release builds.
+
+So this is answered rather than open, and the answer is *not with this
+design, and not with this backend* — with the two conditions that would
+reopen it written down in `aliasing.md` §6.
 
 The one structural cost is defining away UB — principally integer-overflow
 semantics — and it has now been **measured** rather than estimated

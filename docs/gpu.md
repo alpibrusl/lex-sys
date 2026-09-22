@@ -57,6 +57,20 @@ It measured the overflow one and generalised. **Half of that
 generalisation is wrong**, and this is the half: memory safety is not
 what costs anything here.
 
+> **Corrected (#64): that last sentence is the over-generalisation
+> again, one document later.** [`check-cost.md`](check-cost.md) measured
+> all eight loop-body checks, and memory safety is *not* uniformly free:
+> `s[lo..hi]` costs **2.16×**, the most expensive integer check in the
+> language. It is the same kind of check as `s[i]` and it traps the same
+> way.
+>
+> What makes `s[i]` free is that `i < n` is the loop's own condition, so
+> the compiler discharges it. Move the same two comparisons onto bounds
+> loaded from memory and the cost is 2.16×; move them back onto the
+> induction variable and it is 0.99×. **Provable is free, and loaded is
+> not** — and this row happened to measure the one check in the language
+> whose condition the loop always proves.
+
 ### 2.2 An overflow trap costs 1.46×, and it costs it as SIMD
 
 Ten SIMD instructions to zero. This reproduces §3.2's finding on a new
@@ -105,7 +119,7 @@ a program never handed one provably never launched.
 
 | | |
 |---|---|
-| **`&!` must mean unique** | Already known false (`both(s, s)` compiles) and already on `ROADMAP.md`. GPU makes it mandatory: two lanes writing through aliasing references is the race the checker should catch |
+| **`&!` must mean unique** | Since measured, and it is **the expensive row** — [`aliasing.md`](aliasing.md). Not because it refuses working code (it refuses one fixture in 82 programs) but because one of the three aliasing routes, a reference returned from a call, closes only with provenance in signatures: lifetimes, and a borrow checker the non-goals exclude. GPU is what makes it mandatory rather than optional — on one thread two aliasing writes are defined and ordered, and two lanes writing through aliasing references is the race the checker should catch — so this row is where the GPU question stops being about speed |
 | **Recursion** | GPUs have no stack for it; `std.io.print_nat` is recursive. Kernels become a subset, and no row can say a function is in it |
 | **Barriers** | A barrier reached non-uniformly is undefined behaviour on real hardware — the one thing this family of languages refuses to have. Making that checkable is the research contribution, and lex-sys has nothing to donate to it |
 | **Two backends, forever** | Cranelift stays because it is the fast dev path |
@@ -178,7 +192,7 @@ recognisable way for a project to end.
 
 | Question | Why it waits |
 |---|---|
-| Does poison cost less than trapping? | §5.1. The one number that decides whether the thesis survives a GPU, and it is measurable on a CPU today |
+| Does poison cost less than trapping? | §5.1. The one number that decides whether the thesis survives a GPU, and it is measurable on a CPU today. [`check-cost.md`](check-cost.md) §7 **raises it**: this was a question about one check when it was written and is now about six, with the worst at 3.35× |
 | Checked barriers | §4. A real research problem — roughly structured concurrency for lanes — and the part nobody else has done either |
-| `overflow-cost.md` §3.2's generalisation | §2.1 corrects half of it there. Whether any *other* check this language emits is also free is unmeasured, and the method is in this document |
+| ~~`overflow-cost.md` §3.2's generalisation~~ | **Answered** — [`check-cost.md`](check-cost.md). Six of the eight checks this language emits in a loop body take the SIMD count to zero, not one, and the axis is neither memory-safety nor arithmetic but whether the loop already proves the condition. §2.1 above is corrected in place: it measured the one check whose condition a loop always proves |
 | A host-side GPU probe through `Ffi` | The `reach.md` move: can a lex-sys program drive a GPU at all, with no new backend? It would answer a different question — reach, not speed — and would report `ffi("libcuda")` and nothing about the device, which is §5's narrowing gap in a third domain |

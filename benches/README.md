@@ -40,6 +40,32 @@ are known to be the same program.
 | `reduce` | a memory-fed reduction | The shape a GPU runs, and the one `reduce.c` gives to clang — so the two languages meet on one algorithm rather than on the same words (`docs/gpu.md`) |
 | `reduce.c` | — | The same guarantee given to a mature backend, which is how we know the cost is the semantics rather than Cranelift. `BOUNDS` and `CHECKED` switch its two guards independently, which is how `gpu.md` §2 separates their costs |
 
+## `guards.c` — every *other* check
+
+`reduce.c` switches two guards. `guards.c` is the same idea carried to
+all of them: one kernel per check lex-sys emits inside a loop body, each
+written so the unguarded form is as vectorisable as the instruction set
+allows, so that what the guard costs is visible rather than hidden
+behind a loop that was scalar anyway.
+
+```sh
+python3 scripts/guards.py                 # baseline x86-64
+python3 scripts/guards.py --march native  # and the machine's own
+```
+
+The script counts packed instructions in the emitted `run` with
+`objdump` rather than inferring vectorisation from the clock, which is
+the method `gpu.md` §2 used and did not ship a script for. It reports
+two counts, because "touches a vector register" is the right signal on
+an integer reduction and the wrong one on a float kernel — §2.1 of
+[`docs/check-cost.md`](../docs/check-cost.md) is why, and that document
+is what the numbers mean.
+
+Kernel 8 is the one to read first. It is kernel 4's subslice check with
+the bounds taken from the induction variable instead of from memory:
+same two comparisons, same trap, **2.16× against 0.99×**. That pair is
+the finding, and the rest of the table is it happening seven more times.
+
 ## Against C and Rust
 
 `benches/three/` is a different comparison: the same algorithm written in

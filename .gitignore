@@ -16,3 +16,7 @@ Cargo.lock.bak
 .idea/
 .vscode/
 *.swp
+
+# Python bytecode from the measurement scripts
+__pycache__/
+*.pyc
