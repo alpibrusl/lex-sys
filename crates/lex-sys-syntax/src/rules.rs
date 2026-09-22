@@ -9,7 +9,9 @@
 //! §1 is why this exists. Across 196 must-reject fixtures the checker
 //! produced 125 distinct message shapes, 101 of them seen exactly once —
 //! so a consumer classifying a refusal had 125 English patterns to match
-//! and no vocabulary at all. These are the 52 rules underneath them.
+//! and no vocabulary at all. These are the 52 rules underneath them,
+//! and `internal` (`docs/internal-errors.md`), which names the
+//! compiler's failures rather than the program's.
 //!
 //! **A tag is stable.** Once shipped it never changes meaning: a new
 //! rule gets a new tag, and a rule that splits gets siblings rather than
@@ -42,6 +44,9 @@ pub enum Rule {
     ForeignBoundaryType,
     ForeignDeclaration,
     InfiniteType,
+    /// The compiler failed on a program it had accepted
+    /// (`docs/internal-errors.md`). No fixture reaches it on purpose.
+    Internal,
     LinearUseAfterMove,
     LinearValueTakenApart,
     LinearValueUnconsumed,
@@ -82,7 +87,7 @@ pub enum Rule {
 
 impl Rule {
     /// Every rule, in tag order. The catalogue as data.
-    pub const ALL: [Rule; 52] = [
+    pub const ALL: [Rule; 53] = [
         Rule::AmbiguousType,
         Rule::ArityMismatch,
         Rule::AssignToImmutable,
@@ -99,6 +104,7 @@ impl Rule {
         Rule::ForeignBoundaryType,
         Rule::ForeignDeclaration,
         Rule::InfiniteType,
+        Rule::Internal,
         Rule::LinearUseAfterMove,
         Rule::LinearValueTakenApart,
         Rule::LinearValueUnconsumed,
@@ -156,6 +162,7 @@ impl Rule {
             Rule::ForeignBoundaryType => "foreign-boundary-type",
             Rule::ForeignDeclaration => "foreign-declaration",
             Rule::InfiniteType => "infinite-type",
+            Rule::Internal => "internal",
             Rule::LinearUseAfterMove => "linear-use-after-move",
             Rule::LinearValueTakenApart => "linear-value-taken-apart",
             Rule::LinearValueUnconsumed => "linear-value-unconsumed",
@@ -268,6 +275,10 @@ impl Rule {
             Rule::InfiniteType => {
                 "A type that contains itself has no finite size, so a `Box` has to sit somewhere on \
                  the path back to it."
+            }
+            Rule::Internal => {
+                "The compiler failed on a program it had accepted. The program is not at fault; the \
+                 position is the function whose code could not be generated."
             }
             Rule::LinearUseAfterMove => {
                 "A `res` value is used exactly once. Once it has been moved or consumed there is \

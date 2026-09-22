@@ -1197,6 +1197,11 @@ pub struct Func {
     /// rewrote, and §9 lists the alternative — silent folding — as the
     /// thing that makes the pass hard to trust.
     pub folded: usize,
+    /// Where the function is declared, and the only span the IR carries
+    /// (`docs/internal-errors.md` §2): it is what a backend failure in
+    /// this function points at. A generic instance carries its generic
+    /// declaration's. Nothing finer, for `compile-time.md` §9's reason.
+    pub span: Span,
 }
 
 impl Func {
@@ -3084,6 +3089,7 @@ fn lower_static(
         ret,
         body,
         folded,
+        span: ast.item_span(ast::ItemId(item as u32)),
     })
 }
 
@@ -3317,6 +3323,7 @@ fn lower_function(
         ret,
         body,
         folded,
+        span: ast.item_span(ast::ItemId(signature.item as u32)),
     })
 }
 

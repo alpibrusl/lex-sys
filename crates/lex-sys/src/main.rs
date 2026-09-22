@@ -9,7 +9,7 @@
 //! | code | meaning |
 //! |---|---|
 //! | 0 | success |
-//! | 1 | the program was refused (a located diagnostic was printed) |
+//! | 1 | the program was refused (a located diagnostic was printed) -- including by the compiler's own failure, rule `internal` (`docs/internal-errors.md`) |
 //! | 2 | the command line was wrong |
 //! | 3 | the environment failed: no linker, unwritable output, unsupported host |
 //!
@@ -60,6 +60,11 @@ tag, the same sentence, what the rule enforces, and a position. The exit
 status is unchanged -- 1 for a refused program -- and `check` reports
 every independent refusal rather than the first. See
 docs/agent-errors.md.
+
+`check` also generates the code and discards it, so a program it
+accepts is one `build` can compile. If the compiler itself fails, that
+is a refusal with rule `internal`, at the function it failed on. See
+docs/internal-errors.md.
 
 `agent-guidelines` prints AGENTS.md, which is how to write lex-sys in
 one page rather than in 42 documents. Every checked code block in it is
@@ -393,8 +398,15 @@ fn compile_to_ir(inputs: &[PathBuf], with_std: bool) -> Result<lex_sys_ir::Progr
 /// A machine-readable body does not change what happened, and this
 /// repository already has semantic exit codes.
 fn check_program(inputs: &[PathBuf], with_std: bool, json: bool) -> Result<ExitCode, Failure> {
+    // `docs/internal-errors.md` §3: the backend runs here too, and its
+    // object is thrown away, so a program `check` accepts is a program
+    // `build` can generate code for. Before, `check` stopped after
+    // lowering and answered an empty list for a program `build` refused.
     let refusals = match compile_reporting(inputs, with_std) {
-        Ok(_) => Vec::new(),
+        Ok((program, _)) => match backend(&program, inputs) {
+            Ok(_) => Vec::new(),
+            Err(refusals) => refusals,
+        },
         Err(refusals) => refusals,
     };
     if !json {
@@ -539,6 +551,52 @@ fn compile_reporting(
     }
 
     Ok((program, map))
+}
+
+/// Generate the object code, or say why the compiler could not.
+///
+/// `docs/internal-errors.md`. Every failure here is the compiler's: the
+/// program was already accepted. So it is reported as a refusal with
+/// rule `internal`, at the declaration of the function whose code
+/// failed, with the backend's own words kept as the cause. A panic in
+/// the backend is caught per function by `lex-sys-codegen`; the default
+/// hook, which would print Rust's "thread 'main' panicked at", is
+/// silenced for the duration and put back.
+fn backend(program: &lex_sys_ir::Program, inputs: &[PathBuf]) -> Result<Vec<u8>, Vec<Refusal>> {
+    let hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let result = lex_sys_codegen::compile_object(program, "main");
+    std::panic::set_hook(hook);
+    result.map_err(|e| vec![internal_refusal(program, &e, inputs)])
+}
+
+fn internal_refusal(
+    program: &lex_sys_ir::Program,
+    e: &lex_sys_codegen::CodegenError,
+    inputs: &[PathBuf],
+) -> Refusal {
+    match e.function.and_then(|index| program.funcs.get(index)) {
+        Some(func) => Refusal {
+            rule: Rule::Internal,
+            message: format!(
+                "the compiler failed to generate code for `{}`; this is a bug in lex-sys, not in \
+                 the program ({})",
+                func.name, e.message
+            ),
+            span: Some(func.span),
+        },
+        // Nothing to point at, and nothing is invented (§2).
+        None => Refusal {
+            rule: Rule::Internal,
+            message: format!(
+                "{}: error: the compiler failed to generate code; this is a bug in lex-sys, not \
+                 in the program ({})",
+                inputs.first().map(|p| p.display().to_string()).unwrap_or_default(),
+                e.message
+            ),
+            span: None,
+        },
+    }
 }
 
 /// Print every unit's content hash.
@@ -877,8 +935,16 @@ fn print_ids(inputs: &[PathBuf], with_std: bool) -> Result<(), Failure> {
 
 fn build(inputs: &[PathBuf], output: &Path, emit: Emit, with_std: bool) -> Result<(), Failure> {
     let program = compile_to_ir(inputs, with_std)?;
-    let object = lex_sys_codegen::compile_object(&program, "main")
-        .map_err(|e| environment(format!("code generation failed: {e}")))?;
+    // A backend failure is a refusal with rule `internal`, exit 1, located
+    // at the function (`docs/internal-errors.md` §2) -- no longer exit 3,
+    // which says the *environment* failed.
+    let object = backend(&program, inputs).map_err(|refusals| {
+        let text: Vec<String> = match parse_program(inputs, with_std) {
+            Ok((_, map)) => refusals.iter().map(|r| r.render(&map)).collect(),
+            Err(_) => refusals.iter().map(|r| r.message.clone()).collect(),
+        };
+        refused(text.join("\n\n"))
+    })?;
 
     match emit {
         Emit::Obj => std::fs::write(output, &object)
@@ -912,4 +978,74 @@ fn link(object: &Path, output: &Path) -> Result<(), Failure> {
         return Err(environment(format!("the linker `{cc}` failed with {status}")));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A checked program whose function `seven` is then broken in the IR,
+    /// the way `docs/internal-errors.md` §5 describes: the body changes and
+    /// the signature does not, so the failure is `seven`'s own.
+    fn broken(body: lex_sys_ir::Stmt) -> (lex_sys_ir::Program, lex_sys_syntax::Span) {
+        let source = "fn seven() -> [] int { return 7; }\n\
+                      fn main(world: World) -> [] int { release(world); return seven() - 7; }\n";
+        let ast = lex_sys_syntax::parse(source).expect("should parse");
+        let mut program = lex_sys_ir::lower(&ast).expect("should lower");
+        let seven = program.funcs.iter_mut().find(|f| f.name == "seven").expect("`seven`");
+        seven.body = vec![body];
+        let span = seven.span;
+        (program, span)
+    }
+
+    fn refusal_for(body: lex_sys_ir::Stmt) -> (Refusal, lex_sys_syntax::Span) {
+        let (program, span) = broken(body);
+        let mut refusals =
+            backend(&program, &[PathBuf::from("seven.ls")]).expect_err("the backend should refuse");
+        assert_eq!(refusals.len(), 1, "code generation stops at the first failure");
+        (refusals.remove(0), span)
+    }
+
+    /// §2: a verifier failure is an `internal` refusal, located at the
+    /// declaration of the function whose code failed, saying whose bug it
+    /// is and keeping Cranelift's own words.
+    #[test]
+    fn a_backend_failure_is_a_located_internal_refusal() {
+        let (refusal, span) = refusal_for(lex_sys_ir::Stmt::Return(lex_sys_ir::Expr::Bool(true)));
+        assert_eq!(refusal.rule, Rule::Internal);
+        assert_eq!(refusal.span, Some(span), "it points at `seven`'s declaration");
+        assert!(refusal.message.contains("`seven`"), "{}", refusal.message);
+        assert!(
+            refusal.message.contains("a bug in lex-sys, not in the program"),
+            "{}",
+            refusal.message
+        );
+        assert!(refusal.message.contains("Verifier"), "{}", refusal.message);
+    }
+
+    /// §4: a panic in the backend is the same refusal, carrying the
+    /// panic's message, and the compiler does not unwind out of `backend`.
+    #[test]
+    fn a_backend_panic_is_a_located_internal_refusal() {
+        let (refusal, span) = refusal_for(lex_sys_ir::Stmt::Return(lex_sys_ir::Expr::Call {
+            callee: lex_sys_ir::Callee::Builtin(lex_sys_ir::Builtin::Len),
+            args: vec![lex_sys_ir::Expr::Int(0)],
+        }));
+        assert_eq!(refusal.rule, Rule::Internal);
+        assert_eq!(refusal.span, Some(span));
+        assert!(refusal.message.contains("`len` is lowered as `Expr::Len`"), "{}", refusal.message);
+    }
+
+    /// The rendered form is an ordinary located diagnostic, like every
+    /// other refusal: file, line and column, then the source line.
+    #[test]
+    fn an_internal_refusal_renders_where_the_function_is() {
+        let source = "fn seven() -> [] int { return 7; }\n\
+                      fn main(world: World) -> [] int { release(world); return seven() - 7; }\n";
+        let mut map = lex_sys_syntax::SourceMap::new();
+        assert_eq!(map.add("seven.ls", source), 0, "one file, based at zero like the parse");
+        let (refusal, _) = refusal_for(lex_sys_ir::Stmt::Return(lex_sys_ir::Expr::Bool(true)));
+        let text = refusal.render(&map);
+        assert!(text.starts_with("seven.ls:1:1: error: the compiler failed"), "{text}");
+    }
 }
