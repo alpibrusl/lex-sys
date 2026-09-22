@@ -21,6 +21,7 @@
 // (`docs/heap.md`) and standard input is not.
 
 import std.io;
+import std.flags;
 
 // ---------------------------------------------------------------------
 // The alphabet
@@ -227,17 +228,48 @@ fn main(world: World) -> [] int {
     release(ffi);
 
     var decoding = false;
+    var usage = false;
+    // `docs/flags.md` §1: this loop used to test `len(flag) == 2` and
+    // two bytes, so `--decode` and `-di` were not `-d` -- and rather
+    // than refusing them it **ignored** them and encoded, exiting 0.
+    // A wrong answer that looks like a right one is the thing this
+    // language exists not to give, and it lived here because no test
+    // ever passed a second spelling (§1.1).
     borrow args as &g in {
-        var n = 1;
-        while n < arg_count(g) {
-            let flag = arg(g, n);
-            if len(flag) == 2 && int_of(flag[0]) == '-' && int_of(flag[1]) == 'd' {
-                decoding = true;
+        var c = flags.start();
+        var going = true;
+        while going {
+            let (next, step) = flags.step(g, c);
+            c = next;
+            match step {
+                flags.Arg::Short(letter) => {
+                    if letter == 'd' { decoding = true; } else { usage = true; }
+                }
+                flags.Arg::Long(name) => {
+                    if flags.named(name, "decode") { decoding = true; } else { usage = true; }
+                }
+                // GNU reads a named file; this one is a filter, the way
+                // `examples/cut/` is, because `main` releases `Fs`
+                // before anything runs.
+                flags.Arg::Operand(_) => { usage = true; }
+                flags.Arg::Done => { going = false; }
             }
-            n = n + 1;
         }
     }
     release(args);
+
+    // `-i` and `-w` are GNU's and are **refused** rather than accepted
+    // and ignored, which is what happened before this slice. Neither is
+    // implementable here -- the decoder refuses garbage and the wrap is
+    // fixed at 76 -- so accepting one would be the silent lie above in a
+    // second place.
+    if usage {
+        borrow mut io as &!i in {
+            io.error_all(i, "base64: usage: base64 [-d|--decode]\n");
+        }
+        release(io);
+        return 1;
+    }
 
     var status = 0;
     borrow mut io as &!i in {

@@ -4680,6 +4680,339 @@ fn a_diagnostic_only_program_touches_the_console() {
 }
 
 /// Build one of the `examples/` programs into a scratch directory.
+/// `docs/flags.md` §2 — the nine shapes, each read back as itself.
+///
+/// The fixture is the driver: `tests/accept/flags.ls` prints what it
+/// was handed, so §2's table and this test are the same claim, and a
+/// fixture that drifted from the document would fail here rather than
+/// sit in the tree agreeing with nothing.
+///
+/// `-d,` and `-d ,` produce the same line on purpose. That is the point
+/// of §3's protocol — the program asked for a value, so both spellings
+/// of giving one resolve to the same thing, and the caller never learns
+/// which was written.
+#[test]
+fn every_argument_shape() {
+    let (dir, exe) = build_example("flags-shapes", "tests/accept/flags.ls", "flags");
+
+    let cases: &[(&[&str], &str)] = &[
+        (&["-x"], "short x"),
+        (&["-xy"], "short x\nshort y"),
+        (&["-d,"], "short d=,"),
+        (&["-d", ","], "short d=,"),
+        (&["--decode"], "long decode"),
+        (&["--delimiter=,"], "long delimiter=,"),
+        (&["--delimiter", ","], "long delimiter=,"),
+        (&["--", "-x"], "operand -x"),
+        (&["-"], "operand -"),
+        (&["file.csv"], "operand file.csv"),
+        // The value runs out: an empty slice, which is the one case §3
+        // says a caller has to test.
+        (&["-d"], "short d="),
+        // A flag after `--` is an operand, and so is a second `--`.
+        (&["--", "--", "-x"], "operand --\noperand -x"),
+    ];
+
+    for (args, expected) in cases {
+        let run = Command::new(&exe).args(*args).output().expect("the program runs");
+        assert_eq!(run.status.code(), Some(0), "`{}` should exit 0", args.join(" "));
+        assert_eq!(
+            String::from_utf8_lossy(&run.stdout).trim_end(),
+            *expected,
+            "`{}` should read back as itself",
+            args.join(" ")
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `docs/flags.md` §1 — every spelling GNU accepts, on both ports.
+///
+/// The gap this closes is not a missing feature. Before `std.flags`, six
+/// of these rows disagreed with GNU: `cut` refused four of them loudly,
+/// and `base64` answered two of them by **encoding its input and exiting
+/// 0**, because `--decode` is not two bytes so the test for `-d` was
+/// false and the flag was dropped.
+///
+/// And every base64 test in this file passed exactly `-d`. Twelve input
+/// sizes, both directions and three malformed inputs, all through one
+/// spelling of one flag — `line-reading.md` §1's shape again, where the
+/// dimension the suite never varied was the length of a line.
+///
+/// # The expectation is written down, and the reference is a second
+/// opinion
+///
+/// The table carries GNU's answer rather than reading it off whatever
+/// `/usr/bin/cut` happens to be, because **macOS ships BSD**: BSD `cut`
+/// has no `--delimiter` at all, so comparing against it on darwin tests
+/// this program against the wrong specification. The base64 test below
+/// already says this about empty input and BSD's extra newline; this is
+/// the same fact costing a red build before it was applied here.
+///
+/// So: the written answer is the assertion, on every target. Where the
+/// reference *is* GNU — detected by `--version`, which BSD's does not
+/// have — it is checked against the same table, so a wrong expectation
+/// fails on linux rather than being believed everywhere.
+#[test]
+fn both_ports_match_gnu_on_every_spelling() {
+    let data = b"a,b,c\n";
+    let encoded = b"aGk=\n";
+
+    // `(program, args, stdout, exit, whether GNU agrees)`.
+    //
+    // The `false` rows are the divergences `flags.md` §4 keeps on
+    // purpose. They are asserted to still *disagree*, so one that
+    // quietly starts agreeing gets moved rather than forgotten.
+    let cases: &[(&str, &[&str], &str, i32, bool)] = &[
+        ("cut", &["-d,", "-f2"], "b\n", 0, true),
+        ("cut", &["-d", ",", "-f2"], "b\n", 0, true),
+        ("cut", &["--delimiter=,", "--fields=2"], "b\n", 0, true),
+        ("cut", &["--delimiter", ",", "--fields", "2"], "b\n", 0, true),
+        ("cut", &["-d,", "-f", "2"], "b\n", 0, true),
+        ("cut", &["-f2", "-d,"], "b\n", 0, true),
+        ("cut", &["-d,", "-f1,3"], "a,c\n", 0, true),
+        ("cut", &["-d,", "-f2", "--"], "b\n", 0, true),
+        ("cut", &["-x"], "", 1, true),
+        ("cut", &["-d,,", "-f2"], "", 1, true),
+        // §4: no abbreviation, because resolving one needs the option
+        // table this design does not have.
+        ("cut", &["--delim=,", "-f2"], "", 1, false),
+        ("base64", &["-d"], "hi", 0, true),
+        ("base64", &["--decode"], "hi", 0, true),
+        ("base64", &[], "YUdrPQo=\n", 0, true),
+        ("base64", &["--"], "YUdrPQo=\n", 0, true),
+        ("base64", &["-q"], "", 1, true),
+        // §4: `-i` and `-w` are refused rather than accepted and
+        // ignored. Neither is implementable here, and accepting one
+        // would be §1's silent lie in a second place.
+        ("base64", &["-di"], "", 1, false),
+        ("base64", &["-w0"], "", 1, false),
+    ];
+
+    let (cut_dir, cut_exe) = build_example("flags-cut", "examples/cut/cut.ls", "cut");
+    let (b64_dir, b64_exe) = build_example("flags-base64", "examples/base64/base64.ls", "base64");
+
+    fn feed(command: &Path, args: &[&str], input: &[u8]) -> (String, Option<i32>) {
+        let mut child = Command::new(command)
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("the program runs");
+        let mut stdin = child.stdin.take().expect("a piped stdin");
+        let owned = input.to_vec();
+        let writer = std::thread::spawn(move || {
+            let _ = stdin.write_all(&owned);
+            drop(stdin);
+        });
+        let out = child.wait_with_output().expect("it exits");
+        writer.join().expect("the writer thread finishes");
+        (String::from_utf8_lossy(&out.stdout).into_owned(), out.status.code())
+    }
+
+    /// Whether this reference is GNU coreutils rather than BSD.
+    ///
+    /// `--version` is the probe because BSD's `cut` does not have it and
+    /// GNU's does — the same distinction the table exists for.
+    fn is_gnu(path: &Path) -> bool {
+        path.exists()
+            && Command::new(path)
+                .arg("--version")
+                .output()
+                .is_ok_and(|out| String::from_utf8_lossy(&out.stdout).contains("GNU coreutils"))
+    }
+
+    for (program, args, stdout, exit, agrees) in cases {
+        let (exe, input): (&Path, &[u8]) = match *program {
+            "cut" => (&cut_exe, data),
+            _ => (&b64_exe, encoded),
+        };
+        let written = ((*stdout).to_owned(), Some(*exit));
+
+        assert_eq!(
+            feed(exe, args, input),
+            written,
+            "`{program} {}` should answer what `flags.md` §1 says it does",
+            args.join(" ")
+        );
+
+        let reference = PathBuf::from(format!("/usr/bin/{program}"));
+        if !is_gnu(&reference) {
+            continue;
+        }
+        let theirs = feed(&reference, args, input);
+        if *agrees {
+            assert_eq!(
+                theirs,
+                written,
+                "GNU `{program} {}` should answer this too — if it does not, \
+                 the expectation in this table is wrong rather than the port",
+                args.join(" ")
+            );
+        } else {
+            assert_ne!(
+                theirs,
+                written,
+                "`{program} {}` is a documented divergence (`flags.md` §4); \
+                 if it now agrees, move the row rather than deleting it",
+                args.join(" ")
+            );
+        }
+    }
+
+    let _ = std::fs::remove_dir_all(&cut_dir);
+    let _ = std::fs::remove_dir_all(&b64_dir);
+}
+
+/// `docs/first-page.md` §5 — every local documentation link resolves.
+///
+/// This ran by hand at the end of every slice until now, which is the
+/// wrong place for it: a link that rots between one slice and the next
+/// is found by whoever clicks it rather than by the build. 150-odd
+/// links across `README.md`, `AGENTS.md` and `docs/` is more than a
+/// reader should be asked to trust.
+///
+/// Fenced blocks and inline code are stripped first, because
+/// `alloc_slice[a](5, 0)` is `](` followed by a path that is not one.
+#[test]
+fn every_documentation_link_resolves() {
+    let root = repo_root();
+    let mut files: Vec<PathBuf> = vec![root.join("README.md"), root.join("AGENTS.md")];
+    for entry in std::fs::read_dir(root.join("docs")).expect("docs/ is readable") {
+        let path = entry.expect("a readable entry").path();
+        if path.extension().is_some_and(|e| e == "md") {
+            files.push(path);
+        }
+    }
+    files.sort();
+
+    let mut checked = 0;
+    let mut broken: Vec<String> = Vec::new();
+    for file in &files {
+        let source = std::fs::read_to_string(file).expect("a readable document");
+        // Strip fenced blocks, then inline code, then look for `](target)`.
+        let mut text = String::new();
+        let mut fenced = false;
+        for line in source.lines() {
+            if line.trim_start().starts_with("```") {
+                fenced = !fenced;
+                continue;
+            }
+            if !fenced {
+                text.push_str(line);
+                text.push('\n');
+            }
+        }
+        let mut plain = String::new();
+        let mut in_code = false;
+        for c in text.chars() {
+            if c == '`' {
+                in_code = !in_code;
+                continue;
+            }
+            if !in_code {
+                plain.push(c);
+            }
+        }
+
+        let directory = file.parent().expect("a parent directory");
+        let mut rest = plain.as_str();
+        while let Some(at) = rest.find("](") {
+            rest = &rest[at + 2..];
+            let Some(close) = rest.find(')') else { break };
+            let target = &rest[..close];
+            rest = &rest[close + 1..];
+            if target.starts_with("http") || target.starts_with("mailto") || target.starts_with('#')
+            {
+                continue;
+            }
+            // A `#section` suffix names a heading, not a file.
+            let path = target.split('#').next().unwrap_or(target);
+            if path.is_empty() || path.contains(char::is_whitespace) {
+                continue;
+            }
+            checked += 1;
+            if !directory.join(path).exists() {
+                broken.push(format!("{} -> {target}", file.display()));
+            }
+        }
+    }
+
+    assert!(checked > 100, "only {checked} links found; the scan is broken, not the links");
+    assert!(
+        broken.is_empty(),
+        "{} broken documentation link(s):\n{}",
+        broken.len(),
+        broken.join("\n")
+    );
+}
+
+/// `docs/first-page.md` §5 — the commands the first page shows still exist.
+///
+/// `AGENTS.md`'s code blocks are fixtures, for the reason §1 there gives:
+/// a page that teaches something the compiler no longer does is worse
+/// than no page. The same argument reaches the README, whose
+/// "compiler's whole surface" block is the first thing a reader tries.
+///
+/// The check is against `--help`, not against running each one, because
+/// what rots here is a subcommand that was renamed or added — which is
+/// exactly what this caught when it was written: `layout` and
+/// `agent-guidelines` were missing from the block, and `check` had lost
+/// its `--output json`.
+#[test]
+fn the_readme_commands_still_work() {
+    let readme = std::fs::read_to_string(repo_root().join("README.md")).expect("a readable README");
+    let help = Command::new(BIN).arg("--help").output().expect("the compiler runs");
+    let help = String::from_utf8_lossy(&help.stdout).into_owned();
+
+    // Every `lex-sys <word>` the README shows in its surface block.
+    let block = readme
+        .split("### The compiler's whole surface")
+        .nth(1)
+        .expect("the README should still document the surface");
+    let shown: Vec<&str> = block
+        .lines()
+        .take_while(|line| !line.starts_with("###"))
+        .filter_map(|line| line.trim().strip_prefix("lex-sys "))
+        .filter_map(|rest| rest.split_whitespace().next())
+        .filter(|word| !word.starts_with('-'))
+        .collect();
+    assert!(shown.len() >= 6, "the surface block should list the subcommands, found {shown:?}");
+
+    for command in &shown {
+        assert!(
+            help.contains(&format!("lex-sys {command}")),
+            "the README shows `lex-sys {command}` and `--help` does not:\n{help}"
+        );
+    }
+
+    // And the other way: a subcommand the compiler has and the page does
+    // not is the half that goes unnoticed, because nothing breaks.
+    //
+    // Scoped to the `usage:` block, because `--help` opens with a prose
+    // line that also begins "lex-sys" and names no subcommand.
+    let usage = help
+        .split("usage:")
+        .nth(1)
+        .expect("`--help` should have a usage block")
+        .split("\noptions:")
+        .next()
+        .expect("a usage block");
+    for line in usage.lines() {
+        let Some(rest) = line.trim().strip_prefix("lex-sys ") else { continue };
+        let Some(word) = rest.split_whitespace().next() else { continue };
+        if word.starts_with('-') {
+            continue;
+        }
+        assert!(
+            shown.contains(&word),
+            "`lex-sys {word}` exists and the README's surface block does not show it"
+        );
+    }
+}
+
 fn build_example(tag: &str, relative: &str, binary: &str) -> (PathBuf, PathBuf) {
     let dir = scratch(tag);
     let exe = dir.join(binary);

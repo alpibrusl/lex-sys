@@ -26,6 +26,7 @@
 import std.io;
 import std.bytes;
 import std.buffer;
+import std.flags;
 
 // ---------------------------------------------------------- the list -----
 
@@ -135,23 +136,58 @@ fn main(world: World) -> [] int {
     let Split { io, ffi, fs, heap, args } = split(world);
     release(ffi); release(fs);
 
-    var delim = 9;
+    var delim = '\t';
     var spec = "1";
     var usage = false;
+    // `docs/flags.md` §1: this loop used to test for `-d<c>` and
+    // `-f<list>` and nothing else, so four of the seven spellings GNU
+    // accepts came back as a usage error -- `-d ,` and
+    // `--delimiter=,` among them. The shapes are `std.flags`'s now and
+    // what is left here is what the flags *mean*, which is this
+    // program's.
     borrow args as &g in {
-        var n = 1;
-        while n < arg_count(g) {
-            let a = arg(g, n);
-            if bytes.starts_with(a, "-d") && len(a) == 3 {
-                delim = int_of(a[2]);
-            } else {
-                if bytes.starts_with(a, "-f") && len(a) > 2 {
-                    spec = a[2..len(a)];
-                } else {
-                    usage = true;
+        var c = flags.start();
+        var going = true;
+        while going {
+            let (next, step) = flags.step(g, c);
+            c = next;
+            match step {
+                flags.Arg::Short(letter) => {
+                    if letter == 'd' || letter == 'f' {
+                        let (after, given) = flags.value(g, c);
+                        c = after;
+                        if letter == 'd' {
+                            // GNU: "the delimiter must be a single
+                            // character", and an empty one is not one.
+                            if len(given) == 1 { delim = int_of(given[0]); } else { usage = true; }
+                        } else {
+                            if len(given) > 0 { spec = given; } else { usage = true; }
+                        }
+                    } else {
+                        usage = true;
+                    }
                 }
+                flags.Arg::Long(name) => {
+                    if flags.named(name, "delimiter") || flags.named(name, "fields") {
+                        let (after, given) = flags.value(g, c);
+                        c = after;
+                        if flags.named(name, "delimiter") {
+                            if len(given) == 1 { delim = int_of(given[0]); } else { usage = true; }
+                        } else {
+                            if len(given) > 0 { spec = given; } else { usage = true; }
+                        }
+                    } else {
+                        usage = true;
+                    }
+                }
+                // This `cut` is a filter: it reads standard input and
+                // never a named file, because `main` releases `Fs`
+                // before anything runs. So an operand is a usage error
+                // here where GNU would open it -- a divergence about
+                // *files* rather than about flags (`flags.md` §4).
+                flags.Arg::Operand(_) => { usage = true; }
+                flags.Arg::Done => { going = false; }
             }
-            n = n + 1;
         }
     }
     release(args);
