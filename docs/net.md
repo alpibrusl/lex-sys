@@ -154,9 +154,9 @@ half with an asker is the one the grant does not ask about.
 
 > **Recounted (#77): inbound 1, outbound 1.** `examples/fetch/` is the
 > program the next paragraph asks for. One asker is still below the bar,
-> so the status stands. What did cross the bar is narrower: both network
-> programs build `struct sockaddr_in` by hand, and neither can build it
-> correctly for both targets ([`connect.md`](connect.md) §3 and §6).
+> so the status stands. Both network programs build `struct sockaddr_in`
+> by hand, and they are portable only through a BSD compatibility rule
+> ([`connect.md`](connect.md) §3 and §6).
 
 That is the honest state and it is why this document ends at *settled,
 not built*. The bar is two and the outbound side has none, so the next

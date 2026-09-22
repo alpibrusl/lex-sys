@@ -339,10 +339,10 @@ it at `serve/`, so a lex-sys client fetches from a lex-sys server.
 
 Its comments mark the three places where it works around the language,
 and `docs/connect.md` is the report. The address has to be four octets
-because nothing can resolve a name. `connect_to` tries two byte layouts
-for `struct sockaddr_in` because Linux and macOS disagree about the
-first two bytes. And *could not connect* is all it can say, because
-`errno` is behind a pointer.
+because nothing can resolve a name. `struct sockaddr_in` is written in
+the Linux layout, which works on macOS only because BSD forgives it.
+And *could not connect* is all it can say, because `errno` is behind a
+pointer.
 
 ### `buffer/` — growing, written out
 

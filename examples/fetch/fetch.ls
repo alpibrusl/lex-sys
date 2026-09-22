@@ -19,10 +19,10 @@
 //   (`reach.md` §3.1), so this program cannot resolve a host at all.
 // - **The destination is data.** The address comes from `argv`, so no
 //   row written at compile time can name it.
-// - **The address has two layouts.** `struct sockaddr_in` is not the
-//   same bytes on Linux and on macOS, and a program with no struct layout
-//   and no target conditionals cannot write one array that is right on
-//   both. `connect_to` tries each.
+// - **The address is portable by accident.** `struct sockaddr_in` is
+//   not the same bytes on Linux and on macOS. The Linux bytes work on
+//   both only because macOS reads family 0 as `AF_INET` for
+//   compatibility (`docs/connect.md` §3).
 //
 // Like `examples/serve/`, it is `extern fn` declarations against libc
 // through `Ffi("libc")`, and its authority report says so and no more.
@@ -119,26 +119,21 @@ fn port_of[&a](text: &a [byte]) -> [] int {
 // The address
 // ---------------------------------------------------------------------
 
-// `struct sockaddr_in`, sixteen bytes, in one of its two layouts.
+// `struct sockaddr_in`, sixteen bytes, in the Linux layout.
 //
 // Linux:  `sa_family_t sin_family` is two bytes, little-endian: 2, 0.
 // macOS:  `uint8_t sin_len` then `sa_family_t sin_family`, one byte
 //         each: 16, 2.
 //
 // Then both agree: the port big-endian, the four octets, eight zeros.
-// The first two bytes are the only disagreement, and they cannot be
-// reconciled -- Linux reads 16, 2 as family 528, and macOS reads 2, 0
-// as family 0. `examples/serve/` writes the Linux bytes and works on
-// macOS anyway, because BSD `bind` accepts family 0 as `AF_INET` for
-// compatibility. `connect` does not (`docs/connect.md` §3).
-fn address[&o, &a](out: &!a [byte], bsd: bool, octets: &o [byte], port: int) -> [] int {
-    if bsd {
-        out[0] = byte_of(16);
-        out[1] = byte_of(2);
-    } else {
-        out[0] = byte_of(2);
-        out[1] = byte_of(0);
-    }
+// The first two bytes disagree, and Linux refuses the macOS bytes as
+// family 528. The Linux bytes work on macOS only because BSD reads
+// family 0 as `AF_INET` in both `bind` and `connect`, and takes
+// `sin_len` from the length argument. So this array is portable by a
+// compatibility rule, not by being right (`docs/connect.md` §3).
+fn address[&o, &a](out: &!a [byte], octets: &o [byte], port: int) -> [] int {
+    out[0] = byte_of(2);
+    out[1] = byte_of(0);
     out[2] = byte_of(port / 256);
     out[3] = byte_of(port % 256);
     var i = 0;
@@ -151,30 +146,22 @@ fn address[&o, &a](out: &!a [byte], bsd: bool, octets: &o [byte], port: int) -> 
 
 // A connected socket, or -1.
 //
-// Tries the Linux layout, then the BSD one, on a fresh socket each time:
-// POSIX leaves a socket's state unspecified after a failed `connect`.
-// There is no way to ask which platform this is, and no way to read
-// `errno` to learn *why* the first attempt failed -- it is a thread-local
-// reached through a pointer (`docs/connect.md` §4) -- so "the wrong
-// layout" and "nothing is listening" look the same, and a refused
-// connection costs two attempts rather than one.
+// -1 is all a failure can say: *why* it failed is in `errno`, a
+// thread-local reached through a pointer (`docs/connect.md` §4), so
+// "nothing is listening" and "no route to the host" look the same.
 fn connect_to[&f, &o](libc: &f Ffi("libc"), octets: &o [byte], port: int)
     -> [ffi("libc")] int {
     region scratch {
         let addr = alloc_slice[scratch](16, byte_of(0));
-        var attempt = 0;
-        while attempt < 2 {
-            let fd = socket(libc, 2, 1, 0);
-            if fd < 0 {
-                return 0 - 1;
-            }
-            address(addr, attempt == 1, octets, port);
-            if connect(libc, fd, addr) == 0 {
-                return fd;
-            }
-            close(libc, fd);
-            attempt = attempt + 1;
+        let fd = socket(libc, 2, 1, 0);
+        if fd < 0 {
+            return 0 - 1;
         }
+        address(addr, octets, port);
+        if connect(libc, fd, addr) == 0 {
+            return fd;
+        }
+        close(libc, fd);
     }
     return 0 - 1;
 }

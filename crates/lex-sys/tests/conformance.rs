@@ -5886,7 +5886,7 @@ fn fetch_refuses_a_name_it_cannot_resolve() {
 }
 
 /// `docs/connect.md` §3 — `struct sockaddr_in` is two different byte
-/// arrays, and each target accepts only its own.
+/// arrays, and the Linux one is accepted on both targets.
 ///
 /// Linux starts it with a two-byte family, `2, 0`; macOS with a length
 /// byte and a one-byte family, `16, 2`. `examples/serve/` writes the Linux
@@ -5894,8 +5894,13 @@ fn fetch_refuses_a_name_it_cannot_resolve() {
 /// is as forgiving. This probe connects with one layout at a time to a
 /// listener in this process and asserts the answer for the platform it
 /// runs on: each CI runner checks its own row.
+///
+/// The first version of this test asserted that macOS **refuses** `2, 0`,
+/// and the darwin-aarch64 runner said otherwise: BSD reads family 0 as
+/// `AF_INET` in `connect` as well as in `bind`. That is what the
+/// assertions below now pin, and what `connect.md` §3 was corrected to.
 #[test]
-fn each_target_connects_only_with_its_own_address_layout() {
+fn the_linux_address_layout_connects_on_both_targets() {
     let source = "\
 extern fn socket[&f](ffi: &f Ffi(\"libc\"), domain: int, kind: int, proto: int)
     -> [ffi(\"libc\")] int;
@@ -5960,7 +5965,7 @@ fn main(world: World) -> [] int {
     }
     if cfg!(target_os = "macos") {
         assert!(bsd, "macOS should accept its own layout, `16, 2`");
-        assert!(!linux, "macOS should refuse `2, 0`, which it reads as family 0");
+        assert!(linux, "macOS should accept `2, 0` too, reading family 0 as `AF_INET`");
     }
     drop(listener);
     let _ = std::fs::remove_dir_all(&dir);

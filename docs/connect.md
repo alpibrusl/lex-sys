@@ -8,7 +8,7 @@
 > because that is the only way to find out what `connect` needs that the
 > design had not thought of. That program is
 > [`examples/fetch/`](../examples/fetch/fetch.ls): `curl -s` with one
-> method and one protocol version, 348 lines, the same `extern fn`s
+> method and one protocol version, 335 lines, the same `extern fn`s
 > against libc that `examples/serve/` uses. The test suite points it at
 > `examples/serve/` itself, so a lex-sys client fetches from a lex-sys
 > server.
@@ -16,7 +16,8 @@
 > It found four things `net.md` had not written down. Two of them change
 > that design, one confirms a limit that was already known, and one is
 > about portability rather than authority. That last one was never on
-> the list.
+> the list, and it is smaller than it first looked: the first version of
+> §3 was refuted by CI and is corrected in place.
 
 ---
 
@@ -76,7 +77,7 @@ decided which.
 
 ---
 
-## 3. The address has two layouts
+## 3. The address is portable by accident
 
 `struct sockaddr_in` is not the same bytes on the two supported targets:
 
@@ -85,26 +86,37 @@ decided which.
 | Linux | `sin_family` low byte: **2** | `sin_family` high byte: **0** | port (big-endian), four octets, eight zeros |
 | macOS | `sin_len`: **16** | `sin_family`: **2** | the same |
 
-The first two bytes contradict each other. Linux reads `16, 2` as family
-528, and macOS reads `2, 0` as family 0. A program with no struct layout
-and no target conditionals cannot write one array that is right on both.
-`examples/serve/` writes the Linux bytes and has always passed on macOS.
-The reason is BSD compatibility: `bind` accepts family 0 as `AF_INET`,
-and the kernel overwrites `sin_len` from the length argument. It is not
-because the bytes are right.
+The first two bytes contradict each other, and a program with no struct
+layout and no target conditionals can write only one of them.
+`the_linux_address_layout_connects_on_both_targets` measures what each
+target does with each one. It connects to a listener with one layout at
+a time, and each CI runner checks its own row:
 
-`each_target_connects_only_with_its_own_address_layout` measures this
-for `connect`. It connects to a listener with one layout at a time, and
-asserts that each target accepts its own layout and refuses the other.
-On Linux that was measured here: `2, 0` connects and `16, 2` is refused.
-The macOS row is measured by the darwin-aarch64 CI runner.
+| | `2, 0` (Linux bytes) | `16, 2` (macOS bytes) |
+|---|---|---|
+| Linux | connects | **refused**: read as family 528 |
+| macOS | **connects**: family 0 read as `AF_INET`, `sin_len` taken from the length argument | connects |
 
-So `fetch`'s `connect_to` tries both, on a fresh socket each time. That
-is a program working around its language. It is also the first argument
-for socket builtins that has nothing to do with authority: the backend
-knows its target, and a program does not. `net.md` §3 argued for
-builtins so that `Net` could mean something. This argues for them so
-that a network program can be portable at all.
+So one array works on both targets: the Linux one. **But it does so
+through a compatibility rule, not by being right.** BSD kernels accept
+family 0 (`AF_UNSPEC`) as `AF_INET` for old programs that never set it,
+and they overwrite `sin_len` with the length the call was given. That
+is why `examples/serve/`'s `bind` has always passed on macOS, and it
+turns out `connect` follows the same rule.
+
+> **Correction (#77).** This section first said the opposite: that
+> *"no one array is right on both"*, that `connect` on macOS would
+> refuse the Linux bytes, and that `fetch` had to try both layouts.
+> The first two claims came from reading BSD source from memory, not
+> from running anything. The darwin-aarch64 runner refuted the
+> assertion that encoded them, `fetch` lost its second attempt, and the
+> test was renamed to pin what was measured. Linux does refuse the
+> macOS bytes; that half was measured here and stands.
+
+What survives is smaller. Both network programs build the struct by
+hand, with no layout the language knows. They are portable to exactly
+the targets whose kernels forgive the Linux bytes, and a third target
+without that rule would break both of them silently, at run time.
 
 ---
 
@@ -113,11 +125,9 @@ that a network program can be portable at all.
 When `connect` fails it returns -1, and the reason is in `errno`: a
 thread-local that libc reaches through `__errno_location()` on Linux
 and `__error()` on macOS. Both return a pointer, so §1's rule applies
-again. `fetch` therefore cannot tell *nothing is listening* from *wrong
-address layout* from *network unreachable*. It says `could not connect`
-and exits 3, and `connect_to` spends two attempts on a refused
-connection because it cannot know that the first failure was not the
-layout.
+again. `fetch` therefore cannot tell *nothing is listening* from
+*network unreachable* from *permission denied*. It says `could not
+connect` and exits 3.
 
 This is [`reach.md`](reach.md) §3.1's known limit, in the place it
 costs most. A network client's error messages are most of what it tells
@@ -158,18 +168,19 @@ so `Net` itself is still *settled, not built*. That is the honest result
 of adding one program. `the_network_programs_are_counted` pins the count,
 so the next network program has to change it.
 
-One thing did cross the bar, though not the thing `net.md` was about.
-Both network programs build `struct sockaddr_in` by hand, and §3 shows
-that neither can build it correctly for both targets. That is two askers
-for *a target-correct socket address*. It cannot be library code,
-because a library knows no more about the target than a program does. So
-it is the first network operation with a case for being a builtin that
-holds whatever `Net` becomes.
+Both network programs build `struct sockaddr_in` by hand, so there are
+two askers for *a socket address the language knows the layout of*.
+§3 shows the case is weaker than it first looked. Both programs work on
+both targets today, through a BSD compatibility rule. What a builtin
+would buy is portability that does not rest on that rule, and a
+library cannot provide it, because a library knows no more about the
+target than a program does.
 
-It is recorded here, not built. The builtin's shape depends on §1: an
-address builtin that takes octets and a port suits the perimeter answer,
-and a `connect` builtin that takes a name suits the builtin answer.
-Building either before choosing would decide §1 by accident.
+It is recorded here, not built, for two reasons. Nothing is broken on
+the targets this project supports. And the builtin's shape depends on
+§1: an address builtin that takes octets and a port suits the perimeter
+answer, and a `connect` builtin that takes a name suits the builtin
+answer. Building either before choosing would decide §1 by accident.
 
 ---
 
@@ -180,6 +191,6 @@ Building either before choosing would decide §1 by accident.
 | `a_lex_sys_client_fetches_from_a_lex_sys_server` | `fetch` against `examples/serve/`, both exchanges: the body, and exit 0 for 200 and 1 for 404 | — |
 | `fetch_speaks_http_1_0_and_streams_the_body` | the request byte for byte; a blank line split across two reads; a 100,000-byte body, 25 of the client's reads | 5 |
 | `fetch_refuses_a_name_it_cannot_resolve` | a name, three bad addresses and two bad ports are usage errors that say why | 1 |
-| `each_target_connects_only_with_its_own_address_layout` | Linux accepts `2, 0` and refuses `16, 2`, and macOS the reverse, each measured on its own CI runner | 3 |
+| `the_linux_address_layout_connects_on_both_targets` | Linux accepts `2, 0` and refuses `16, 2`; macOS accepts both. Each row is measured on its own CI runner. The first version asserted that macOS refuses `2, 0`, and CI refuted it | 3 |
 | `the_client_and_the_server_differ_only_in_their_symbols` | both reports are the same unbounded `ffi("libc")`; `connect` is in one symbol list and `bind`/`listen`/`accept` in the other | — |
 | `the_network_programs_are_counted` | inbound 1, outbound 1. It used to be `the_only_network_program_is_inbound`, written to fail the day this program arrived | 6 |
