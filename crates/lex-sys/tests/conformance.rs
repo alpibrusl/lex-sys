@@ -3957,6 +3957,50 @@ import std.io;
 fn b2i(b: bool) -> [] int { if b { return 1; } return 0; }
 ";
 
+/// `differential.md` §3.2: skip the core dump a trap would otherwise
+/// cost.
+///
+/// A GitHub Linux runner pipes every crash to `systemd-coredump`, measured
+/// there at 544 ms per trap and slowing as they pile up. For a piped
+/// `core_pattern` the kernel ignores `RLIMIT_CORE` -- except the value
+/// **1**, which it reserves to catch a crashing dump helper and answers
+/// with *"RLIMIT_CORE is set to 1, aborting core"*. Measured with a
+/// half-second helper: limit 0 costs 509 ms per trap, limit 1 costs 5.
+/// Making the binary unreadable does not work there, because systemd also
+/// sets `fs.suid_dumpable = 2`, which dumps non-dumpable processes too.
+/// The trap is unchanged; only the dump goes.
+#[cfg(target_os = "linux")]
+fn without_a_core_dump(command: &mut Command) -> &mut Command {
+    use std::os::unix::process::CommandExt;
+    #[repr(C)]
+    struct Rlimit {
+        current: u64,
+        maximum: u64,
+    }
+    unsafe extern "C" {
+        fn setrlimit(resource: i32, limit: *const Rlimit) -> i32;
+    }
+    const RLIMIT_CORE: i32 = 4;
+    // SAFETY: `setrlimit` is async-signal-safe, touches nothing but the
+    // child's own limits, and allocates nothing, which is what `pre_exec`
+    // requires of the closure it runs between `fork` and `exec`.
+    unsafe {
+        command.pre_exec(|| {
+            let one = Rlimit { current: 1, maximum: 1 };
+            if setrlimit(RLIMIT_CORE, &one) == 0 {
+                Ok(())
+            } else {
+                Err(std::io::Error::last_os_error())
+            }
+        })
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn without_a_core_dump(command: &mut Command) -> &mut Command {
+    command
+}
+
 /// C2(b) of the audit, and the test `fold.rs` had been citing for months
 /// without it existing: **every operator the folder evaluates, on every
 /// pair of boundary operands, gives the same answer folded as the
@@ -4221,20 +4265,6 @@ fn first[&a](a: &a Args) -> [args] int {
         .expect("the compiler runs");
     assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
 
-    // `differential.md` §3.2: a GitHub Linux runner pipes every crash to
-    // `systemd-coredump`, measured at 544 ms per trap and slowing as they
-    // pile up, and a pipe ignores `RLIMIT_CORE`. Linux never dumps a
-    // process whose executable its user cannot read, so the binary is
-    // made execute-only -- for its **owner**, who is the one running it,
-    // which is why this is `0100` and not `0711`. The trap is unchanged;
-    // only the dump goes.
-    #[cfg(target_os = "linux")]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o100))
-            .expect("the runtime binary's mode can be set");
-    }
-
     // Every trap is a process the kernel kills, and each one costs
     // whatever the host does with a crash -- a core dump, or a handler
     // `core_pattern` pipes it to. So the loop is bounded three ways and
@@ -4270,8 +4300,7 @@ fn first[&a](a: &a Args) -> [args] int {
     let mut next = 0;
     while next < cases.len() {
         let began = std::time::Instant::now();
-        let mut child = Command::new(&exe)
-            .arg(next.to_string())
+        let mut child = without_a_core_dump(Command::new(&exe).arg(next.to_string()))
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped())
             .spawn()

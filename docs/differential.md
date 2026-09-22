@@ -181,22 +181,37 @@ a run from case 1111 neither finished nor trapped in 30 s: 270 runs,
 That is **544 ms per trap**, about 230 times the local cost, and it
 slows down as the crashes pile up, until one run exceeded 30 s. So the
 first CI run did not hang. It was paying for 436 core dumps, one at a
-time. Setting `RLIMIT_CORE` to zero would not help, because the kernel
-does not apply that limit when it pipes a dump to a program. What does
-help is that Linux never dumps a process whose executable its user
-cannot read, the same rule that keeps a setuid binary's memory out of a
-core file. So on Linux the test makes the run-time binary execute-only
-for its owner (`0100`). It was checked as an unprivileged user, running
-a binary that user owned, with an unlimited core limit and
-`core_pattern` set to `core`: `0711` left a core file, `0100` did not,
-and both died of `SIGILL`. The trap is unchanged, and only the dump is
-skipped.
+time.
 
-The first attempt used `0711`, and CI came back at 532 ms per trap,
-the same as before. The local check that approved it had run the binary
-as a user who did not own it, so the read bit it tested was the
-"other" bit. The owner's bit stayed set, and the owner is the user
-running the tests.
+The repair took three attempts, and the two that failed are worth
+keeping:
+
+| Attempt | Why it looked right | What CI said |
+|---|---|---|
+| Make the binary `0711` | Linux never dumps a process whose executable its user cannot read. A local check as a *different* user agreed | 532 ms per trap. The owner's read bit was still set, and the owner runs the tests |
+| Make it `0100` | Owner-only execute. Checked locally as the owning user | 928 ms per trap, one run 26 s. systemd's `50-coredump.conf`, the file that installs that `core_pattern`, also sets `fs.suid_dumpable = 2`, and at that setting Linux dumps non-dumpable processes too, as root, through the same pipe |
+| Set the child's `RLIMIT_CORE` to **1** | Measured below, against the runner's configuration reproduced locally | The fix |
+
+A pipe ignores `RLIMIT_CORE`, which is why 0 does nothing. **1** is the
+exception: the kernel reserves it to catch a dump helper that itself
+crashes, and it answers `RLIMIT_CORE is set to 1, aborting core` without
+starting the helper. This was measured here with a `core_pattern` piped
+to a helper that sleeps half a second, which stands in for
+`systemd-coredump`:
+
+| `RLIMIT_CORE` | One trap |
+|---|---|
+| unlimited | 509 ms |
+| 0 | 509 ms |
+| **1** | **5 ms** |
+| 2 | 507 ms |
+
+With a piped `core_pattern` and `fs.suid_dumpable = 2`, which is the
+runner's configuration as far as it can be reproduced off the runner,
+the whole test finishes in 11.3 s. The trap is
+unchanged: the process still dies of `SIGILL` or `SIGFPE`. Only the
+dump is skipped, and only on Linux, where
+`without_a_core_dump` sets the limit between `fork` and `exec`.
 
 ---
 
