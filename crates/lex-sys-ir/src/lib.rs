@@ -217,6 +217,19 @@ pub enum Builtin {
     /// changing what it permits: the row is still `io_write`, and a
     /// faster program is not a more powerful one (§3.2).
     Write,
+    /// `write_err[&i, &b](io: &!i Io, bytes: &b [byte]) -> [err_write] int`
+    /// — the same slice, on the other stream (`docs/standard-error.md`).
+    ///
+    /// A third label under the *same* capability, which is
+    /// `standard-input.md` §2's rule applied a third time: the capability
+    /// is what you hold, the label is what you did with it. Standard error
+    /// is part of the console — same process, same three descriptors, same
+    /// shell redirecting them — so it is not an eighth field on `Split`.
+    ///
+    /// There is no per-byte twin. `putchar` exists beside `write_bytes`
+    /// because it came first, not because two primitives were wanted, and
+    /// a diagnostic is short: §3.2.
+    WriteErr,
     /// `getchar[&i](io: &!i Io) -> [io_read] int` — libc's `getchar`, one
     /// byte in, behind the capability that authorises it.
     ///
@@ -394,6 +407,7 @@ impl Builtin {
     pub const ALL: &'static [Builtin] = &[
         Builtin::PutChar,
         Builtin::Write,
+        Builtin::WriteErr,
         Builtin::GetChar,
         Builtin::Split,
         Builtin::Release,
@@ -423,6 +437,7 @@ impl Builtin {
         match self {
             Builtin::PutChar => "putchar",
             Builtin::Write => "write_bytes",
+            Builtin::WriteErr => "write_err",
             Builtin::GetChar => "getchar",
             Builtin::Split => "split",
             Builtin::Release => "release",
@@ -461,6 +476,11 @@ impl Builtin {
             // and a bulk write on a raw descriptor would interleave
             // wrongly with it. The stream has to be the same one.
             Builtin::Write => Some("fwrite"),
+            // The same call on the other stream. C guarantees `stderr`
+            // is not fully buffered, which is what makes a diagnostic
+            // written just before a trap arrive at all
+            // (`docs/standard-error.md` §1.2).
+            Builtin::WriteErr => Some("fwrite"),
             Builtin::GetChar => Some("getchar"),
             _ => None,
         }
@@ -479,7 +499,7 @@ impl Builtin {
             // leaf-free, so it contributes no values either way, and
             // skipping it keeps the argument positions honest.
             Builtin::PutChar | Builtin::GetChar | Builtin::ArgCount | Builtin::Arg => 1,
-            Builtin::Write => 1,
+            Builtin::Write | Builtin::WriteErr => 1,
             _ => 0,
         }
     }
@@ -495,7 +515,7 @@ impl Builtin {
         match self {
             Builtin::PutChar | Builtin::GetChar | Builtin::ArgCount | Builtin::Arg => 1,
             // Two: the borrowed `Io` and the slice's own region.
-            Builtin::Write => 2,
+            Builtin::Write | Builtin::WriteErr => 2,
             _ => 0,
         }
     }
@@ -522,7 +542,12 @@ impl Builtin {
             // Shared rather than unique because writing reads them, and
             // `strings.md` §4's coercion lets a caller hand over a
             // unique one anyway.
-            Builtin::Write => (
+            //
+            // `write_err` is the same signature on the other stream, so
+            // it shares this arm rather than repeating it: a difference
+            // between them here would be a difference nothing asked for
+            // (`docs/standard-error.md` §3).
+            Builtin::Write | Builtin::WriteErr => (
                 vec![
                     Type::Ref {
                         unique: true,
@@ -612,6 +637,10 @@ impl Builtin {
     pub fn effects(self) -> Effects {
         match self {
             Builtin::PutChar | Builtin::Write => Effects::plain(["io_write"]),
+            // Its own label rather than `io_write`, because the stream is
+            // the unit a reader can act on: `1>` and `2>` are two
+            // redirections (`docs/standard-error.md` §3.1).
+            Builtin::WriteErr => Effects::plain(["err_write"]),
             // `docs/standard-input.md` §2: the same capability, the other
             // direction, its own label. A row saying `[io_write]` does not
             // permit a read, which is what makes the two labels a
@@ -1491,7 +1520,8 @@ pub fn extends_path(prefix: &str, target: &str) -> bool {
 
 /// What owning a value of this type authorises outright (§8.2).
 ///
-/// Owning `Io` discharges `io_read` and `io_write`. Owning `World` discharges everything a
+/// Owning `Io` discharges `io_read`, `io_write` and `err_write`. Owning `World`
+/// discharges everything a
 /// `World` can be split into, because `split` is a function anyone holding
 /// one may call — authority you can reach is authority you have.
 ///
@@ -1508,8 +1538,10 @@ fn discharged_by(defs: &[TypeDef], ty: &Type) -> Effects {
     }
     match index {
         // `docs/standard-input.md` §2.2: owning an `Io` outright discharges
-        // both directions, the way owning an `Fs` discharges both of its.
-        PRELUDE_IO => Effects::plain(["io_read", "io_write"]),
+        // every stream of the console, the way owning an `Fs` discharges
+        // both of its directions. Three labels rather than two since
+        // `docs/standard-error.md` §2.2.
+        PRELUDE_IO => Effects::plain(["io_read", "io_write", "err_write"]),
         // `docs/heap.md` §2: one plain label, because a heap has no parts to
         // name and so nothing to narrow.
         PRELUDE_HEAP => Effects::plain(["heap"]),
@@ -1522,7 +1554,7 @@ fn discharged_by(defs: &[TypeDef], ty: &Type) -> Effects {
         // declaring `[]` is not a gap in the row — it is the parameter list
         // saying something stronger.
         PRELUDE_WORLD => {
-            let mut all = Effects::plain(["io_read", "io_write", "heap", "args"]);
+            let mut all = Effects::plain(["io_read", "io_write", "err_write", "heap", "args"]);
             for name in ["ffi", "fs_read", "fs_write"] {
                 all.union(&Effects::new([Label {
                     name: name.to_owned(),

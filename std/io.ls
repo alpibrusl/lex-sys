@@ -4,12 +4,14 @@ import std.math;
 
 // `std.io` — the console.
 //
-// Every function here takes an `&!i Io` and declares `[io_write]`,
-// because a library does not get to be quieter about its effects than a
-// program would be. That is `docs/modules.md` §6 in practice: `pub`
-// bought these functions reachability and nothing else. A caller reading
-// `[io_write]` on `print_nat` learns the same thing it would learn from
-// a `print_nat` in its own file, which is the point.
+// Every function here takes an `&!i Io` and declares what it did with
+// it -- `[io_write]` for the output stream, `[err_write]` for the
+// diagnostic one (`docs/standard-error.md`) -- because a library does
+// not get to be quieter about its effects than a program would be. That
+// is `docs/modules.md` §6 in practice: `pub` bought these functions
+// reachability and nothing else. A caller reading `[io_write]` on
+// `print_nat` learns the same thing it would learn from a `print_nat` in
+// its own file, which is the point.
 
 // One call, not one per byte (`docs/bulk-io.md`).
 //
@@ -93,4 +95,23 @@ pub fn newline[&i](io: &!i Io) -> [io_write] int {
 
 pub fn space[&i](io: &!i Io) -> [io_write] int {
     return putchar(io, 32);
+}
+
+// A diagnostic, on the stream a shell redirects with `2>`.
+//
+// `docs/standard-error.md` §1 is what this is for and §1.2 is why it is
+// not `write_all`: standard output is fully buffered when it is not a
+// terminal, so a message written just before a trap is never flushed and
+// never arrives. Measured at zero bytes, into a file and through a pipe
+// both.
+//
+// Its row is `[err_write]` and not `[io_write]`, so a caller's report
+// says which stream it wrote to -- which is the whole reason the label
+// is separate (§3.1).
+//
+// There is no `error_nat` and no `error_int`. A number on this stream
+// wants formatting into a buffer and writing once, `std.buffer` already
+// does that, and no program here has asked (§3.2).
+pub fn error_all[&r, &i](io: &!i Io, s: &r [byte]) -> [err_write] int {
+    return write_err(io, s);
 }

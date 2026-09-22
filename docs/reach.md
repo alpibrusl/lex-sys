@@ -232,6 +232,26 @@ be written and says what to do about a `void` function.
 Neither is interesting. Both were found the same way, and neither would
 have been found by reading the documents.
 
+### 4.1 And a third, which this document was credited with naming
+
+`examples/serve/` has four distinct non-zero exits and says nothing on
+any of them, because there was no standard error to say it on. Two other
+documents — `file-handles.md` §1.2 and `ROADMAP.md` — cite *"`reach.md`
+§6's standard-error gap"* as the blocker for their own work.
+
+**There was no such row.** §6 has five and none of them is this; the
+second citation was written from the first. A gap two documents think is
+recorded, and no document records, is worse than one nobody has noticed:
+it looks tracked.
+
+`standard-error.md` is where it is written down, with what the absence
+cost measured, and closed — one more label on `Io`, no new capability,
+for `standard-input.md` §2's reason. It reached this document's programs
+too: `base64` now says `base64: invalid input` where it used to exit 1
+in silence. `examples/serve/`'s four remain, because a server's
+diagnostics want somewhere to *go*, and that is a question about
+logging rather than about a stream.
+
 ---
 
 ## 5. Where narrowing stops

@@ -167,6 +167,13 @@ struct Console {
     /// `stdout`, and macOS's `stdout` is a macro for `__stdoutp`. Both
     /// of this project's CI targets are here, so both are named.
     stdout: DataId,
+    /// libc's `stderr`, the same way (`docs/standard-error.md` §3.3).
+    ///
+    /// Spelled `stderr` by glibc and `__stderrp` on macOS, exactly as
+    /// `stdout` is. C guarantees this stream is not fully buffered, which
+    /// is the property §1.2 measured the absence of: a diagnostic written
+    /// before a trap has already left.
+    stderr: DataId,
 }
 
 /// How many leaves a return value may have before it travels through memory.
@@ -415,7 +422,15 @@ impl<'a> Emitter<'a> {
             .declare_data(stdout_symbol, Linkage::Import, true, false)
             .map_err(|e| CodegenError(e.to_string()))?;
 
-        let console = Console { putchar, getchar, fwrite, stdout };
+        let stderr_symbol = match self.module.isa().triple().operating_system {
+            target_lexicon::OperatingSystem::Darwin(_) => "__stderrp",
+            _ => "stderr",
+        };
+        let stderr = self
+            .module
+            .declare_data(stderr_symbol, Linkage::Import, true, false)
+            .map_err(|e| CodegenError(e.to_string()))?;
+        let console = Console { putchar, getchar, fwrite, stdout, stderr };
 
         // §8.4: a foreign function is an import under the symbol its
         // declaration named. Its capability parameters carry no data and so
@@ -2133,17 +2148,22 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
                         vec![self.builder.ins().sextend(types::I64, result)]
                     }
                     // `docs/bulk-io.md` §3: the whole slice in one call,
-                    // through the same stdio stream `putchar` uses.
-                    Callee::Builtin(Builtin::Write) => {
+                    // through the same stdio stream `putchar` uses — and
+                    // `docs/standard-error.md` §3.3 is the same call on
+                    // the other stream, one label apart in the type
+                    // system and one symbol apart here.
+                    Callee::Builtin(Builtin::Write | Builtin::WriteErr) => {
                         let pointer = self.pointer;
                         let (start, len) = (args[0], args[1]);
-                        let stream = self
-                            .module
-                            .declare_data_in_func(self.console.stdout, self.builder.func);
+                        let target = match callee {
+                            Callee::Builtin(Builtin::WriteErr) => self.console.stderr,
+                            _ => self.console.stdout,
+                        };
+                        let stream = self.module.declare_data_in_func(target, self.builder.func);
                         let stream = self.builder.ins().global_value(pointer, stream);
-                        // `stdout` is a `FILE *` *variable*, so the symbol
-                        // is the address of the pointer and the stream is
-                        // one load away.
+                        // `stdout` and `stderr` are `FILE *` *variables*,
+                        // so the symbol is the address of the pointer and
+                        // the stream is one load away.
                         let stream =
                             self.builder.ins().load(pointer, MemFlags::trusted(), stream, 0);
                         let one = self.builder.ins().iconst(pointer, 1);
@@ -2375,13 +2395,14 @@ mod tests {
                     "{triple} should define `{expected}`, got {names:?}"
                 );
             }
-            // libc spells macOS's `stdout` as `__stdoutp`, so its Mach-O
-            // symbol is `___stdoutp` — three underscores, prefixed once,
+            // libc spells macOS's `stdout` as `__stdoutp` and its
+            // `stderr` as `__stderrp`, so the Mach-O symbols are
+            // `___stdoutp` and `___stderrp` — three underscores, prefixed once,
             // and correct (`docs/bulk-io.md` §3). The check below is a
             // proxy for "prefixed once" and cannot tell that apart from
             // the bug, so the one name that is legitimately spelled with
             // underscores is named here rather than the guard weakened.
-            let spelled_with_underscores = ["___stdoutp", "__stdoutp"];
+            let spelled_with_underscores = ["___stdoutp", "__stdoutp", "___stderrp", "__stderrp"];
             assert!(
                 !names
                     .iter()

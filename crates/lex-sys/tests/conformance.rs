@@ -9,6 +9,7 @@
 //! ```text
 //! //~ STDIN <a line fed to the program>          (default: nothing)
 //! //~ STDOUT <a line the program must print>
+//! //~ STDERR <a line it must print as a diagnostic>  (default: none)
 //! //~ EXIT <the status it must exit with>      (default 0)
 //! //~ ERROR <a substring the refusal must contain>
 //! ```
@@ -17,6 +18,12 @@
 //! input needs input to be tested with, and every runner here fed a
 //! program nothing. It is read from the same header as the rest, so the
 //! accept walker and the example walker got it at the same moment.
+//!
+//! `STDERR` arrived with `docs/standard-error.md` and is checked even
+//! when a fixture declares none, which is the half that matters: a
+//! program writing to the wrong stream now fails a test rather than
+//! passing one quietly, and that is what the two directives being
+//! separate is *for* (§1.1).
 //!
 //! Adding a rule to the language means adding a fixture here. M2 says every
 //! rule needs a must-reject fixture (#1, #2); the discipline starts at M0, when
@@ -133,6 +140,18 @@ fn accepted_programs_build_and_run() {
             "`{name}` printed the wrong thing"
         );
 
+        // Checked whether or not the fixture declares any: a diagnostic
+        // on a program that should have been silent is the failure this
+        // catches, and it is the one the old harness could not see.
+        let mut expected_err = directives(&source, "STDERR").join("\n");
+        if !expected_err.is_empty() {
+            expected_err.push('\n');
+        }
+        assert_eq!(
+            String::from_utf8_lossy(&run.stderr),
+            expected_err,
+            "`{name}` said the wrong thing on standard error"
+        );
         let expected_status: i32 =
             directive(&source, "EXIT").map_or(0, |s| s.trim().parse().expect("a numeric EXIT"));
         assert_eq!(run.status.code(), Some(expected_status), "`{name}` exited wrongly");
@@ -230,6 +249,18 @@ fn every_example_runs_and_prints_what_it_says() {
             "`{name}` printed the wrong thing"
         );
 
+        // Checked whether or not the fixture declares any: a diagnostic
+        // on a program that should have been silent is the failure this
+        // catches, and it is the one the old harness could not see.
+        let mut expected_err = directives(&source, "STDERR").join("\n");
+        if !expected_err.is_empty() {
+            expected_err.push('\n');
+        }
+        assert_eq!(
+            String::from_utf8_lossy(&run.stderr),
+            expected_err,
+            "`{name}` said the wrong thing on standard error"
+        );
         let expected_status: i32 =
             directive(&source, "EXIT").map_or(0, |s| s.trim().parse().expect("a numeric EXIT"));
         assert_eq!(run.status.code(), Some(expected_status), "`{name}` exited wrongly");
@@ -4036,9 +4067,337 @@ fn cut_agrees_with_gnu_cut() {
         }
     }
 
-    // A malformed list is an error, as it is for GNU.
-    let bad = Command::new(&exe).args(["-d,", "-fzzz"]).output().expect("it runs");
-    assert_eq!(bad.status.code(), Some(2), "a malformed `-f` list should exit 2");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The failing half of `cut`, against the same reference as the passing
+/// half (`docs/standard-error.md` §1.3).
+///
+/// This replaces an assertion that said `Some(2)` — the status this
+/// program happened to have, taken from a source comment claiming it was
+/// "the exit status GNU uses", which it was not. The reference was five
+/// lines away the whole time and was asked about eight valid specs and
+/// never about the invalid one, because a failing run produced nothing
+/// to compare. It does now.
+#[test]
+fn cut_reports_a_bad_field_list_like_gnu_cut() {
+    let dir = scratch("example-cut-bad");
+    let exe = dir.join("cut");
+    let build = Command::new(BIN)
+        .args([
+            "build".as_ref(),
+            repo_root().join("examples/cut/cut.ls").as_os_str(),
+            "--std".as_ref(),
+            "-o".as_ref(),
+            exe.as_os_str(),
+        ])
+        .output()
+        .expect("the compiler runs");
+    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+
+    let ours = Command::new(&exe).args(["-d,", "-fzzz"]).output().expect("it runs");
+
+    // Unconditional: whatever the reference says, a diagnostic belongs on
+    // standard error and nothing belongs on standard output.
+    assert!(ours.stdout.is_empty(), "a refused `-f` list should print no data");
+    assert_eq!(
+        String::from_utf8_lossy(&ours.stderr),
+        "cut: invalid field value 'zzz'\n",
+        "a refused `-f` list should say so on standard error"
+    );
+
+    let reference = std::path::Path::new("/usr/bin/cut");
+    let have_reference = Command::new(reference)
+        .arg("--version")
+        .output()
+        .map(|v| v.status.success() && String::from_utf8_lossy(&v.stdout).contains("GNU coreutils"))
+        .unwrap_or(false);
+    if have_reference {
+        let theirs = Command::new(reference).args(["-d,", "-fzzz"]).output().expect("it runs");
+        assert_eq!(ours.status.code(), theirs.status.code(), "GNU cut exits differently");
+        // Two differences that are not wording, so the comparison is of
+        // what follows the program's own name on the first line.
+        //
+        // GNU adds a second line pointing at `--help`, which this
+        // program does not have. And GNU takes its prefix from `argv[0]`,
+        // so invoking it by absolute path makes it call itself
+        // `/usr/bin/cut` — where this program has a literal.
+        // `docs/standard-error.md` §8 is the open question that is, and
+        // this is the measurement under it.
+        assert_eq!(
+            complaint(&ours.stderr),
+            complaint(&theirs.stderr),
+            "GNU cut words it differently"
+        );
+    } else {
+        assert_eq!(ours.status.code(), Some(1), "a malformed `-f` list should exit 1");
+    }
+
+    // The other refusal: an argument this program does not understand.
+    // GNU names the option and this does not, so only the status and the
+    // stream are comparable — which is still two things that were
+    // neither compared nor comparable before (§1.3).
+    let unknown = Command::new(&exe).arg("--nope").output().expect("it runs");
+    assert!(unknown.stdout.is_empty(), "an unrecognised argument should print no data");
+    assert_eq!(
+        String::from_utf8_lossy(&unknown.stderr),
+        "cut: usage: cut -d<c> -f<list>\n",
+        "an unrecognised argument should say so on standard error"
+    );
+    if have_reference {
+        let theirs = Command::new(reference).arg("--nope").output().expect("it runs");
+        assert_eq!(unknown.status.code(), theirs.status.code(), "GNU cut exits differently");
+    } else {
+        assert_eq!(unknown.status.code(), Some(1));
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `docs/standard-error.md` §1.2, which is the measurement the whole
+/// design turns on.
+///
+/// Standard output is fully buffered when it is not a terminal, and a
+/// trap does not flush it — so a program that says what is wrong and
+/// then dies says nothing at all. Measured before this slice at **zero
+/// bytes**, into a file and through a pipe both.
+///
+/// C guarantees `stderr` is not fully buffered, so the same message on
+/// the other stream has already left. That is a property of the stream
+/// this compiler picked rather than of anything lex-sys does, which is
+/// exactly why it is worth a test: the day the backend reaches for
+/// POSIX `write`, or a different stream, this is what notices.
+#[test]
+fn a_diagnostic_survives_a_trap() {
+    let dir = scratch("stderr-trap");
+    let source = dir.join("trap.ls");
+    std::fs::write(
+        &source,
+        "fn main(world: World) -> [] int {\n\
+        \x20   let Split { io, ffi, fs, heap, args } = split(world);\n\
+        \x20   release(ffi); release(fs); release(heap); release(args);\n\
+        \x20   var bad = 0;\n\
+        \x20   borrow mut io as &!i in {\n\
+        \x20       write_bytes(i, \"on stdout\\n\");\n\
+        \x20       write_err(i, \"on stderr\\n\");\n\
+        \x20       // `byte_of` traps outside 0..255 (`strings.md` §2).\n\
+        \x20       bad = int_of(byte_of(300));\n\
+        \x20   }\n\
+        \x20   release(io);\n\
+        \x20   return bad;\n\
+        }\n",
+    )
+    .expect("the fixture is written");
+
+    let exe = dir.join("trap");
+    let build = Command::new(BIN)
+        .args(["build".as_ref(), source.as_os_str(), "-o".as_ref(), exe.as_os_str()])
+        .output()
+        .expect("the compiler runs");
+    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+
+    let run = Command::new(&exe).output().expect("it runs");
+    assert!(!run.status.success(), "the fixture is supposed to trap");
+    assert_eq!(
+        String::from_utf8_lossy(&run.stderr),
+        "on stderr\n",
+        "the diagnostic did not survive the trap"
+    );
+    // The other half, and the reason the first half matters: the same
+    // message on the output stream is gone.
+    assert!(
+        run.stdout.is_empty(),
+        "standard output flushed on a trap, which would make §1.2's argument moot: {:?}",
+        String::from_utf8_lossy(&run.stdout)
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `docs/standard-error.md` §4: the negative half of the authority report
+/// must not lie about a program whose entire output is a diagnostic.
+///
+/// A new label with no entry in the report's table produces exactly one
+/// wrong sentence — "never touches the console" — about a program that
+/// touches nothing else. `authority.md` §2.2 is why that is the half
+/// worth guarding: an absent label is a proof, and a proof of the wrong
+/// thing is worse than no report.
+#[test]
+fn a_diagnostic_only_program_touches_the_console() {
+    let dir = scratch("stderr-authority");
+    let source = dir.join("complain.ls");
+    std::fs::write(
+        &source,
+        "fn shout[&i](io: &!i Io) -> [err_write] int {\n\
+        \x20   return write_err(io, \"only a diagnostic\\n\");\n\
+        }\n\
+        \n\
+        fn main(world: World) -> [] int {\n\
+        \x20   let Split { io, ffi, fs, heap, args } = split(world);\n\
+        \x20   release(ffi); release(fs); release(heap); release(args);\n\
+        \x20   borrow mut io as &!i in { shout(i); }\n\
+        \x20   release(io);\n\
+        \x20   return 1;\n\
+        }\n",
+    )
+    .expect("the fixture is written");
+
+    let report =
+        Command::new(BIN).arg("authority").arg(&source).output().expect("the compiler runs");
+    assert!(report.status.success(), "{}", String::from_utf8_lossy(&report.stderr));
+    let text = String::from_utf8_lossy(&report.stdout);
+
+    assert!(text.contains("err_write"), "the report should name the label:\n{text}");
+    assert!(
+        !text.contains("the console"),
+        "a program whose whole output is a diagnostic touches the console:\n{text}"
+    );
+    // The rest of the negative half still holds, so the entry narrowed
+    // the claim rather than removing it.
+    for absent in ["the filesystem", "the heap", "the command line", "foreign code"] {
+        assert!(text.contains(absent), "the report should still say `{absent}`:\n{text}");
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Build one of the `examples/` programs into a scratch directory.
+fn build_example(tag: &str, relative: &str, binary: &str) -> (PathBuf, PathBuf) {
+    let dir = scratch(tag);
+    let exe = dir.join(binary);
+    let build = Command::new(BIN)
+        .args([
+            "build".as_ref(),
+            repo_root().join(relative).as_os_str(),
+            "--std".as_ref(),
+            "-o".as_ref(),
+            exe.as_os_str(),
+        ])
+        .output()
+        .expect("the compiler runs");
+    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+    (dir, exe)
+}
+
+/// A reference tool's diagnostic, with its own name taken off the front.
+///
+/// GNU takes that name from `argv[0]`, so a tool invoked by absolute path
+/// calls itself `/usr/bin/cut` where this repository's programs carry a
+/// literal. That difference is not wording, it is an open question
+/// (`docs/standard-error.md` §8), so the comparison is of what follows.
+///
+/// Only the first line: GNU often adds a second pointing at `--help`.
+fn complaint(stream: &[u8]) -> String {
+    String::from_utf8_lossy(stream)
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .split_once(": ")
+        .map_or_else(String::new, |(_, rest)| rest.to_owned())
+}
+
+/// Whether the system's tool at `path` is GNU coreutils' rather than
+/// BSD's, which is a different program with different wording.
+fn is_gnu(path: &Path) -> bool {
+    Command::new(path)
+        .arg("--version")
+        .output()
+        .map(|v| v.status.success() && String::from_utf8_lossy(&v.stdout).contains("GNU coreutils"))
+        .unwrap_or(false)
+}
+
+/// `docs/standard-error.md` §7, and `file-handles.md` §1.2's other half.
+///
+/// That section measured a `sort` which answered a file it could not read
+/// and a file too large to hold with the same silence, distinguishable
+/// only by an exit status: *"still not distinguishable to a person,
+/// because neither prints anything"*. One of the two is now, and this is
+/// it — the other needs a file past 1 GiB and 1,025 MB of resident
+/// memory to reach, so it stays a hand check (§7).
+#[test]
+fn sort_names_the_file_it_cannot_read() {
+    let (dir, exe) = build_example("example-sort-missing", "examples/sort/sort.ls", "sort");
+    let missing = dir.join("no-such-file.txt");
+    let path = missing.to_string_lossy().into_owned();
+
+    let ours = Command::new(&exe).arg(&missing).output().expect("it runs");
+    assert_eq!(ours.status.code(), Some(2), "a file that is not there should exit 2");
+    assert!(ours.stdout.is_empty(), "a failed read should print no data");
+    assert_eq!(
+        String::from_utf8_lossy(&ours.stderr),
+        format!("sort: cannot read: {path}\n"),
+        "a failed read should name the file on standard error"
+    );
+
+    let reference = Path::new("/usr/bin/sort");
+    if is_gnu(reference) {
+        let theirs = Command::new(reference).arg(&missing).output().expect("it runs");
+        assert_eq!(ours.status.code(), theirs.status.code(), "GNU sort exits differently");
+        // GNU appends the errno string, which `fs_read` does not carry
+        // (§6, and `file-handles.md` §3's `Failed(int)` is the shape
+        // that would). Everything before it is the same claim.
+        assert!(
+            complaint(&theirs.stderr).starts_with(&complaint(&ours.stderr)),
+            "GNU sort words it differently: {}",
+            complaint(&theirs.stderr)
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `docs/standard-error.md` §7: the third program, and the one where the
+/// diagnostic is a single line with nothing in it that varies.
+///
+/// `base64 -d` exits 1 on a byte outside the alphabet — it always did —
+/// and said nothing while doing it, which is the row §1 measured at 22
+/// bytes for GNU and 0 for this.
+#[test]
+fn base64_reports_invalid_input_like_gnu_base64() {
+    let (dir, exe) = build_example("example-base64-bad", "examples/base64/base64.ls", "base64");
+
+    /// Feed `input` on stdin and hand back the whole result.
+    fn run(cmd: &Path, args: &[&str], input: &str) -> std::process::Output {
+        let mut child = Command::new(cmd)
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("the program runs");
+        let text = input.to_owned();
+        let mut stdin = child.stdin.take().expect("stdin");
+        std::thread::spawn(move || {
+            let _ = stdin.write_all(text.as_bytes());
+        });
+        child.wait_with_output().expect("it finishes")
+    }
+
+    let ours = run(&exe, &["-d"], "a@b\n");
+    assert_eq!(ours.status.code(), Some(1), "a byte outside the alphabet should exit 1");
+    assert_eq!(
+        String::from_utf8_lossy(&ours.stderr),
+        "base64: invalid input\n",
+        "a refused decode should say so on standard error"
+    );
+
+    // And a valid decode stays silent, which is the half a new stream
+    // makes it possible to get wrong.
+    let good = run(&exe, &["-d"], "aGVsbG8K\n");
+    assert_eq!(good.status.code(), Some(0));
+    assert_eq!(String::from_utf8_lossy(&good.stdout), "hello\n");
+    assert!(good.stderr.is_empty(), "a successful decode should say nothing");
+
+    let reference = Path::new("/usr/bin/base64");
+    if is_gnu(reference) {
+        let theirs = run(reference, &["-d"], "a@b\n");
+        assert_eq!(ours.status.code(), theirs.status.code(), "GNU base64 exits differently");
+        assert_eq!(
+            complaint(&ours.stderr),
+            complaint(&theirs.stderr),
+            "GNU base64 words it differently"
+        );
+    }
 
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -81,6 +81,7 @@ could not have been known without doing it.
 $ lex-sys authority examples/base64/base64.ls --std
 performs
     args
+    err_write
     io_read
     io_write
 never touches
@@ -89,9 +90,11 @@ never touches
     foreign code
 ```
 
-Three lines, and every one of them is *right* in a way that is checkable
-from outside the program: a codec reads its input, writes its output and
-parses a flag. It opens no file. It allocates nothing. It calls no C.
+Four lines, and every one of them is *right* in a way that is checkable
+from outside the program: a codec reads its input, writes its output,
+parses a flag, and complains when the input is not base64.
+(`err_write` is the newest and is the whole of `standard-error.md`; this
+program exited 1 in silence until then.) It opens no file. It allocates nothing. It calls no C.
 
 Compare `reach.md` §5, where the same tool says `ffi("libc")` about a web
 server and cannot say `net`. **The difference is not the tool, it is
@@ -322,6 +325,7 @@ the indentation was.
 ```
 performs
     args
+    err_write
     fs_read("")
     heap
     io_read

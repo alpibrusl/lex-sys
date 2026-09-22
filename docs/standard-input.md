@@ -41,6 +41,13 @@ The console is the same shape. `Io` is the capability; reading from it
 and writing to it are two directions of one authority, and each gets a
 label.
 
+> `standard-error.md` applies this a third time and finds the rule holds
+> without amendment: standard error is a third *stream* rather than a
+> third direction, `err_write` is its label, and it is still not a new
+> capability. §2.1 there says what that widens — a grant of `Io` reaches
+> descriptor 2 now, where before it could not — and why the row is what
+> keeps that honest.
+
 ### 2.1 Which means the existing label is renamed
 
 `putchar`'s effect is spelled `io` today. Add reading and that becomes a

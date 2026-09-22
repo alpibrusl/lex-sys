@@ -88,8 +88,11 @@ $ sort /nope/missing.txt ; echo $?
 2
 ```
 
-Silent because there is no standard error to be loud on (`reach.md`
-§6). So §9.1's finding is sharper than §9.1 put it: `fs_read` cannot
+Silent because there was no standard error to be loud on. This document
+filed that under `reach.md` §6, and **`reach.md` never named it** — not
+in §6, not anywhere; the citation pointed at a table of five rows, none
+of which was this. `standard-error.md` §1 is where the gap actually got
+written down, and closed. So §9.1's finding is sharper than §9.1 put it: `fs_read` cannot
 report truncation, **and the workaround cannot report its own failure
 either**. A program that hit the ceiling looked exactly like a typo in a
 filename.
@@ -100,12 +103,20 @@ against `-1` for "could not read it", and `main` exits **3** rather than
 folding it into the **2** GNU uses for a file that is not there. So the
 two are distinguishable *to a script*.
 
-They are still not distinguishable to a **person**, because neither
-prints anything. That needs standard error, which `reach.md` §6 already
-names as a gap, and no amount of work inside `sort.ls` reaches it. An
-exit status is the whole vocabulary this program has.
+They were still not distinguishable to a **person**, because neither
+printed anything, and no amount of work inside `sort.ls` reached that:
+an exit status was the whole vocabulary this program had.
 
 That is the argument for handles. Not the 2.75×.
+
+> **Fixed, and again it did not need handles** (`standard-error.md`).
+> `sort` now says `sort: cannot read: <path>` and
+> `sort: file too large: <path>`, on a stream a redirect of the output
+> does not capture. What is still missing is the *reason* a read failed
+> — GNU names the errno string and `fs_read` answers a bare `-1` — which
+> is §3's `Failed(int)` and belongs to this document. Two of the three
+> things §1 was written to motivate have now been fixed without the
+> design it motivates, which is worth noticing twice.
 
 ---
 
@@ -272,4 +283,5 @@ that currently cannot be written correctly at all.
 | Writing through a handle | Symmetric, and deliberately not designed with the read side. `bulk-io.md` §3.3 declined to design the input half alongside the output half for the same reason, and that turned out right |
 | Whether `End` can be observed twice | Reading past the end: `End` again, or `Failed`? POSIX says a repeat read at EOF answers 0 again. Probably `End`, and it should be a fixture rather than a paragraph |
 | ~~`examples/sort/`'s 8 MiB ceiling~~ | **Done.** §1.1 — fifteen attempts reach 1 GiB, and a fixture past the old bound is in the conformance suite. It never needed handles, which is worth noticing: the bug the design doc was written to motivate turned out to be separable from the design |
-| Telling a person *why* a file failed | §1.2 is half-fixed: a script can tell exit 3 from exit 2, a person cannot tell anything, because there is nothing to print on. `reach.md` §6's standard-error gap is the blocker and it is small — smaller than this document |
+| ~~Telling a person *that* a file failed~~ | **Done**, and not by this document — `standard-error.md`. §1.2's half-fix is a whole one: exit 3 against exit 2 for a script, and a named path on standard error for a person. The blocker was cited here as "`reach.md` §6's standard-error gap", which was a gap no document had recorded |
+| Telling a person *why* it failed | The half that is left, and the half this document owns: `fs_read` answers `-1` with no reason attached, so `sort` can name the path and not the cause where GNU names both. §3's `Failed(int)` is the designed shape — which makes it an argument for handles that survived §1's other two evaporating |

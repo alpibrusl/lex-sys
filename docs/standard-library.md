@@ -85,8 +85,10 @@ question is open.
 | `print_int(io, n)` | Any integer, with the sign |
 | `print_pad(io, n, width)` | Right-aligned in a field, for columns |
 | `newline(io)`, `space(io)` | |
+| `error_all(io, s)` | A slice, on the *other* stream — `[err_write]`, not `[io_write]` (`standard-error.md`) |
 
-Every one of these takes an `&!i Io` and declares `[io_write]`, because
+Every one of these takes an `&!i Io` and declares what it did with it —
+`[io_write]` for all but the last, `[err_write]` for `error_all`, because
 a library does not get to be quieter about its effects than a program
 would be. That is `modules.md` §6 in practice: `pub` bought these
 functions reachability and nothing else.
@@ -261,6 +263,7 @@ Three things, and the second is a language bug this slice fixed.
 | `Option` / `Result` over `res` types | Mode polymorphism, §12 |
 | Versioning the library separately from the compiler | §2.1. A package story, which is `modules.md` §7's open question too |
 | An enum instead of `-1` | `standard-input.md` §6, now for a third set of operations |
+| `error_nat`, and what goes in front of a diagnostic | `standard-error.md` §3.2 and §8. A number on that stream wants `std.buffer` and one write, which is writable today; the prefix — `sort:`, `cut:` — is written out at eleven call sites, and what stops it being a function is where the name comes from, since `arg(g, 0)` needs a capability the failure site may have released |
 
 ---
 
