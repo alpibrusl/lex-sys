@@ -185,7 +185,7 @@ neither.
 |---|---|
 | ~~`Option[T]` / `Result[T]` in `std`~~ | **Done** — `docs/collections.md`, along with `List` and `Vec` |
 | ~~Bounds on a generic *type*'s parameters~~ | **Done, and the reasoning here was wrong.** It is true that `val struct X[T]` implies `T: val`, and that is the *only* case where it does: a `res` aggregate promises nothing about its parameters, and `res struct Vec[T: val]` is exactly what a vector needs — it owns an allocation, its elements are copyable. Writing the bound is refused on a `val` declaration and required on the others. `collections.md` §3 |
-| Effect polymorphism | A function generic over the *row* it performs. Named nowhere yet, and much larger |
+| ~~Effect polymorphism~~ | **Answered, no** — [`effect-polymorphism.md`](effect-polymorphism.md). This row and `mode-polymorphism.md` §8 were the entire design, and counting by reading says the feature has nothing to quantify over: **537 functions here write a row and not one could be polymorphic in it**. A row is fixed at the declaration (`Signature.effects`, read straight off it by every caller), and the two things a function is generic over — types and regions — cannot select a callee. The nearest asker, `io.write_all` against `io.error_all`, differs by the *builtin* as well as the row, so collapsing it needs a function value: row polymorphism is the shadow of higher-order code, and `Rule::NoFunctionValues` refuses that with a fixture |
 
 ---
 
