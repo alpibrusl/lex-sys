@@ -1,4 +1,5 @@
 //~ ERROR the pattern binds 1
+//~ RULE arity-mismatch
 
 enum Shape { Rect(int, int) }
 

@@ -9,6 +9,7 @@
 // This fixture exists to record that the narrowing was deliberate rather
 // than accidental.
 //~ ERROR this divides by zero
+//~ RULE constant-traps
 
 fn main(world: World) -> [] int {
     let Split { io, ffi, fs, heap, args } = split(world);

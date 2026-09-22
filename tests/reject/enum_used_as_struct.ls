@@ -1,4 +1,5 @@
 //~ ERROR `Shape` is an enum, not a struct
+//~ RULE not-a-struct
 
 enum Shape { Circle(int) }
 

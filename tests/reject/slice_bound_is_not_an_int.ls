@@ -1,4 +1,5 @@
 //~ ERROR expected `int`, found `bool`
+//~ RULE type-mismatch
 
 // `docs/slicing.md` §1: both bounds are `int`.
 //

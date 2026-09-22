@@ -1,4 +1,5 @@
 //~ ERROR performs `io_read`, which its row [io_write] does not declare
+//~ RULE effect-not-declared
 
 // `docs/standard-input.md` §2.1, and the fixture the whole rename is
 // for.

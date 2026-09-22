@@ -1,4 +1,5 @@
 //~ ERROR this statement is unreachable
+//~ RULE unreachable-statement
 
 fn main() -> [] int {
     return 0;

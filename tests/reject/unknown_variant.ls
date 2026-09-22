@@ -1,4 +1,5 @@
 //~ ERROR `Shape` has no variant `Blob`
+//~ RULE unknown-name
 
 enum Shape { Circle(int) }
 

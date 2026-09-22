@@ -1,4 +1,5 @@
 //~ ERROR performs `io_write`, which its row [] does not declare
+//~ RULE effect-not-declared
 
 // §7.2: the check at a call site is that the callee's row is a subset of the
 // enclosing function's declared row. `putchar` performs `io_write` and this row is

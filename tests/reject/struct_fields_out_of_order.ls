@@ -1,4 +1,5 @@
 //~ ERROR declaration order
+//~ RULE field-order
 
 // `docs/defined-behaviour.md` §3: the order you read is the order it runs.
 //

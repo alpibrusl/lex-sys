@@ -1,4 +1,5 @@
 //~ ERROR uniquely borrowed here, so nothing else may read it
+//~ RULE borrow-conflict
 
 // §5 rule 2: locked means nothing else may touch `c` at all -- not even a
 // read. That is stronger than frozen, and it is what makes `&!` mean unique:

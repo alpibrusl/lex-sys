@@ -1,4 +1,5 @@
 //~ ERROR a reference may not outlive its region
+//~ RULE reference-escapes-region
 
 // `docs/heap.md` §3: `contents` is region-preserving, and that is the whole
 // of its safety story.

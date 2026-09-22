@@ -1,4 +1,5 @@
 //~ ERROR ended by `unbox`
+//~ RULE linear-value-taken-apart
 
 // §3 and §4.1: a `Box` has no fields on purpose.
 //

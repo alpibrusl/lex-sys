@@ -1,4 +1,5 @@
 //~ ERROR `Vec` bounds `T` by `val`, and `Ticket` is `res`
+//~ RULE mode-bound-violated
 
 // `docs/collections.md` §3: the bound is kept where the type argument is
 // supplied, which is the caller's own file rather than the library's.

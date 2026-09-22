@@ -1,4 +1,5 @@
 //~ ERROR missing field `y` in `Point`
+//~ RULE missing-field
 
 struct Point { x: int, y: int }
 

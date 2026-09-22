@@ -1,4 +1,5 @@
 //~ ERROR cannot be narrowed to
+//~ RULE capability-not-narrowable
 
 // `docs/filesystem.md` §1: `Fs` narrows by the same prefix extension `Ffi`
 // uses (§7.4), which means it narrows in one direction only.

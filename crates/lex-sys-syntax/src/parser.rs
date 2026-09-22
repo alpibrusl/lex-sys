@@ -5,6 +5,7 @@
 
 use crate::ast::*;
 use crate::lexer::{Token, TokenKind, tokenize};
+use crate::rules::Rule;
 use crate::span::{Diagnostic, Span};
 
 pub fn parse(source: &str) -> Result<Ast, Diagnostic> {
@@ -110,12 +111,20 @@ impl<'a> Parser<'a> {
         if tok.kind == kind {
             Ok(self.bump())
         } else {
-            Err(self.err(format!("expected {}, found {}", kind.describe(), tok.kind.describe())))
+            Err(self.err(
+                Rule::TypeMismatch,
+                format!("expected {}, found {}", kind.describe(), tok.kind.describe()),
+            ))
         }
     }
 
-    fn err(&self, message: impl Into<String>) -> Diagnostic {
-        Diagnostic::new(message, self.peek().span)
+    /// A refusal at the token the parser is looking at.
+    ///
+    /// The rule is passed in rather than derived, for
+    /// `docs/agent-errors.md` §3's reason: the site knows which rule it
+    /// is enforcing and a regular expression over the sentence does not.
+    fn err(&self, rule: Rule, message: impl Into<String>) -> Diagnostic {
+        Diagnostic::new(rule, message, self.peek().span)
     }
 
     // ---- items ---------------------------------------------------------
@@ -134,12 +143,14 @@ impl<'a> Parser<'a> {
                     let keyword = self.bump();
                     if declared_module {
                         return Err(Diagnostic::new(
+                            Rule::ProgramShape,
                             "a file declares at most one module",
                             keyword.span,
                         ));
                     }
                     if seen_item {
                         return Err(Diagnostic::new(
+                            Rule::ProgramShape,
                             "a `module` declaration is the first item in its file",
                             keyword.span,
                         ));
@@ -197,19 +208,25 @@ impl<'a> Parser<'a> {
                             self.enum_decl(Some(mode), Some(keyword.span), public)?
                         }
                         other => {
-                            return Err(self.err(format!(
-                                "expected `struct` or `enum` after {}, found {}",
-                                keyword.kind.describe(),
-                                other.describe()
-                            )));
+                            return Err(self.err(
+                                Rule::TypeMismatch,
+                                format!(
+                                    "expected `struct` or `enum` after {}, found {}",
+                                    keyword.kind.describe(),
+                                    other.describe()
+                                ),
+                            ));
                         }
                     }
                 }
                 other => {
-                    return Err(self.err(format!(
-                        "expected `fn`, `extern`, `struct`, `enum` or `static`, found {}",
-                        other.describe()
-                    )));
+                    return Err(self.err(
+                        Rule::TypeMismatch,
+                        format!(
+                            "expected `fn`, `extern`, `struct`, `enum` or `static`, found {}",
+                            other.describe()
+                        ),
+                    ));
                 }
             };
         }
@@ -307,9 +324,10 @@ impl<'a> Parser<'a> {
         let (generics, _, regions, _) = self.declaration_params()?;
         if let Some(first) = generics.first() {
             let _ = first;
-            return Err(
-                self.err("a foreign function takes no type parameters; C has none to instantiate")
-            );
+            return Err(self.err(
+                Rule::ForeignDeclaration,
+                "a foreign function takes no type parameters; C has none to instantiate",
+            ));
         }
 
         self.expect(TokenKind::LParen)?;
@@ -419,11 +437,13 @@ impl<'a> Parser<'a> {
         let (generics, bounds, regions, _) = self.declaration_params()?;
         if let Some(region) = regions.first() {
             let _ = region;
-            return Err(self
-                .err("a type declaration has no region parameters; only a function can take one"));
+            return Err(self.err(
+                Rule::RegionMismatch,
+                "a type declaration has no region parameters; only a function can take one",
+            ));
         }
         if mode == Some(Mode::Val) && bounds.iter().any(Option::is_some) {
-            return Err(self.err(
+            return Err(self.err(Rule::ModeBoundViolated,
                 "a `val` declaration already bounds its parameters: `val struct X[T]` means `T` is `val`, so the bound says nothing new; a `res` or undeclared one is where writing it means something",
             ));
         }
@@ -521,12 +541,12 @@ impl<'a> Parser<'a> {
                                 Some(Mode::Val)
                             }
                             TokenKind::Res => {
-                                return Err(self.err(
+                                return Err(self.err(Rule::ModeBoundViolated,
                                     "there is no `res` bound: an unbounded parameter is already checked as `res`, which is the stronger obligation",
                                 ));
                             }
                             other => {
-                                return Err(self.err(format!(
+                                return Err(self.err(Rule::TypeMismatch, format!(
                                     "expected `val` after `:`, found {}",
                                     other.describe()
                                 )));
@@ -643,7 +663,7 @@ impl<'a> Parser<'a> {
         let mut stmts = Vec::new();
         while self.peek().kind != TokenKind::RBrace {
             if self.peek().kind == TokenKind::Eof {
-                return Err(self.err("expected `}`, found end of file"));
+                return Err(self.err(Rule::TypeMismatch, "expected `}`, found end of file"));
             }
             stmts.push(self.stmt()?);
         }
@@ -693,6 +713,7 @@ impl<'a> Parser<'a> {
         if self.peek().kind == TokenKind::LParen {
             if mutable {
                 return Err(self.err(
+                    Rule::PatternShape,
                     "a destructuring binding takes a value apart once; write `let`, not `var`",
                 ));
             }
@@ -705,7 +726,7 @@ impl<'a> Parser<'a> {
                 // two statements, and the message should be the one that
                 // says which two.
                 if self.peek().kind == TokenKind::LParen {
-                    return Err(self.err(
+                    return Err(self.err(Rule::PatternShape,
                         "a pattern does not nest; bind the inner tuple to a name here and take it apart in the next statement",
                     ));
                 }
@@ -743,6 +764,7 @@ impl<'a> Parser<'a> {
         if self.peek().kind == TokenKind::LBrace {
             if mutable {
                 return Err(self.err(
+                    Rule::PatternShape,
                     "a destructuring binding takes a value apart once; write `let`, not `var`",
                 ));
             }
@@ -835,7 +857,7 @@ impl<'a> Parser<'a> {
         let mut arms = Vec::new();
         while self.peek().kind != TokenKind::RBrace {
             if self.peek().kind == TokenKind::Eof {
-                return Err(self.err("expected `}`, found end of file"));
+                return Err(self.err(Rule::TypeMismatch, "expected `}`, found end of file"));
             }
             let pattern = self.pattern()?;
             self.expect(TokenKind::FatArrow)?;
@@ -905,11 +927,14 @@ impl<'a> Parser<'a> {
         self.expect(TokenKind::Amp)?;
         let bang = self.eat(TokenKind::Bang);
         if bang != unique {
-            return Err(self.err(if unique {
-                "`borrow mut` binds a unique reference; write `as &!r`"
-            } else {
-                "`as &!r` binds a unique reference; write `borrow mut`"
-            }));
+            return Err(self.err(
+                Rule::PatternShape,
+                if unique {
+                    "`borrow mut` binds a unique reference; write `as &!r`"
+                } else {
+                    "`as &!r` binds a unique reference; write `borrow mut`"
+                },
+            ));
         }
         let region = self.ident()?;
         self.expect(TokenKind::In)?;
@@ -1046,6 +1071,7 @@ impl<'a> Parser<'a> {
                         let value = self.int_value(tok, false)?;
                         let Ok(index) = u32::try_from(value) else {
                             return Err(Diagnostic::new(
+                                Rule::LiteralForm,
                                 "a tuple component is named by its position, counting from 0",
                                 tok.span,
                             ));
@@ -1243,7 +1269,7 @@ impl<'a> Parser<'a> {
                     }
                     _ => {
                         if qualifier.is_some() {
-                            return Err(self.err(
+                            return Err(self.err(Rule::UnknownName,
                                 "a qualified name reaches a function, a type or a variant in that module, not a value",
                             ));
                         }
@@ -1273,7 +1299,10 @@ impl<'a> Parser<'a> {
                 let end = self.expect(TokenKind::RParen)?.span;
                 Ok(self.ast.push_expr(Expr::Tuple(parts), tok.span.to(end)))
             }
-            other => Err(self.err(format!("expected an expression, found {}", other.describe()))),
+            other => Err(self.err(
+                Rule::TypeMismatch,
+                format!("expected an expression, found {}", other.describe()),
+            )),
         }
     }
 
@@ -1286,11 +1315,12 @@ impl<'a> Parser<'a> {
     /// follows, for the same reason.
     fn float_value(&self, tok: Token, negated: bool) -> Result<u64, Diagnostic> {
         let digits: String = self.text(tok).chars().filter(|c| *c != '_').collect();
-        let value: f64 = digits
-            .parse()
-            .map_err(|_| Diagnostic::new("not a floating-point literal", tok.span))?;
+        let value: f64 = digits.parse().map_err(|_| {
+            Diagnostic::new(Rule::LiteralForm, "not a floating-point literal", tok.span)
+        })?;
         if !value.is_finite() {
             return Err(Diagnostic::new(
+                Rule::LiteralForm,
                 "floating-point literal does not fit in `float` (IEEE-754 binary64)",
                 tok.span,
             ));
@@ -1308,11 +1338,16 @@ impl<'a> Parser<'a> {
             None => digits.parse(),
         }
         .map_err(|_| {
-            Diagnostic::new("integer literal does not fit in `int` (64-bit signed)", tok.span)
+            Diagnostic::new(
+                Rule::LiteralOutOfRange,
+                "integer literal does not fit in `int` (64-bit signed)",
+                tok.span,
+            )
         })?;
         let limit = if negated { 1u64 << 63 } else { i64::MAX as u64 };
         if magnitude > limit {
             return Err(Diagnostic::new(
+                Rule::LiteralOutOfRange,
                 "integer literal does not fit in `int` (64-bit signed)",
                 tok.span,
             ));

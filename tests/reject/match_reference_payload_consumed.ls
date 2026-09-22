@@ -1,4 +1,5 @@
 //~ ERROR expected
+//~ RULE type-mismatch
 
 // §2: "a reference gives references", and nothing moves out of one.
 //

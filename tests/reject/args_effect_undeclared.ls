@@ -1,4 +1,5 @@
 //~ ERROR does not declare
+//~ RULE effect-not-declared
 
 // §7.3 and `docs/arguments.md` §2: the row is exact, and reading argv is
 // an effect like any other.

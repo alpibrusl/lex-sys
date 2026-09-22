@@ -1,4 +1,5 @@
 //~ ERROR is declared `val`, but it holds
+//~ RULE mode-bound-violated
 
 // `docs/sharing.md` §2.1, the third of three.
 //

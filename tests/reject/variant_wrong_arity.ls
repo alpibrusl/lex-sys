@@ -1,4 +1,5 @@
 //~ ERROR carries 2 values, but 1 was given
+//~ RULE arity-mismatch
 
 enum Shape { Rect(int, int) }
 

@@ -1,4 +1,5 @@
 //~ ERROR a reference may not outlive its region
+//~ RULE reference-escapes-region
 
 // `docs/reading-references.md` §2: a binding from a matched reference
 // carries the scrutinee's *region*, so §5's occurs-check applies to it

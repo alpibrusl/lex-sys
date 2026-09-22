@@ -1,4 +1,5 @@
 //~ ERROR no module `nowhere.at.all` in this program
+//~ RULE unknown-name
 
 // `docs/modules.md` §4.
 //

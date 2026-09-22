@@ -5,6 +5,7 @@
 // reason `slicing.md` §8 gives: a program that traps is one that
 // compiled, and the reject harness runs `check`.
 //~ ERROR this shifts by an amount outside `0..64`
+//~ RULE constant-traps
 
 fn main(world: World) -> [] int {
     let Split { io, ffi, fs, heap, args } = split(world);

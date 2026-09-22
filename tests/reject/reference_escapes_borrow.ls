@@ -1,4 +1,5 @@
 //~ ERROR a reference may not outlive its region
+//~ RULE reference-escapes-region
 
 // §5 rule 4: escape is an occurs-check. The block's region is `r`, the
 // function's return type can only name `q`, and no `borrow` block outlives a

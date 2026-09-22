@@ -1,4 +1,5 @@
 //~ ERROR branches disagree about `f`
+//~ RULE linear-value-unconsumed
 
 // §4.2: the join is a real operation. An `if` with no `else` still has two
 // arms, and the empty one does not consume `f`.

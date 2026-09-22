@@ -1,4 +1,5 @@
 //~ ERROR a component cannot be read out of it
+//~ RULE linear-value-taken-apart
 
 // `docs/tuples.md` §3.1, the owner case.
 //

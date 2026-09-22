@@ -1,4 +1,5 @@
 //~ ERROR performs `err_write`, which its row [io_write] does not declare
+//~ RULE effect-not-declared
 
 // `docs/standard-error.md` §3.1, and the fixture the separate label is
 // for.

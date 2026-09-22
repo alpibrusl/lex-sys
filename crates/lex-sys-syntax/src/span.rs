@@ -4,6 +4,8 @@
 //! is the thing we intend to canonicalise and hash (#1), and a hash must not
 //! depend on where in a file the source happened to sit.
 
+use crate::rules::Rule;
+
 /// A half-open byte range `[start, end)` into **the whole program's**
 /// source (`docs/many-files.md` §4).
 ///
@@ -117,6 +119,18 @@ impl SourceMap {
     pub fn is_empty(&self) -> bool {
         self.files.is_empty()
     }
+
+    /// The file, 1-based line and 1-based column a span starts at.
+    ///
+    /// `None` when the offset is in no file, which is what a refusal
+    /// about the program rather than about a span carries
+    /// (`docs/agent-errors.md` §1.1) — reported as an absent position
+    /// rather than an invented one.
+    pub fn position_of(&self, span: Span) -> Option<(&str, u32, u32)> {
+        let (file, local) = self.locate(span.start)?;
+        let (line, column) = file.line_col(local);
+        Some((file.path.as_str(), line, column))
+    }
 }
 
 impl Default for SourceMap {
@@ -128,13 +142,20 @@ impl Default for SourceMap {
 /// A located compiler error. lex-sys has no warnings: a diagnostic is a refusal.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Diagnostic {
+    /// The rule this refusal enforces (`docs/agent-errors.md` §3).
+    ///
+    /// Beside the sentence rather than instead of it: a person reads
+    /// `message`, a program matches on `rule`, and neither has to parse
+    /// the other's half. §1 is what the second audience had before —
+    /// 125 message shapes and no vocabulary.
+    pub rule: Rule,
     pub message: String,
     pub span: Span,
 }
 
 impl Diagnostic {
-    pub fn new(message: impl Into<String>, span: Span) -> Self {
-        Self { message: message.into(), span }
+    pub fn new(rule: Rule, message: impl Into<String>, span: Span) -> Self {
+        Self { rule, message: message.into(), span }
     }
 
     /// `path:line:col: error: message`, followed by the offending line and
@@ -144,7 +165,8 @@ impl Diagnostic {
             Some((file, local)) => {
                 let width = self.span.end.saturating_sub(self.span.start);
                 let local = Span::new(local, local + width);
-                Diagnostic { message: self.message.clone(), span: local }.render(file)
+                Diagnostic { rule: self.rule, message: self.message.clone(), span: local }
+                    .render(file)
             }
             // An offset in no file at all: better a message with no
             // location than no message.
@@ -201,7 +223,7 @@ mod tests {
         // The `oops` on b.ls line 2, at its own column.
         let local = "fn b() -> [] int {\n    return ".len() as u32;
         let at = Span::new(second + local, second + local + 4);
-        let rendered = Diagnostic::new("nope", at).render_in(&map);
+        let rendered = Diagnostic::new(Rule::TypeMismatch, "nope", at).render_in(&map);
         assert!(rendered.starts_with("b.ls:2:12: error: nope"), "{rendered}");
         assert!(rendered.contains("    return oops;"), "{rendered}");
     }
@@ -223,7 +245,7 @@ mod tests {
         // one -- underlines the first line and stops there.
         let file = SourceFile::new("p.ls", "fn wide(\n    a: int,\n) -> [] int { return a; }\n");
         let whole = Span::new(0, file.text.len() as u32);
-        let rendered = Diagnostic::new("nope", whole).render(&file);
+        let rendered = Diagnostic::new(Rule::TypeMismatch, "nope", whole).render(&file);
         let carets = rendered.lines().next_back().expect("a caret line").trim();
         assert_eq!(carets.len(), "fn wide(".len(), "{rendered}");
     }
@@ -247,7 +269,7 @@ mod tests {
     #[test]
     fn render_points_at_the_span() {
         let f = SourceFile::new("t.ls", "fn main() -> [] int {\n    let x = ;\n}\n");
-        let d = Diagnostic::new("expected an expression", Span::new(34, 35));
+        let d = Diagnostic::new(Rule::TypeMismatch, "expected an expression", Span::new(34, 35));
         let out = d.render(&f);
         assert!(out.starts_with("t.ls:2:13: error: expected an expression"), "{out}");
         assert!(out.ends_with("^"), "{out}");

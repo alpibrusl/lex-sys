@@ -1,4 +1,5 @@
 //~ ERROR a boxed slice holds `val` data only
+//~ RULE mode-bound-violated
 
 // `docs/boxed-slices.md` §2.1: the same rule an arena has (§6.1), for the
 // same reason, stated once and enforced in both places.

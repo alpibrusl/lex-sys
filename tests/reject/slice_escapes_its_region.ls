@@ -1,4 +1,5 @@
 //~ ERROR does not outlive
+//~ RULE reference-escapes-region
 
 // `docs/slicing.md` §3: a subslice is an **ordinary reference**, so it
 // carries the region it was taken from and cannot outlive it.

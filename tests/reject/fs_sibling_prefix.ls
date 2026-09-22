@@ -1,4 +1,5 @@
 //~ ERROR a path prefix extends at a `/`
+//~ RULE capability-not-narrowable
 
 // `docs/filesystem.md` §1: a path prefix is not a byte prefix.
 //

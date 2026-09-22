@@ -1,4 +1,5 @@
 //~ ERROR shared reference `&`, which promises its referent will not change
+//~ RULE shared-reference-written
 
 // A shared reference is a read. Writing through one would break the promise
 // its region is built on -- and that promise is exactly why `&r T` is `val`

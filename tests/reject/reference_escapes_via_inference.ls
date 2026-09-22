@@ -1,4 +1,5 @@
 //~ ERROR would hold a reference into `r`
+//~ RULE reference-escapes-region
 
 // The second way out of a region, and the reason §5 rule 4 is checked over
 // every binding rather than only over `return`.

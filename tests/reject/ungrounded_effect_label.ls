@@ -1,4 +1,5 @@
 //~ ERROR declares `telepathy` but never performs it
+//~ RULE effect-declared-not-performed
 
 // There is no registry of legal effect labels and there does not need to be.
 // A label nothing performs can never appear in an exact row, so §7.3 refuses

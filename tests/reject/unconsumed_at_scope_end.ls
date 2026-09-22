@@ -1,4 +1,5 @@
 //~ ERROR still live at the end of this block
+//~ RULE linear-value-unconsumed
 
 // §4: linear, not affine. A value that reaches the end of its scope with
 // nothing having consumed it is the leak the system exists to prevent.

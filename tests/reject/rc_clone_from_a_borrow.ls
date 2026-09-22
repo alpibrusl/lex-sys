@@ -1,4 +1,5 @@
 //~ ERROR expected `Box[Cell]`, found `&r Box[Cell]`
+//~ RULE type-mismatch
 
 // `docs/sharing.md` §2.1, the first of three.
 //

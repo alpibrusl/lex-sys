@@ -5,6 +5,7 @@
 // `bitwise.md` §1 says to do. It is that the conversion is written, so
 // the range check has a place: `byte_of(int_of(b) & 15)`.
 //~ ERROR expected `int`, found `byte`
+//~ RULE type-mismatch
 
 fn main(world: World) -> [] int {
     let Split { io, ffi, fs, heap, args } = split(world);

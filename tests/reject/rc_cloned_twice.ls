@@ -1,4 +1,5 @@
 //~ ERROR used exactly once
+//~ RULE linear-use-after-move
 
 // `docs/sharing.md` §2.1, the second of three.
 //

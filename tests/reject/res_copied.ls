@@ -1,4 +1,5 @@
 //~ ERROR already been consumed
+//~ RULE linear-use-after-move
 
 // §3: a `res` value may not be copied. Naming `f` twice asks for two of it.
 

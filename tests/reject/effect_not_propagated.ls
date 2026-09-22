@@ -1,4 +1,5 @@
 //~ ERROR performs `io_write`, which its row [] does not declare
+//~ RULE effect-not-declared
 
 // A row is transitive: `caller` performs whatever `shout` performs, because
 // calling it is how the effect happens. This is what makes a row at the top

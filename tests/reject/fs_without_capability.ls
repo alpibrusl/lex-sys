@@ -1,4 +1,5 @@
 //~ ERROR is not a borrowed `Fs`
+//~ RULE capability-misused
 
 // `docs/filesystem.md` §1 and §2: the filesystem is reached through the
 // capability that names a path, and through nothing else.

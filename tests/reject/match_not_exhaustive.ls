@@ -1,4 +1,5 @@
 //~ ERROR does not cover `Shape::Rect`
+//~ RULE match-not-exhaustive
 
 enum Shape { Circle(int), Rect(int, int) }
 

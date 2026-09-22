@@ -1,4 +1,5 @@
 //~ ERROR so it cannot be discarded
+//~ RULE linear-value-unconsumed
 
 // `docs/defer.md` §2: `defer E;` discards `E`'s value, so it obeys the
 // rule an expression statement obeys — and discarding a `res` is a leak

@@ -1,4 +1,5 @@
 //~ ERROR there is no `res` bound
+//~ RULE mode-bound-violated
 
 // `docs/collections.md` §3, and the same rule `res_bound_is_not_a_thing`
 // makes for a function: an unbounded parameter is already checked as

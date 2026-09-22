@@ -1,4 +1,5 @@
 //~ ERROR does not outlive
+//~ RULE reference-escapes-region
 
 // §5.2: two references from different `borrow` blocks have different regions.
 // `same` declares that both its arguments share one region, and neither of

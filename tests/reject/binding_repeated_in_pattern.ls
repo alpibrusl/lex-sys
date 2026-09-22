@@ -1,4 +1,5 @@
 //~ ERROR `w` is bound twice in this pattern
+//~ RULE duplicate-declaration
 
 enum Shape { Rect(int, int) }
 

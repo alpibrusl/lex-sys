@@ -5,6 +5,7 @@
 // where the decision lives, so it is written where a reader can see it.
 // `float_of(n)` is what this line wants.
 //~ ERROR expected `float`, found `int`
+//~ RULE type-mismatch
 
 fn main(world: World) -> [] int {
     let Split { io, ffi, fs, heap, args } = split(world);

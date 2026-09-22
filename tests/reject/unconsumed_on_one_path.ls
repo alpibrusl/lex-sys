@@ -1,4 +1,5 @@
 //~ ERROR must be consumed on every path
+//~ RULE linear-value-unconsumed
 
 // §4: every path, not some path. The `else` returns with `f` still live.
 

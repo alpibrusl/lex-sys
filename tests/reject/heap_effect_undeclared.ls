@@ -1,4 +1,5 @@
 //~ ERROR does not declare
+//~ RULE effect-not-declared
 
 // §7.3 and `docs/heap.md` §2: the row is exact, and allocation is an
 // effect like any other.

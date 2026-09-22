@@ -1,4 +1,5 @@
 //~ ERROR is still live
+//~ RULE linear-value-unconsumed
 
 // §3: `unbox_slice` is the only consumer a boxed slice has, which is what
 // keeps `heap.md` §3.1 true of the second shape as well.

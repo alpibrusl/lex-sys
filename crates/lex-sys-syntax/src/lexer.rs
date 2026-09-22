@@ -3,6 +3,7 @@
 //! Whitespace and comments are discarded here and never reach the AST: they are
 //! formatting, and formatting must not be able to change a content hash.
 
+use crate::rules::Rule;
 use crate::span::{Diagnostic, Span};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -216,6 +217,7 @@ pub fn tokenize(text: &str) -> Result<Vec<Token>, Diagnostic> {
             while i < bytes.len() && bytes[i] != b'"' {
                 if bytes[i] == b'\n' {
                     return Err(Diagnostic::new(
+                        Rule::LiteralForm,
                         "a string literal may not span lines",
                         Span::new(start as u32, i as u32),
                     ));
@@ -225,6 +227,7 @@ pub fn tokenize(text: &str) -> Result<Vec<Token>, Diagnostic> {
                     if !matches!(escape, b'n' | b'r' | b't' | b'\\' | b'"' | b'0') {
                         let end = next_char_boundary(text, i + 1);
                         return Err(Diagnostic::new(
+                            Rule::UnknownEscape,
                             format!(
                                 "`\\{}` is not an escape; a string literal takes `\\n`, `\\r`, `\\t`, `\\\\`, `\\\"` and `\\0`",
                                 &text[i + 1..end]
@@ -239,6 +242,7 @@ pub fn tokenize(text: &str) -> Result<Vec<Token>, Diagnostic> {
             }
             if i == bytes.len() {
                 return Err(Diagnostic::new(
+                    Rule::LiteralForm,
                     "unterminated string literal",
                     Span::new(start as u32, bytes.len() as u32),
                 ));
@@ -258,6 +262,7 @@ pub fn tokenize(text: &str) -> Result<Vec<Token>, Diagnostic> {
                 i += 2;
                 if !bytes.get(i).is_some_and(|c| c.is_ascii_hexdigit()) {
                     return Err(Diagnostic::new(
+                        Rule::LiteralForm,
                         "`0x` needs at least one hexadecimal digit",
                         Span::new(start as u32, i as u32),
                     ));
@@ -308,6 +313,7 @@ pub fn tokenize(text: &str) -> Result<Vec<Token>, Diagnostic> {
             // A literal may not run straight into a name: `1x` is a typo, not `1 x`.
             if i < bytes.len() && is_ident_continue(bytes[i]) {
                 return Err(Diagnostic::new(
+                    Rule::UnexpectedCharacter,
                     "unexpected character in an integer literal",
                     Span::new(i as u32, i as u32 + 1),
                 ));
@@ -372,6 +378,7 @@ pub fn tokenize(text: &str) -> Result<Vec<Token>, Diagnostic> {
             _ => {
                 let end = next_char_boundary(text, i);
                 return Err(Diagnostic::new(
+                    Rule::UnexpectedCharacter,
                     format!("unexpected character `{}`", &text[i..end]),
                     Span::new(i as u32, end as u32),
                 ));

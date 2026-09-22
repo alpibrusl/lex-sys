@@ -1,4 +1,5 @@
 //~ ERROR expected `int`, found `bool`
+//~ RULE type-mismatch
 
 // `docs/tuples.md` §2.2: a tuple is structural, so `(int, bool)` and
 // `(bool, int)` are two types and the components are matched in order.

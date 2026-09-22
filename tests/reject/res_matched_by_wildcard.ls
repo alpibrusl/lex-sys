@@ -1,4 +1,5 @@
 //~ ERROR the value matched here is `res`
+//~ RULE linear-value-unconsumed
 
 // §4.1: destructuring consumes by producing the parts. A `_` arm consumes the
 // scrutinee and produces nothing, which is a silent drop by another name.

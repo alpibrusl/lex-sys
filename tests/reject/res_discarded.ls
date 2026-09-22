@@ -1,4 +1,5 @@
 //~ ERROR cannot be discarded
+//~ RULE linear-value-unconsumed
 
 // §4.1: there is no `drop`. A statement that evaluates a `res` value and
 // throws the result away has named no consumer.

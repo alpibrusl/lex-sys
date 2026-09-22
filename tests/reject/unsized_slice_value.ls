@@ -1,4 +1,5 @@
 //~ ERROR has no size of its own
+//~ RULE unsized-type
 
 // `[T]` is a *referent*, not a value. Its length is a runtime value rather
 // than part of its type, so there is nothing to put on a stack, in a struct

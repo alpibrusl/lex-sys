@@ -1,4 +1,5 @@
 //~ ERROR shared slice
+//~ RULE shared-reference-written
 
 // `docs/strings.md` §4: two occurrences of `"ok"` may be the same bytes, so
 // a program that could write through one would be writing through both --

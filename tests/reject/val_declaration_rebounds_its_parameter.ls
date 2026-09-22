@@ -1,4 +1,5 @@
 //~ ERROR a `val` declaration already bounds its parameters
+//~ RULE mode-bound-violated
 
 // `docs/collections.md` §3.
 //

@@ -27,6 +27,7 @@ use lex_sys_syntax::ast::{
     self, Ast, Block, Expr as AstExpr, ExprId, Item, Stmt as AstStmt, StmtId, Symbol, TypeExpr,
     TypeId,
 };
+use lex_sys_syntax::rules::Rule;
 use lex_sys_syntax::span::{Diagnostic, Span};
 use lex_sys_types::{DefId, Region, Type, Unifier, UnifyError};
 
@@ -1794,6 +1795,7 @@ fn check_imports(ast: &Ast) -> Result<(), Diagnostic> {
             let path: Vec<&str> = import.path.iter().map(|s| ast.name_of(*s)).collect();
             if !ast.modules.iter().any(|m| m.path == import.path) {
                 return Err(Diagnostic::new(
+                    Rule::UnknownName,
                     format!(
                         "no module `{}` in this program; a module exists where a file declares it",
                         path.join(".")
@@ -1803,6 +1805,7 @@ fn check_imports(ast: &Ast) -> Result<(), Diagnostic> {
             }
             if bound.contains(&import.alias) {
                 return Err(Diagnostic::new(
+                    Rule::DuplicateDeclaration,
                     format!(
                         "`{}` is already bound to another import here; name one of them with `as`",
                         ast.name_of(import.alias)
@@ -1854,6 +1857,7 @@ fn collect_types(ast: &Ast, unifier: &mut Unifier) -> Result<Vec<TypeDef>, Diagn
         if matches!(name, "int" | "bool") || defs[..predeclared].iter().any(|d| d.name == name_sym)
         {
             return Err(Diagnostic::new(
+                Rule::BuiltinRedeclared,
                 format!("`{name}` is a built-in type and cannot be redeclared"),
                 span,
             ));
@@ -1864,7 +1868,11 @@ fn collect_types(ast: &Ast, unifier: &mut Unifier) -> Result<Vec<TypeDef>, Diagn
         // like any other, so every program written before this is
         // unaffected.
         if defs.iter().any(|d| d.name == name_sym && d.module == module) {
-            return Err(Diagnostic::new(format!("type `{name}` is declared twice"), span));
+            return Err(Diagnostic::new(
+                Rule::DuplicateDeclaration,
+                format!("type `{name}` is declared twice"),
+                span,
+            ));
         }
 
         // Ids are handed out in declaration order, so `DefId(i)` indexes
@@ -1901,6 +1909,7 @@ fn collect_types(ast: &Ast, unifier: &mut Unifier) -> Result<Vec<TypeDef>, Diagn
                 for field in &decl.fields {
                     if fields.iter().any(|(n, _)| *n == field.name) {
                         return Err(Diagnostic::new(
+                            Rule::DuplicateDeclaration,
                             format!(
                                 "field `{}` is declared twice in `{}`",
                                 ast.name_of(field.name),
@@ -1931,6 +1940,7 @@ fn collect_types(ast: &Ast, unifier: &mut Unifier) -> Result<Vec<TypeDef>, Diagn
                 let span = defs[position].span;
                 if decl.variants.is_empty() {
                     return Err(Diagnostic::new(
+                        Rule::EnumHasNoVariants,
                         format!(
                             "enum `{}` has no variants, so no value of it can ever exist",
                             ast.name_of(decl.name)
@@ -1942,6 +1952,7 @@ fn collect_types(ast: &Ast, unifier: &mut Unifier) -> Result<Vec<TypeDef>, Diagn
                 for variant in &decl.variants {
                     if variants.iter().any(|(n, _)| *n == variant.name) {
                         return Err(Diagnostic::new(
+                            Rule::DuplicateDeclaration,
                             format!(
                                 "variant `{}` is declared twice in `{}`",
                                 ast.name_of(variant.name),
@@ -1976,6 +1987,7 @@ fn collect_types(ast: &Ast, unifier: &mut Unifier) -> Result<Vec<TypeDef>, Diagn
         let mut seen = vec![false; defs.len()];
         if reaches(&defs, index, index, &mut seen) {
             return Err(Diagnostic::new(
+                Rule::InfiniteType,
                 format!(
                     "type `{}` contains itself, so it has no finite size; put a `Box` on the path back to it",
                     ast.name_of(defs[index].name)
@@ -2007,6 +2019,7 @@ fn collect_types(ast: &Ast, unifier: &mut Unifier) -> Result<Vec<TypeDef>, Diagn
             members.iter().find(|m| mode_of(&defs, unifier, &all_val, m) == Mode::Res)
         {
             return Err(Diagnostic::new(
+                Rule::ModeBoundViolated,
                 format!(
                     "`{}` is declared `val`, but it holds `{}`, which is `res`",
                     ast.name_of(def.name),
@@ -2022,6 +2035,39 @@ fn collect_types(ast: &Ast, unifier: &mut Unifier) -> Result<Vec<TypeDef>, Diagn
 
 /// Resolve and check an AST, producing IR a backend can lower without failing.
 pub fn lower(ast: &Ast) -> Result<Program, Diagnostic> {
+    lower_all(ast).map_err(|mut all| all.remove(0))
+}
+
+/// Lower a program, answering **every** independent refusal rather than
+/// the first (`docs/agent-errors.md` §4).
+///
+/// The rule that decides what is independent: checking is total and runs
+/// per declaration (`standard-library.md` §5.2), so one function's body
+/// failing does not make the next function's body unknowable. Those are
+/// collected. Everything before pass 1 — imports, type collection,
+/// signatures — stops at the first refusal, because a program whose
+/// shape is not yet known has no reliable second error, and a checker
+/// inventing one teaches its reader to chase phantoms.
+///
+/// The `Vec` is never empty on the error path, and its entries are in
+/// source order, which is the order pass 1 already ran in.
+pub fn lower_all(ast: &Ast) -> Result<Program, Vec<Diagnostic>> {
+    // The first refusal comes back through `?` like any other, and pass
+    // 1's remaining ones ride in `rest` — which keeps every `?` in the
+    // body below returning one `Diagnostic`, as it always did, rather
+    // than turning a 400-line function inside out to carry a `Vec`.
+    let mut rest = Vec::new();
+    match lower_inner(ast, &mut rest) {
+        Ok(program) => Ok(program),
+        Err(first) => {
+            let mut all = vec![first];
+            all.append(&mut rest);
+            Err(all)
+        }
+    }
+}
+
+fn lower_inner(ast: &Ast, rest: &mut Vec<Diagnostic>) -> Result<Program, Diagnostic> {
     check_imports(ast)?;
     let mut unifier = Unifier::new();
     let defs = collect_types(ast, &mut unifier)?;
@@ -2043,6 +2089,7 @@ pub fn lower(ast: &Ast) -> Result<Program, Diagnostic> {
         let span = ast.item_span(item_id);
         if Builtin::from_name(name).is_some() {
             return Err(Diagnostic::new(
+                Rule::ForeignDeclaration,
                 format!("`{name}` is a builtin and cannot be declared foreign"),
                 span,
             ));
@@ -2053,12 +2100,14 @@ pub fn lower(ast: &Ast) -> Result<Program, Diagnostic> {
         // name is module-scoped (`docs/modules.md` §3).
         if externs.iter().any(|e| e.name == name && e.module == module) {
             return Err(Diagnostic::new(
+                Rule::DuplicateDeclaration,
                 format!("foreign function `{name}` is declared twice"),
                 span,
             ));
         }
         if let Some(clash) = externs.iter().find(|e| e.symbol == decl.symbol) {
             return Err(Diagnostic::new(
+                Rule::ForeignDeclaration,
                 format!(
                     "`{name}` binds the foreign symbol `{}`, which `{}` already binds; a symbol is one function to the linker",
                     decl.symbol, clash.name
@@ -2112,6 +2161,7 @@ pub fn lower(ast: &Ast) -> Result<Program, Diagnostic> {
                     {}
                 Type::Ref { .. } => {
                     return Err(Diagnostic::new(
+                        Rule::ForeignBoundaryType,
                         format!(
                             "`{name}` takes `{what}` by reference, and the only references that cross a foreign boundary are a borrowed capability and a `[byte]` slice: C is not told about regions"
                         ),
@@ -2120,6 +2170,7 @@ pub fn lower(ast: &Ast) -> Result<Program, Diagnostic> {
                 }
                 other => {
                     return Err(Diagnostic::new(
+                        Rule::ForeignBoundaryType,
                         format!(
                             "`{name}` takes `{what}` of type `{}`, which has no agreed layout across a foreign boundary; a foreign parameter is `int`, `bool`, or a borrowed capability",
                             unifier.display(other)
@@ -2138,6 +2189,7 @@ pub fn lower(ast: &Ast) -> Result<Program, Diagnostic> {
         // (`docs/reach.md` §4).
         if !matches!(ret, Type::Int | Type::Bool | Type::Unit) {
             return Err(Diagnostic::new(
+                Rule::ForeignBoundaryType,
                 format!(
                     "`{name}` returns `{}`, which has no agreed layout across a foreign boundary; a foreign result is `int` or `bool`, and a C function that returns nothing is declared `int` and its result discarded",
                     unifier.display(&ret)
@@ -2163,6 +2215,7 @@ pub fn lower(ast: &Ast) -> Result<Program, Diagnostic> {
                 && matches!(args.first(), Some(Type::Lit(library)) if library == FFI_ROOT)
             {
                 return Err(Diagnostic::new(
+                    Rule::ForeignDeclaration,
                     format!(
                         "`{name}` borrows the unnarrowed `Ffi(\"\")`, which names no library; a foreign declaration names the library it calls into, so narrow before declaring"
                     ),
@@ -2172,6 +2225,7 @@ pub fn lower(ast: &Ast) -> Result<Program, Diagnostic> {
         }
         if let Some(label) = declared.missing_from(&authorised) {
             return Err(Diagnostic::new(
+                Rule::EffectNotDeclared,
                 format!(
                     "`{name}` declares `{label}` but holds no capability that authorises it; a foreign call is reached through the capability that names its library"
                 ),
@@ -2180,6 +2234,7 @@ pub fn lower(ast: &Ast) -> Result<Program, Diagnostic> {
         }
         if let Some(label) = authorised.missing_from(&declared) {
             return Err(Diagnostic::new(
+                Rule::EffectNotDeclared,
                 format!(
                     "`{name}` borrows a capability authorising `{label}`, which its row {declared} does not declare"
                 ),
@@ -2209,7 +2264,11 @@ pub fn lower(ast: &Ast) -> Result<Program, Diagnostic> {
         let span = ast.item_span(item_id);
         let name = ast.name_of(decl.name);
         if statics.iter().any(|d| d.name == decl.name && d.module == module) {
-            return Err(Diagnostic::new(format!("`static {name}` is declared twice"), span));
+            return Err(Diagnostic::new(
+                Rule::DuplicateDeclaration,
+                format!("`static {name}` is declared twice"),
+                span,
+            ));
         }
         // The *referent*, so a bare `[int]` is what is written: a
         // `static` names what the data is, and the `&static` in front of
@@ -2228,6 +2287,7 @@ pub fn lower(ast: &Ast) -> Result<Program, Diagnostic> {
         // say one thing.
         let Type::Slice(element) = &referent else {
             return Err(Diagnostic::new(
+                Rule::StaticItem,
                 format!(
                     "`static {name}` must be a slice — `[int]`, `[byte]`, `[bool]` or `[float]`; a `static` is for data, and a scalar constant is already folded where it is written (`docs/compile-time.md` §3)"
                 ),
@@ -2236,6 +2296,7 @@ pub fn lower(ast: &Ast) -> Result<Program, Diagnostic> {
         };
         if !matches!(**element, Type::Int | Type::Byte | Type::Bool | Type::Float) {
             return Err(Diagnostic::new(
+                Rule::StaticItem,
                 format!(
                     "`static {name}` holds `{}`, and a `static` holds scalars: `int`, `byte`, `bool` or `float` (`docs/compile-time-data.md` §6)",
                     unifier.display(element)
@@ -2257,6 +2318,7 @@ pub fn lower(ast: &Ast) -> Result<Program, Diagnostic> {
 
         if Builtin::from_name(name).is_some() {
             return Err(Diagnostic::new(
+                Rule::BuiltinRedeclared,
                 format!("`{name}` is a builtin and cannot be redefined"),
                 span,
             ));
@@ -2264,7 +2326,11 @@ pub fn lower(ast: &Ast) -> Result<Program, Diagnostic> {
         // Scoped to the module, like a type declaration: two modules may
         // each define `print_nat` (`docs/modules.md` §3).
         if signatures.iter().any(|s| s.name == decl.name && s.module == module) {
-            return Err(Diagnostic::new(format!("function `{name}` is defined twice"), span));
+            return Err(Diagnostic::new(
+                Rule::DuplicateDeclaration,
+                format!("function `{name}` is defined twice"),
+                span,
+            ));
         }
         // A foreign declaration and a written function are two answers to
         // the same call, and a call resolves to one thing -- within one
@@ -2272,6 +2338,7 @@ pub fn lower(ast: &Ast) -> Result<Program, Diagnostic> {
         // §3), and only the `extern` binds a linker symbol.
         if externs.iter().any(|e| e.name == name && e.module == module) {
             return Err(Diagnostic::new(
+                Rule::ForeignDeclaration,
                 format!("`{name}` is already declared foreign, so this name is taken"),
                 span,
             ));
@@ -2291,6 +2358,7 @@ pub fn lower(ast: &Ast) -> Result<Program, Diagnostic> {
                     ast.name_of(*outer)
                 };
                 return Err(Diagnostic::new(
+                    Rule::RegionMismatch,
                     format!(
                         "`{missing}` is not a region parameter of `{name}`; a `where` clause relates the regions the declaration takes"
                     ),
@@ -2305,6 +2373,7 @@ pub fn lower(ast: &Ast) -> Result<Program, Diagnostic> {
         for param in &decl.params {
             if seen.contains(&param.name) {
                 return Err(Diagnostic::new(
+                    Rule::DuplicateDeclaration,
                     format!("parameter `{}` is bound twice", ast.name_of(param.name)),
                     span,
                 ));
@@ -2332,6 +2401,7 @@ pub fn lower(ast: &Ast) -> Result<Program, Diagnostic> {
             for ty in params.iter().chain(std::iter::once(&ret)) {
                 if let Some(private) = private_type_in(&defs, module, ty) {
                     return Err(Diagnostic::new(
+                        Rule::NotPublic,
                         format!(
                             "`{name}` is `pub`, but its signature names `{}`, which is not; a caller in another module could not write the type",
                             ast.name_of(private)
@@ -2369,10 +2439,16 @@ pub fn lower(ast: &Ast) -> Result<Program, Diagnostic> {
     // the stronger check as well as the only one available: a body that
     // type-checks for every `T` is checked once, rather than once per
     // instantiation and never for the `T` nobody used.
+    //
+    // Every refusal here is collected rather than returned
+    // (`docs/agent-errors.md` §4): these bodies are independent of each
+    // other, so stopping at the first costs a reader nothing and costs a
+    // program one compile per error.
+    let mut refused: Vec<Diagnostic> = Vec::new();
     for (index, signature) in signatures.iter().enumerate() {
         let rigid: Vec<Type> = (0..signature.generics.len() as u32).map(Type::Param).collect();
         let mut checking = Mono::new(false);
-        lower_function(
+        if let Err(error) = lower_function(
             ast,
             &defs,
             &signatures,
@@ -2382,7 +2458,14 @@ pub fn lower(ast: &Ast) -> Result<Program, Diagnostic> {
             index,
             &rigid,
             &mut checking,
-        )?;
+        ) {
+            refused.push(error);
+        }
+    }
+    if !refused.is_empty() {
+        let first = refused.remove(0);
+        *rest = refused;
+        return Err(first);
     }
 
     // Pass 2: emit a copy of every function actually reachable.
@@ -2505,6 +2588,7 @@ pub fn lower(ast: &Ast) -> Result<Program, Diagnostic> {
         let name = ast.name_of(def.name).to_owned();
         let values = fold::evaluate_static(&program, body, &evaluated).map_err(|why| {
             Diagnostic::new(
+                Rule::ConstantTraps,
                 format!("`static {name}` cannot be evaluated: {why}"),
                 ast.item_span(ast::ItemId(item as u32)),
             )
@@ -2742,6 +2826,7 @@ fn lower_static(
 
     if let Some((name, region, span)) = escapes {
         return Err(Diagnostic::new(
+            Rule::ReferenceEscapesRegion,
             format!(
                 "`{name}` would hold a reference into `{region}`, which is a `borrow` block it outlives"
             ),
@@ -2755,6 +2840,7 @@ fn lower_static(
     // §7.3 of `linearity-and-effects.md` asks of every row.
     if let Some(label) = performed.labels().first() {
         return Err(Diagnostic::new(
+            Rule::StaticItem,
             format!(
                 "`static {}` performs `{}`, and a `static` runs during compilation where there is nothing to perform it on",
                 ast.name_of(decl.name),
@@ -2878,6 +2964,7 @@ fn lower_function(
     // what "escape is an occurs-check" buys.
     if let Some((name, region, span)) = escapes {
         return Err(Diagnostic::new(
+            Rule::ReferenceEscapesRegion,
             format!(
                 "`{name}` would hold a reference into `{region}`, which is a `borrow` block it outlives"
             ),
@@ -2899,6 +2986,7 @@ fn lower_function(
     if let Some(unsettled) = slots.iter().find(|ty| ty.has_var()) {
         let _ = unsettled;
         return Err(Diagnostic::new(
+            Rule::AmbiguousType,
             format!(
                 "cannot tell what type a binding in `{}` has; add an annotation",
                 ast.name_of(decl.name)
@@ -2932,7 +3020,11 @@ fn lower_function(
             return Err(error);
         }
         let at: Vec<String> = args.iter().map(|a| unifier.display(a)).collect();
+        // The rule is the inner one: this adds *where* the body was being
+        // checked, and says nothing about which rule was broken
+        // (`docs/agent-errors.md` §3).
         return Err(Diagnostic::new(
+            error.rule,
             format!(
                 "{} (checking `{}` instantiated at `{}`)",
                 error.message,
@@ -2970,6 +3062,7 @@ fn lower_function(
     let declared = &signature.effects;
     if let Some(label) = performed.missing_from(declared) {
         return Err(Diagnostic::new(
+            Rule::EffectNotDeclared,
             format!(
                 "`{}` performs `{label}`, which its row {declared} does not declare; narrow the body or widen the row",
                 ast.name_of(decl.name)
@@ -2979,6 +3072,7 @@ fn lower_function(
     }
     if let Some(label) = declared.missing_from(&performed) {
         return Err(Diagnostic::new(
+            Rule::EffectDeclaredNotPerformed,
             format!(
                 "`{}` declares `{label}` but never performs it; a row is exact or it is decoration",
                 ast.name_of(decl.name)
@@ -2989,6 +3083,7 @@ fn lower_function(
 
     if !terminates(&body) {
         return Err(Diagnostic::new(
+            Rule::MissingReturn,
             format!("function `{}` can finish without returning a value", ast.name_of(decl.name)),
             ast.item_span(ast::ItemId(signature.item as u32)),
         ));
@@ -3025,18 +3120,21 @@ fn check_region_names(
         let text = ast.name_of(*name);
         if scope.iter().any(|(seen, _)| seen == name) {
             return Err(Diagnostic::new(
+                Rule::DuplicateDeclaration,
                 format!("region parameter `{text}` is declared twice"),
                 span,
             ));
         }
         if generics.contains(name) {
             return Err(Diagnostic::new(
+                Rule::RegionMismatch,
                 format!("`{text}` is both a type parameter and a region parameter here"),
                 span,
             ));
         }
         if text == STATIC_REGION {
             return Err(Diagnostic::new(
+                Rule::StaticItem,
                 "`static` is the region a program's literals live in; it cannot be declared",
                 span,
             ));
@@ -3054,12 +3152,14 @@ fn check_generic_names(ast: &Ast, generics: &[Symbol], span: Span) -> Result<(),
         let text = ast.name_of(*name);
         if matches!(text, "int" | "bool") {
             return Err(Diagnostic::new(
+                Rule::BuiltinRedeclared,
                 format!("`{text}` is a built-in type and cannot be a type parameter"),
                 span,
             ));
         }
         if seen.contains(name) {
             return Err(Diagnostic::new(
+                Rule::DuplicateDeclaration,
                 format!("type parameter `{text}` is declared twice"),
                 span,
             ));
@@ -3148,6 +3248,7 @@ fn resolve_type_at(
         if text == STATIC_REGION {
             if *unique {
                 return Err(Diagnostic::new(
+                    Rule::StaticItem,
                     "`static` holds a program's literals, which are shared; there is no unique reference into it",
                     span,
                 ));
@@ -3160,6 +3261,7 @@ fn resolve_type_at(
         }
         let Some((_, found)) = regions.iter().rev().find(|(name, _)| name == region) else {
             return Err(Diagnostic::new(
+                Rule::RegionNotInScope,
                 format!(
                     "`{text}` is not a region in scope; a region comes from a `[&{text}]` parameter or a `borrow` block"
                 ),
@@ -3191,6 +3293,7 @@ fn resolve_type_at(
         // type or a type argument. Only a reference may point at one.
         if !unsized_ok {
             return Err(Diagnostic::new(
+                Rule::UnsizedType,
                 "`[T]` has no size of its own, so it cannot be used as a value; write `&r [T]` or `&!r [T]`, which is a slice",
                 span,
             ));
@@ -3208,6 +3311,7 @@ fn resolve_type_at(
         let parts = parts.clone();
         if parts.len() < 2 {
             return Err(Diagnostic::new(
+                Rule::PatternShape,
                 "a tuple has two components or more; `(T)` is grouping, and there is no `()`",
                 span,
             ));
@@ -3234,6 +3338,7 @@ fn resolve_type_at(
     // module -- falling back is how a typo becomes a different program.
     let Some(target) = ast.resolve_module(module, written_qualifier) else {
         return Err(Diagnostic::new(
+            Rule::ModuleNotImported,
             format!(
                 "`{}` is not an imported module here; `import` it to reach its types",
                 ast.name_of(written_qualifier.expect("resolve only fails with a qualifier"))
@@ -3258,6 +3363,7 @@ fn resolve_type_at(
     if let Some(index) = generics.iter().position(|g| *g == written_name) {
         if !args.is_empty() {
             return Err(Diagnostic::new(
+                Rule::TypeArgsNotTaken,
                 format!("type parameter `{name}` takes no type arguments"),
                 span,
             ));
@@ -3277,6 +3383,7 @@ fn resolve_type_at(
                 // that cannot name the type cannot use what mentions it.
                 if target != module && !def.public {
                     return Err(Diagnostic::new(
+                        Rule::NotPublic,
                         format!(
                             "`{other}` is not `pub`, so it cannot be named from another module"
                         ),
@@ -3327,18 +3434,26 @@ fn resolve_type_at(
                         )
                     };
                     return Err(Diagnostic::new(
+                        Rule::ModeBoundViolated,
                         format!("{because}, and `{written}` is `res`"),
                         span,
                     ));
                 }
                 (Type::Named(def.def, args.clone()), def.generics.len())
             }
-            None => return Err(Diagnostic::new(format!("unknown type `{other}`"), span)),
+            None => {
+                return Err(Diagnostic::new(
+                    Rule::UnknownName,
+                    format!("unknown type `{other}`"),
+                    span,
+                ));
+            }
         },
     };
 
     if args.len() != arity {
         return Err(Diagnostic::new(
+            Rule::ArityMismatch,
             if arity == 0 {
                 format!("`{name}` takes no type arguments")
             } else {
@@ -3515,6 +3630,7 @@ impl<'a> FnLowering<'a> {
                 Ok(value)
             }
             fold::Folded::Trapped(why) => Err(Diagnostic::new(
+                Rule::ConstantTraps,
                 format!("{why}; the operands are literals, so this can only trap"),
                 span,
             )),
@@ -3533,6 +3649,7 @@ impl<'a> FnLowering<'a> {
     fn target_module(&self, qualifier: Option<Symbol>, span: Span) -> Result<u32, Diagnostic> {
         self.ast.resolve_module(self.module, qualifier).ok_or_else(|| {
             Diagnostic::new(
+                Rule::ModuleNotImported,
                 format!(
                     "`{}` is not an imported module here; `import` it to reach what is in it",
                     self.ast.name_of(qualifier.expect("resolve only fails with a qualifier"))
@@ -3557,6 +3674,7 @@ impl<'a> FnLowering<'a> {
     ) -> Result<(), Diagnostic> {
         if target != self.module && target != PRELUDE_MODULE && !public {
             return Err(Diagnostic::new(
+                Rule::NotPublic,
                 format!(
                     "{what} `{}` is not `pub`, so it cannot be reached from another module",
                     self.ast.name_of(name)
@@ -3642,6 +3760,7 @@ impl<'a> FnLowering<'a> {
     fn release(&mut self, args: &[ExprId], span: Span) -> Result<(Expr, Type), Diagnostic> {
         let [capability] = args else {
             return Err(Diagnostic::new(
+                Rule::ArityMismatch,
                 format!("`release` takes 1 argument, but {} were given", args.len()),
                 span,
             ));
@@ -3651,6 +3770,7 @@ impl<'a> FnLowering<'a> {
         let is_releasable = matches!(&resolved, Type::Named(def, _) if released_only(*def));
         if !is_releasable {
             return Err(Diagnostic::new(
+                Rule::CapabilityMisused,
                 format!(
                     "`{}` is not a capability and so has nothing to release",
                     self.unifier.display(&resolved)
@@ -3671,12 +3791,14 @@ impl<'a> FnLowering<'a> {
     fn narrow(&mut self, args: &[ExprId], span: Span) -> Result<(Expr, Type), Diagnostic> {
         let [capability, literal] = args else {
             return Err(Diagnostic::new(
+                Rule::ArityMismatch,
                 format!("`narrow` takes 2 arguments, but {} were given", args.len()),
                 span,
             ));
         };
         let AstExpr::Str(target) = self.ast.expr(*literal) else {
             return Err(Diagnostic::new(
+                Rule::CapabilityNotNarrowable,
                 "`narrow` takes a literal, so the refinement can be checked where it is written",
                 self.ast.expr_span(*literal),
             ));
@@ -3690,6 +3812,7 @@ impl<'a> FnLowering<'a> {
         // promise to give it back, so there is nothing here to consume.
         if let Type::Ref { inner, .. } = &resolved {
             return Err(Diagnostic::new(
+                Rule::CapabilityNotNarrowable,
                 format!(
                     "`{}` is borrowed, and narrowing consumes what it attenuates; narrow the capability itself, before lending it",
                     self.unifier.display(inner)
@@ -3699,6 +3822,7 @@ impl<'a> FnLowering<'a> {
         }
         let Type::Named(def, args) = &resolved else {
             return Err(Diagnostic::new(
+                Rule::CapabilityNotNarrowable,
                 format!(
                     "`{}` is not a capability and cannot be narrowed",
                     self.unifier.display(&resolved)
@@ -3709,6 +3833,7 @@ impl<'a> FnLowering<'a> {
         let which = def.0 as usize;
         if which != PRELUDE_FFI && which != PRELUDE_FS {
             return Err(Diagnostic::new(
+                Rule::CapabilityNotNarrowable,
                 format!(
                     "`{}` carries no value to narrow; `Ffi` and `Fs` are the capabilities that name one",
                     self.unifier.display(&resolved)
@@ -3718,12 +3843,14 @@ impl<'a> FnLowering<'a> {
         }
         let Some(Type::Lit(current)) = args.first() else {
             return Err(Diagnostic::new(
+                Rule::AmbiguousType,
                 "cannot tell what this capability was narrowed to; add an annotation",
                 span,
             ));
         };
         if !target.starts_with(current.as_str()) {
             return Err(Diagnostic::new(
+                Rule::CapabilityNotNarrowable,
                 format!(
                     "`{current}` cannot be narrowed to `{target}`: a capability is attenuated, never widened, and a program must not be able to grant itself what it was not given"
                 ),
@@ -3736,6 +3863,7 @@ impl<'a> FnLowering<'a> {
         // directory next door. `Ffi` has no separator and no such case.
         if which == PRELUDE_FS && !extends_path(current, &target) {
             return Err(Diagnostic::new(
+                Rule::CapabilityNotNarrowable,
                 format!(
                     "`{current}` cannot be narrowed to `{target}`: a path prefix extends at a `/`, and `{target}` is a different name that merely starts with the same bytes"
                 ),
@@ -3744,6 +3872,7 @@ impl<'a> FnLowering<'a> {
         }
         if &target == current {
             return Err(Diagnostic::new(
+                Rule::CapabilityNotNarrowable,
                 format!("this narrows `{current}` to itself, which grants nothing new"),
                 span,
             ));
@@ -3894,6 +4023,7 @@ impl<'a> FnLowering<'a> {
                 self.unify_regions_at(wanted, given, span)?;
             } else if !self.outlives(given, wanted) {
                 return Err(Diagnostic::new(
+                    Rule::ReferenceEscapesRegion,
                     format!(
                         "`{}` does not outlive `{}`, so a reference valid for the first cannot be used where the second is expected",
                         self.unifier.display_region(given),
@@ -3917,6 +4047,7 @@ impl<'a> FnLowering<'a> {
         match self.unifier.unify_regions(expected, found) {
             Ok(()) => Ok(()),
             Err(_) => Err(Diagnostic::new(
+                Rule::RegionMismatch,
                 format!(
                     "`{}` and `{}` are different regions",
                     self.unifier.display_region(expected),
@@ -3937,6 +4068,7 @@ impl<'a> FnLowering<'a> {
         match self.unifier.unify(expected, found) {
             Ok(()) => Ok(()),
             Err(UnifyError::Mismatch { expected, found }) => Err(Diagnostic::new(
+                Rule::TypeMismatch,
                 format!(
                     "expected `{}`, found `{}`",
                     self.unifier.display(&expected),
@@ -3945,12 +4077,14 @@ impl<'a> FnLowering<'a> {
                 span,
             )),
             Err(UnifyError::Infinite { ty, .. }) => Err(Diagnostic::new(
+                Rule::InfiniteType,
                 format!("this would build an infinite type, `{}`", self.unifier.display(&ty)),
                 span,
             )),
             // Two references from different `borrow` blocks, neither of which
             // encloses the other: §5.2's sibling case.
             Err(UnifyError::Regions { expected, found }) => Err(Diagnostic::new(
+                Rule::RegionMismatch,
                 format!(
                     "`{}` and `{}` are different regions, and neither outlives the other",
                     self.unifier.display_region(expected),
@@ -3959,6 +4093,7 @@ impl<'a> FnLowering<'a> {
                 span,
             )),
             Err(UnifyError::Uniqueness { expected }) => Err(Diagnostic::new(
+                Rule::TypeMismatch,
                 if expected {
                     "expected a unique reference `&!`, found a shared one `&`"
                 } else {
@@ -3999,6 +4134,7 @@ impl<'a> FnLowering<'a> {
         for (i, &id) in ids.iter().enumerate() {
             if i > 0 && terminates(&out) {
                 return Err(Diagnostic::new(
+                    Rule::UnreachableStatement,
                     "this statement is unreachable",
                     self.ast.stmt_span(id),
                 ));
@@ -4057,6 +4193,7 @@ impl<'a> FnLowering<'a> {
         {
             let kind = if self.arenas.contains(&id) { "an arena" } else { "a `borrow` block" };
             return Err(Diagnostic::new(
+                Rule::ReferenceEscapesRegion,
                 format!(
                     "this returns a reference into `{}`, which is {kind} in this function; a reference may not outlive its region",
                     self.ast.name_of(self.blocks[id as usize].name)
@@ -4236,12 +4373,17 @@ impl<'a> FnLowering<'a> {
         let target = self.target_module(qualifier, span)?;
         let Some(def) = self.defs.iter().find(|d| d.name == struct_name && d.visible_from(target))
         else {
-            return Err(Diagnostic::new(format!("`{text}` is not a struct"), span));
+            return Err(Diagnostic::new(
+                Rule::NotAStruct,
+                format!("`{text}` is not a struct"),
+                span,
+            ));
         };
         let (def_id, generic_count, public) = (def.def, def.generics.len(), def.public);
         self.check_visible(target, public, "type", struct_name, span)?;
         if released_only(def_id) {
             return Err(Diagnostic::new(
+                Rule::CapabilityMisused,
                 format!(
                     "`{text}` is a capability and is destroyed by `release`, not by being taken apart; authority is a resource and the function that ends one is named"
                 ),
@@ -4253,6 +4395,7 @@ impl<'a> FnLowering<'a> {
         // would be a way to end one without freeing it.
         if unboxed_only(def_id) {
             return Err(Diagnostic::new(
+                Rule::LinearValueTakenApart,
                 format!(
                     "`{text}` owns an allocation and is ended by `unbox`, not by being taken apart; what it holds comes back out of `unbox`"
                 ),
@@ -4261,6 +4404,7 @@ impl<'a> FnLowering<'a> {
         }
         let DefKind::Struct(declared) = &def.kind else {
             return Err(Diagnostic::new(
+                Rule::NotAStruct,
                 format!("`{text}` is an enum, not a struct; take it apart with `match`"),
                 span,
             ));
@@ -4272,6 +4416,7 @@ impl<'a> FnLowering<'a> {
 
         if fields.len() != declared.len() {
             return Err(Diagnostic::new(
+                Rule::ArityMismatch,
                 format!(
                     "`{text}` has {} field{}, but this pattern names {}; destructuring takes the whole value apart",
                     declared.len(),
@@ -4286,10 +4431,18 @@ impl<'a> FnLowering<'a> {
         for (position, field) in fields.iter().enumerate() {
             let field_text = self.ast.name_of(*field);
             let Some(index) = declared.iter().position(|(n, _)| n == field) else {
-                return Err(Diagnostic::new(format!("`{text}` has no field `{field_text}`"), span));
+                return Err(Diagnostic::new(
+                    Rule::UnknownName,
+                    format!("`{text}` has no field `{field_text}`"),
+                    span,
+                ));
             };
             if order.contains(&index) {
-                return Err(Diagnostic::new(format!("field `{field_text}` is named twice"), span));
+                return Err(Diagnostic::new(
+                    Rule::DuplicateDeclaration,
+                    format!("field `{field_text}` is named twice"),
+                    span,
+                ));
             }
             // Shadowing across statements is `docs/shadowing.md` §3 and is
             // checked at replay. Binding a name twice *within one pattern*
@@ -4297,6 +4450,7 @@ impl<'a> FnLowering<'a> {
             // one binding per name (§5).
             if fields[..position].contains(field) {
                 return Err(Diagnostic::new(
+                    Rule::DuplicateDeclaration,
                     format!("`{field_text}` is bound twice in this pattern"),
                     span,
                 ));
@@ -4350,6 +4504,7 @@ impl<'a> FnLowering<'a> {
         let resolved = self.unifier.resolve(&found);
         let Type::Tuple(components) = resolved else {
             return Err(Diagnostic::new(
+                Rule::NotATuple,
                 format!(
                     "`{}` is not a tuple, so it is not taken apart with `let (..)`",
                     self.unifier.display(&found)
@@ -4360,6 +4515,7 @@ impl<'a> FnLowering<'a> {
 
         if names.len() != components.len() {
             return Err(Diagnostic::new(
+                Rule::ArityMismatch,
                 format!(
                     "this tuple has {} components, but the pattern names {}; destructuring takes the whole value apart",
                     components.len(),
@@ -4376,6 +4532,7 @@ impl<'a> FnLowering<'a> {
             // pattern is still refused here.
             if names[..position].contains(name) {
                 return Err(Diagnostic::new(
+                    Rule::DuplicateDeclaration,
                     format!("`{text}` is bound twice in this pattern"),
                     span,
                 ));
@@ -4423,10 +4580,15 @@ impl<'a> FnLowering<'a> {
             AstExpr::Name(name) => {
                 let text = self.ast.name_of(*name);
                 let Some(binding) = self.lookup(*name) else {
-                    return Err(Diagnostic::new(format!("`{text}` is not bound here"), span));
+                    return Err(Diagnostic::new(
+                        Rule::UnknownName,
+                        format!("`{text}` is not bound here"),
+                        span,
+                    ));
                 };
                 if !binding.mutable {
                     return Err(Diagnostic::new(
+                        Rule::AssignToImmutable,
                         format!("`{text}` is immutable; declare it with `var` to assign to it"),
                         span,
                     ));
@@ -4444,6 +4606,7 @@ impl<'a> FnLowering<'a> {
                 let resolved = self.unifier.resolve(&base_ty);
                 let Type::Ref { unique, inner, .. } = &resolved else {
                     return Err(Diagnostic::new(
+                        Rule::NotAReference,
                         format!(
                             "`{}` is not a reference, so there is nothing for `*` to follow",
                             self.unifier.display(&resolved)
@@ -4452,7 +4615,7 @@ impl<'a> FnLowering<'a> {
                     ));
                 };
                 if !*unique {
-                    return Err(Diagnostic::new(
+                    return Err(Diagnostic::new(Rule::SharedReferenceWritten,
                         "this is a shared reference `&`, which promises its referent will not change; `borrow mut` hands back a unique one"
                             .to_owned(),
                         operand_span,
@@ -4463,6 +4626,7 @@ impl<'a> FnLowering<'a> {
                 // which is the silent drop §4 refuses however it is spelled.
                 if mode_of(self.defs, self.unifier, &self.bounds, &referent) == Mode::Res {
                     return Err(Diagnostic::new(
+                        Rule::LinearValueUnconsumed,
                         format!(
                             "`{}` is `res`, so this would discard a live resource without naming what ends it",
                             self.unifier.display(&referent)
@@ -4480,7 +4644,7 @@ impl<'a> FnLowering<'a> {
                 // A shared slice promises its elements will not change, the
                 // same promise a shared reference makes about its referent.
                 if let Type::Ref { unique: false, .. } = &resolved {
-                    return Err(Diagnostic::new(
+                    return Err(Diagnostic::new(Rule::SharedReferenceWritten,
                         "this is a shared slice `&`, which promises its elements will not change; `alloc_slice` hands back a unique one"
                             .to_owned(),
                         base_span,
@@ -4502,6 +4666,7 @@ impl<'a> FnLowering<'a> {
                 let resolved = self.unifier.resolve(&base_ty);
                 let Type::Ref { unique, inner, .. } = resolved else {
                     return Err(Diagnostic::new(
+                        Rule::NotAReference,
                         format!(
                             "`{}` is not a reference, so this would write one field and leave the rest; assign the whole value instead",
                             self.unifier.display(&resolved)
@@ -4510,7 +4675,7 @@ impl<'a> FnLowering<'a> {
                     ));
                 };
                 if !unique {
-                    return Err(Diagnostic::new(
+                    return Err(Diagnostic::new(Rule::SharedReferenceWritten,
                         "this is a shared reference `&`, which promises its referent will not change; `borrow mut` binds one that may be written through"
                             .to_owned(),
                         base_span,
@@ -4518,6 +4683,7 @@ impl<'a> FnLowering<'a> {
                 }
                 let Type::Named(def_id, type_args) = self.unifier.resolve(&inner) else {
                     return Err(Diagnostic::new(
+                        Rule::UnknownName,
                         format!("`{}` has no fields", self.unifier.display(&inner)),
                         base_span,
                     ));
@@ -4527,6 +4693,7 @@ impl<'a> FnLowering<'a> {
                 let field_text = self.ast.name_of(field);
                 let DefKind::Struct(fields) = &def.kind else {
                     return Err(Diagnostic::new(
+                        Rule::LinearValueTakenApart,
                         format!(
                             "`{}` is an enum; its payload is reached by matching, not with `.`",
                             self.ast.name_of(def.name)
@@ -4536,6 +4703,7 @@ impl<'a> FnLowering<'a> {
                 };
                 let Some(index) = fields.iter().position(|(n, _)| *n == field) else {
                     return Err(Diagnostic::new(
+                        Rule::UnknownName,
                         format!("`{}` has no field `{field_text}`", self.ast.name_of(def.name)),
                         span,
                     ));
@@ -4560,6 +4728,7 @@ impl<'a> FnLowering<'a> {
                 ))
             }
             _ => Err(Diagnostic::new(
+                Rule::NotAPlace,
                 "this cannot be assigned to; a place is a binding or a field reached through a unique reference",
                 span,
             )),
@@ -4576,7 +4745,11 @@ impl<'a> FnLowering<'a> {
     ) -> Result<Stmt, Diagnostic> {
         let text = self.ast.name_of(value);
         let Some(binding) = self.lookup(value) else {
-            return Err(Diagnostic::new(format!("`{text}` is not bound here"), span));
+            return Err(Diagnostic::new(
+                Rule::UnknownName,
+                format!("`{text}` is not bound here"),
+                span,
+            ));
         };
         let (referent, referent_ty) = (binding.slot, binding.ty.clone());
 
@@ -4662,6 +4835,7 @@ impl<'a> FnLowering<'a> {
         // is a leak with a static blessing.
         if mode_of(self.defs, self.unifier, &self.bounds, &resolved) == Mode::Res {
             return Err(Diagnostic::new(
+                Rule::ModeBoundViolated,
                 format!(
                     "`{}` is `res`, and an arena holds `val` data only: releasing one reclaims memory and runs nothing, so a linear obligation put inside would be dropped rather than discharged",
                     self.unifier.display(&resolved)
@@ -4695,6 +4869,7 @@ impl<'a> FnLowering<'a> {
     ) -> Result<(Expr, Type), Diagnostic> {
         let [capability, path, buffer] = args else {
             return Err(Diagnostic::new(
+                Rule::ArityMismatch,
                 format!(
                     "`{}` takes 3 arguments -- the capability, the path and the bytes -- but {} were given",
                     op.name(),
@@ -4755,6 +4930,7 @@ impl<'a> FnLowering<'a> {
             return Ok(prefix.clone());
         }
         Err(Diagnostic::new(
+            Rule::CapabilityMisused,
             format!(
                 "`{}` is not a borrowed `Fs`; reading or writing a file is reached through the capability that names the path it may touch",
                 self.unifier.display(&resolved)
@@ -4767,6 +4943,7 @@ impl<'a> FnLowering<'a> {
     fn boxed(&mut self, args: &[ExprId], span: Span) -> Result<(Expr, Type), Diagnostic> {
         let [heap, value] = args else {
             return Err(Diagnostic::new(
+                Rule::ArityMismatch,
                 format!(
                     "`box` takes 2 arguments -- the heap and the value -- but {} were given",
                     args.len()
@@ -4793,6 +4970,7 @@ impl<'a> FnLowering<'a> {
     fn unboxed(&mut self, args: &[ExprId], span: Span) -> Result<(Expr, Type), Diagnostic> {
         let [heap, boxed] = args else {
             return Err(Diagnostic::new(
+                Rule::ArityMismatch,
                 format!(
                     "`unbox` takes 2 arguments -- the heap and the box -- but {} were given",
                     args.len()
@@ -4816,6 +4994,7 @@ impl<'a> FnLowering<'a> {
         // assertion fired, which is a worse way to find out.
         if matches!(inner, Type::Slice(_)) {
             return Err(Diagnostic::new(
+                Rule::UnsizedType,
                 format!(
                     "`{}` is unsized, so `unbox` has nothing to hand back; `unbox_slice` frees a boxed slice and answers how many elements it freed",
                     self.unifier.display(&inner)
@@ -4837,6 +5016,7 @@ impl<'a> FnLowering<'a> {
     fn contents(&mut self, args: &[ExprId], span: Span) -> Result<(Expr, Type), Diagnostic> {
         let [reference] = args else {
             return Err(Diagnostic::new(
+                Rule::ArityMismatch,
                 format!("`contents` takes 1 argument, but {} were given", args.len()),
                 span,
             ));
@@ -4856,6 +5036,7 @@ impl<'a> FnLowering<'a> {
             ));
         }
         Err(Diagnostic::new(
+            Rule::TypeMismatch,
             format!(
                 "`{}` is not a borrowed `Box`; `contents` reads what a box holds, so there has to be a box to read",
                 self.unifier.display(&resolved)
@@ -4874,6 +5055,7 @@ impl<'a> FnLowering<'a> {
         let resolved = self.unifier.resolve(found);
         let Type::Ref { inner: referent, .. } = &resolved else {
             return Err(Diagnostic::new(
+                Rule::NotAReference,
                 format!(
                     "`{}` is not a reference, so there is nothing for `*` to follow",
                     self.unifier.display(&resolved)
@@ -4884,6 +5066,7 @@ impl<'a> FnLowering<'a> {
         let referent = self.unifier.resolve(referent);
         if mode_of(self.defs, self.unifier, &self.bounds, &referent) == Mode::Res {
             return Err(Diagnostic::new(
+                Rule::LinearValueTakenApart,
                 format!(
                     "`{}` is `res`, so `*` would copy it and leave two values where one obligation is owed; borrow it further or name a field instead",
                     self.unifier.display(&referent)
@@ -4899,6 +5082,7 @@ impl<'a> FnLowering<'a> {
     fn boxed_slice(&mut self, args: &[ExprId], span: Span) -> Result<(Expr, Type), Diagnostic> {
         let [heap, count, fill] = args else {
             return Err(Diagnostic::new(
+                Rule::ArityMismatch,
                 format!(
                     "`box_slice` takes 3 arguments -- the heap, the count and the fill -- but {} were given",
                     args.len()
@@ -4921,6 +5105,7 @@ impl<'a> FnLowering<'a> {
         // copied into every element, which a linear value cannot be at all.
         if mode_of(self.defs, self.unifier, &self.bounds, &element) == Mode::Res {
             return Err(Diagnostic::new(
+                Rule::ModeBoundViolated,
                 format!(
                     "`{}` is `res`, and a boxed slice holds `val` data only: the fill is copied into every element, and a linear value cannot be copied at all",
                     self.unifier.display(&element)
@@ -4944,6 +5129,7 @@ impl<'a> FnLowering<'a> {
     fn unboxed_slice(&mut self, args: &[ExprId], span: Span) -> Result<(Expr, Type), Diagnostic> {
         let [heap, boxed] = args else {
             return Err(Diagnostic::new(
+                Rule::ArityMismatch,
                 format!(
                     "`unbox_slice` takes 2 arguments -- the heap and the box -- but {} were given",
                     args.len()
@@ -4977,6 +5163,7 @@ impl<'a> FnLowering<'a> {
             return Ok(());
         }
         Err(Diagnostic::new(
+            Rule::CapabilityMisused,
             format!(
                 "`{}` is not a uniquely borrowed `Heap`; allocating is reached through the capability that authorises it",
                 self.unifier.display(&resolved)
@@ -4993,6 +5180,7 @@ impl<'a> FnLowering<'a> {
     fn len(&mut self, args: &[ExprId], span: Span) -> Result<(Expr, Type), Diagnostic> {
         let [slice] = args else {
             return Err(Diagnostic::new(
+                Rule::ArityMismatch,
                 format!("`len` takes 1 argument, but {} were given", args.len()),
                 span,
             ));
@@ -5032,6 +5220,7 @@ impl<'a> FnLowering<'a> {
         // `count` of them -- but the rule is the one rule, not a new one.
         if mode_of(self.defs, self.unifier, &self.bounds, &element) == Mode::Res {
             return Err(Diagnostic::new(
+                Rule::ModeBoundViolated,
                 format!(
                     "`{}` is `res`, and an arena holds `val` data only: the fill is copied into every element, and a linear value cannot be copied at all",
                     self.unifier.display(&element)
@@ -5115,6 +5304,7 @@ impl<'a> FnLowering<'a> {
         // refused anything that is not.
         let Type::Ref { unique, region, .. } = self.unifier.resolve(&base_ty) else {
             return Err(Diagnostic::new(
+                Rule::NotASlice,
                 format!(
                     "`{}` is not a slice, so it has no range to take",
                     self.unifier.display(&base_ty)
@@ -5151,6 +5341,7 @@ impl<'a> FnLowering<'a> {
             return Ok(self.unifier.resolve(&element));
         }
         Err(Diagnostic::new(
+            Rule::NotASlice,
             format!(
                 "`{}` is not a slice, so it has no elements to index or take a range of",
                 self.unifier.display(&resolved)
@@ -5171,6 +5362,7 @@ impl<'a> FnLowering<'a> {
                 return Ok(STATIC_ARENA);
             }
             return Err(Diagnostic::new(
+                Rule::ReferenceEscapesRegion,
                 "`alloc` in the `static` region is only legal inside a `static` item;                  elsewhere `static` is read-only data a program cannot add to",
                 span,
             ));
@@ -5181,7 +5373,7 @@ impl<'a> FnLowering<'a> {
             .find(|id| self.arenas.contains(id) && self.blocks[**id as usize].name == region)
             .copied()
             .ok_or_else(|| {
-                Diagnostic::new(
+                Diagnostic::new(Rule::RegionNotInScope,
                     format!(
                         "`{text}` is not an arena open here; `alloc` allocates in a `region {text} {{ .. }}` block"
                     ),
@@ -5229,6 +5421,7 @@ impl<'a> FnLowering<'a> {
         };
         let Type::Named(def_id, type_args) = matched else {
             return Err(Diagnostic::new(
+                Rule::MatchOnANonEnum,
                 format!(
                     "`{}` cannot be matched; `match` takes an enum, or a reference to one",
                     self.unifier.display(&resolved)
@@ -5240,6 +5433,7 @@ impl<'a> FnLowering<'a> {
         let enum_name = self.ast.name_of(def.name).to_owned();
         let DefKind::Enum(variants) = &def.kind else {
             return Err(Diagnostic::new(
+                Rule::MatchOnANonEnum,
                 format!("`{enum_name}` is a struct, not an enum; there is nothing to match on"),
                 scrutinee_span,
             ));
@@ -5255,6 +5449,7 @@ impl<'a> FnLowering<'a> {
         for arm in arms {
             if wildcard {
                 return Err(Diagnostic::new(
+                    Rule::MatchArmUnreachable,
                     "this arm is unreachable: `_` above it already matches everything",
                     span,
                 ));
@@ -5264,6 +5459,7 @@ impl<'a> FnLowering<'a> {
                 ast::Pattern::Wildcard => {
                     if covered.iter().all(|c| *c) {
                         return Err(Diagnostic::new(
+                            Rule::MatchArmUnreachable,
                             format!(
                                 "this `_` is unreachable: every variant of `{enum_name}` is already matched"
                             ),
@@ -5284,6 +5480,7 @@ impl<'a> FnLowering<'a> {
                     // take apart.
                     let Some(target) = self.ast.resolve_module(self.module, *qualifier) else {
                         return Err(Diagnostic::new(
+                            Rule::ModuleNotImported,
                             format!(
                                 "`{}` is not an imported module here",
                                 self.ast.name_of(qualifier.expect("a `None` qualifier resolves"))
@@ -5293,6 +5490,7 @@ impl<'a> FnLowering<'a> {
                     };
                     if *written != def.name || !def.visible_from(target) {
                         return Err(Diagnostic::new(
+                            Rule::UnknownName,
                             format!(
                                 "expected a variant of `{enum_name}`, found one of `{written_text}`"
                             ),
@@ -5302,12 +5500,14 @@ impl<'a> FnLowering<'a> {
                     let variant_text = self.ast.name_of(*variant);
                     let Some(index) = variants.iter().position(|(n, _)| n == variant) else {
                         return Err(Diagnostic::new(
+                            Rule::UnknownName,
                             format!("`{enum_name}` has no variant `{variant_text}`"),
                             span,
                         ));
                     };
                     if covered[index] {
                         return Err(Diagnostic::new(
+                            Rule::MatchArmUnreachable,
                             format!("`{enum_name}::{variant_text}` is matched twice"),
                             span,
                         ));
@@ -5315,6 +5515,7 @@ impl<'a> FnLowering<'a> {
                     let payload = &variants[index].1;
                     if bindings.len() != payload.len() {
                         return Err(Diagnostic::new(
+                            Rule::ArityMismatch,
                             format!(
                                 "`{enum_name}::{variant_text}` carries {} value{}, but the pattern binds {}",
                                 payload.len(),
@@ -5378,6 +5579,7 @@ impl<'a> FnLowering<'a> {
                                 self.scopes.pop();
                                 self.trace.close();
                                 return Err(Diagnostic::new(
+                                    Rule::DuplicateDeclaration,
                                     format!(
                                         "`{}` is bound twice in this pattern",
                                         self.ast.name_of(*name)
@@ -5416,6 +5618,7 @@ impl<'a> FnLowering<'a> {
                 .map(|(i, _)| format!("`{enum_name}::{}`", self.ast.name_of(variants[i].0)))
                 .collect();
             return Err(Diagnostic::new(
+                Rule::MatchNotExhaustive,
                 format!("this `match` does not cover {}", missing.join(", ")),
                 span,
             ));
@@ -5483,6 +5686,7 @@ impl<'a> FnLowering<'a> {
                         if let Some(current) = self.lowering_static {
                             if index >= current {
                                 return Err(Diagnostic::new(
+                                    Rule::StaticItem,
                                     format!(
                                         "`{text}` is a `static` declared later; a `static` may read one declared before it, so that there are no cycles to resolve"
                                     ),
@@ -5504,6 +5708,7 @@ impl<'a> FnLowering<'a> {
                         || Builtin::from_name(text).is_some() =>
                     {
                         return Err(Diagnostic::new(
+                            Rule::NoFunctionValues,
                             format!(
                                 "`{text}` is a function; M1 has no function values, so it can only be called"
                             ),
@@ -5511,7 +5716,11 @@ impl<'a> FnLowering<'a> {
                         ));
                     }
                     None => {
-                        return Err(Diagnostic::new(format!("`{text}` is not bound here"), span));
+                        return Err(Diagnostic::new(
+                            Rule::UnknownName,
+                            format!("`{text}` is not bound here"),
+                            span,
+                        ));
                     }
                 }
             }
@@ -5521,10 +5730,15 @@ impl<'a> FnLowering<'a> {
                 let Some(def) =
                     self.defs.iter().find(|d| d.name == *name && d.visible_from(target))
                 else {
-                    return Err(Diagnostic::new(format!("`{text}` is not a struct"), span));
+                    return Err(Diagnostic::new(
+                        Rule::NotAStruct,
+                        format!("`{text}` is not a struct"),
+                        span,
+                    ));
                 };
                 if is_capability(def.def) {
                     return Err(Diagnostic::new(
+                        Rule::CapabilityMisused,
                         format!(
                             "`{text}` is a capability and has no literal form; authority comes from the `World` the runtime hands `main`, and from nowhere else"
                         ),
@@ -5533,6 +5747,7 @@ impl<'a> FnLowering<'a> {
                 }
                 let DefKind::Struct(fields_decl) = &def.kind else {
                     return Err(Diagnostic::new(
+                        Rule::NotAStruct,
                         format!("`{text}` is an enum, not a struct"),
                         span,
                     ));
@@ -5554,12 +5769,14 @@ impl<'a> FnLowering<'a> {
                     let field_text = self.ast.name_of(*field);
                     let Some(index) = declared.iter().position(|(n, _)| n == field) else {
                         return Err(Diagnostic::new(
+                            Rule::UnknownName,
                             format!("`{text}` has no field `{field_text}`"),
                             span,
                         ));
                     };
                     if values[index].is_some() {
                         return Err(Diagnostic::new(
+                            Rule::DuplicateDeclaration,
                             format!("field `{field_text}` is given twice"),
                             span,
                         ));
@@ -5576,6 +5793,7 @@ impl<'a> FnLowering<'a> {
                         && index < previous
                     {
                         return Err(Diagnostic::new(
+                            Rule::FieldOrder,
                             format!(
                                 "field `{field_text}` is written after `{}`, but `{text}` declares it before; a struct literal's fields run in declaration order, so writing them in another order would hide what runs first",
                                 self.ast.name_of(declared[previous].0)
@@ -5594,6 +5812,7 @@ impl<'a> FnLowering<'a> {
                 // default to fall back on and no zero to invent.
                 if let Some(missing) = values.iter().position(Option::is_none) {
                     return Err(Diagnostic::new(
+                        Rule::MissingField,
                         format!(
                             "missing field `{}` in `{text}`",
                             self.ast.name_of(declared[missing].0)
@@ -5618,6 +5837,7 @@ impl<'a> FnLowering<'a> {
                 let parts = parts.clone();
                 if parts.len() < 2 {
                     return Err(Diagnostic::new(
+                        Rule::PatternShape,
                         "a tuple has two components or more; `(e)` is grouping, and there is no `()`",
                         span,
                     ));
@@ -5649,6 +5869,7 @@ impl<'a> FnLowering<'a> {
                 }
                 let Type::Tuple(components) = resolved else {
                     return Err(Diagnostic::new(
+                        Rule::NotATuple,
                         format!(
                             "`{}` is not a tuple, so it has no component `{index}`",
                             self.unifier.display(&resolved)
@@ -5658,6 +5879,7 @@ impl<'a> FnLowering<'a> {
                 };
                 let Some(ty) = components.get(index as usize).cloned() else {
                     return Err(Diagnostic::new(
+                        Rule::UnknownName,
                         format!(
                             "this tuple has {} components, so there is no `.{index}`; they are numbered from 0",
                             components.len()
@@ -5706,6 +5928,7 @@ impl<'a> FnLowering<'a> {
                 }
                 let Type::Named(def_id, type_args) = resolved else {
                     return Err(Diagnostic::new(
+                        Rule::UnknownName,
                         format!("`{}` has no fields", self.unifier.display(&resolved)),
                         base_span,
                     ));
@@ -5718,6 +5941,7 @@ impl<'a> FnLowering<'a> {
                 let field_text = self.ast.name_of(*name);
                 let DefKind::Struct(fields) = &def.kind else {
                     return Err(Diagnostic::new(
+                        Rule::MatchOnANonEnum,
                         format!(
                             "`{}` is an enum; its payload is read by matching on it, not with `.`",
                             self.ast.name_of(def.name)
@@ -5727,6 +5951,7 @@ impl<'a> FnLowering<'a> {
                 };
                 let Some(index) = fields.iter().position(|(n, _)| n == name) else {
                     return Err(Diagnostic::new(
+                        Rule::UnknownName,
                         format!("`{}` has no field `{field_text}`", self.ast.name_of(def.name)),
                         span,
                     ));
@@ -5789,17 +6014,23 @@ impl<'a> FnLowering<'a> {
                 let Some(def) =
                     self.defs.iter().find(|d| d.name == *enum_name && d.visible_from(target))
                 else {
-                    return Err(Diagnostic::new(format!("`{enum_text}` is not an enum"), span));
+                    return Err(Diagnostic::new(
+                        Rule::NotAnEnum,
+                        format!("`{enum_text}` is not an enum"),
+                        span,
+                    ));
                 };
                 let public = def.public;
                 let DefKind::Enum(variants) = &def.kind else {
                     return Err(Diagnostic::new(
+                        Rule::NotAnEnum,
                         format!("`{enum_text}` is a struct, not an enum"),
                         span,
                     ));
                 };
                 let Some(index) = variants.iter().position(|(n, _)| n == variant) else {
                     return Err(Diagnostic::new(
+                        Rule::UnknownName,
                         format!("`{enum_text}` has no variant `{variant_text}`"),
                         span,
                     ));
@@ -5815,6 +6046,7 @@ impl<'a> FnLowering<'a> {
 
                 if args.len() != payload_types.len() {
                     return Err(Diagnostic::new(
+                        Rule::ArityMismatch,
                         format!(
                             "`{enum_text}::{variant_text}` carries {} value{}, but {} {} given",
                             payload_types.len(),
@@ -5851,6 +6083,7 @@ impl<'a> FnLowering<'a> {
                     ast::UnOp::Neg => {
                         if !matches!(self.unifier.resolve(&found), Type::Int | Type::Float) {
                             return Err(Diagnostic::new(
+                                Rule::OperatorTypeMismatch,
                                 format!(
                                     "`{}` cannot be negated (`int` and `float` can)",
                                     self.unifier.display(&found)
@@ -5908,6 +6141,7 @@ impl<'a> FnLowering<'a> {
                     BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div => {
                         if !matches!(operand, Type::Int | Type::Float) {
                             return Err(Diagnostic::new(
+                                Rule::OperatorTypeMismatch,
                                 format!(
                                     "`{}` has no arithmetic (`int` and `float` do)",
                                     self.unifier.display(&operand)
@@ -5929,6 +6163,7 @@ impl<'a> FnLowering<'a> {
                     BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
                         if !matches!(operand, Type::Int | Type::Float) {
                             return Err(Diagnostic::new(
+                                Rule::OperatorTypeMismatch,
                                 format!(
                                     "`{}` has no ordering (`int` and `float` do)",
                                     self.unifier.display(&operand)
@@ -5957,6 +6192,7 @@ impl<'a> FnLowering<'a> {
                     BinOp::Eq | BinOp::Ne => {
                         if !matches!(operand, Type::Int | Type::Bool | Type::Byte | Type::Float) {
                             return Err(Diagnostic::new(
+                                Rule::OperatorTypeMismatch,
                                 format!(
                                     "`{}` cannot be compared with `==` (`int`, `byte`, `bool` and `float` can)",
                                     self.unifier.display(&operand)
@@ -5988,6 +6224,7 @@ impl<'a> FnLowering<'a> {
                 let text = self.ast.name_of(*callee);
                 if self.lookup(*callee).is_some() {
                     return Err(Diagnostic::new(
+                        Rule::NotAFunction,
                         format!("`{text}` is a local binding, not a function"),
                         span,
                     ));
@@ -6085,6 +6322,7 @@ impl<'a> FnLowering<'a> {
                 } else {
                     let Resolved::Fn(index) = resolved else {
                         return Err(Diagnostic::new(
+                            Rule::NotAFunction,
                             format!("`{text}` is not a function in this program"),
                             span,
                         ));
@@ -6116,6 +6354,7 @@ impl<'a> FnLowering<'a> {
 
                 if args.len() != params.len() {
                     return Err(Diagnostic::new(
+                        Rule::ArityMismatch,
                         format!(
                             "`{text}` takes {} argument{}, but {} {} given",
                             params.len(),
@@ -6146,6 +6385,7 @@ impl<'a> FnLowering<'a> {
                         let got_outer = self.unifier.resolve_region(region_args[outer as usize]);
                         if !self.outlives(got_outer, got_inner) {
                             return Err(Diagnostic::new(
+                                Rule::ReferenceEscapesRegion,
                                 format!(
                                     "`{text}` requires `{} <= {}`, but here `{}` does not outlive `{}`",
                                     self.ast.name_of(names[inner as usize]),
@@ -6178,6 +6418,7 @@ impl<'a> FnLowering<'a> {
                                 let parameter =
                                     self.ast.name_of(self.signatures[index].generics[position]);
                                 return Err(Diagnostic::new(
+                                    Rule::AmbiguousType,
                                     format!(
                                         "cannot tell what `{parameter}` is in this call to `{text}`; it is not determined by the arguments"
                                     ),
@@ -6199,6 +6440,7 @@ impl<'a> FnLowering<'a> {
                                 let parameter =
                                     self.ast.name_of(self.signatures[index].generics[position]);
                                 return Err(Diagnostic::new(
+                                    Rule::ModeBoundViolated,
                                     format!(
                                         "`{text}` needs `{parameter}` to be `val`, and `{}` is `res`",
                                         self.unifier.display(&resolved)

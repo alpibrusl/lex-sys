@@ -1,4 +1,5 @@
 //~ ERROR `main` takes one argument, the `World`
+//~ RULE program-shape
 
 // §8.2: authority enters a program in exactly one place. A `main` that takes
 // something else has no `World`, and a program with no `World` can never

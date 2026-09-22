@@ -1,4 +1,5 @@
 //~ ERROR is frozen by an enclosing `borrow`
+//~ RULE borrow-conflict
 
 // `docs/defer.md` §2.1: a `defer` runs at the end of **its own block**,
 // which for one written inside a `borrow` is before the borrow ends —

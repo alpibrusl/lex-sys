@@ -1,4 +1,5 @@
 //~ ERROR consumed inside this loop
+//~ RULE linear-value-unconsumed
 
 // §4.3: a loop body must leave the live set exactly as it found it, or the
 // second iteration uses a value the first one spent. The check is a

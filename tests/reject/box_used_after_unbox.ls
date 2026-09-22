@@ -1,4 +1,5 @@
 //~ ERROR consumed
+//~ RULE linear-use-after-move
 
 // §3.1 from the other direction: `unbox` consumes the box, so there is no
 // use-after-free to have. The same rule that refuses a second `release` of

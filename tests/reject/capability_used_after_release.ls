@@ -1,4 +1,5 @@
 //~ ERROR nothing left to borrow
+//~ RULE linear-use-after-move
 
 // §8.3: a capability is a resource, so §4.1's use-after-move is what stops
 // a released one being used again. No new rule, and no special case for

@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
 use lex_sys_ir::TypeInfo;
-use lex_sys_syntax::{Ast, SourceFile, SourceMap};
+use lex_sys_syntax::{Ast, Rule, SourceFile, SourceMap};
 use lex_sys_types::{DefId, Type};
 
 const USAGE: &str = "\
@@ -29,7 +29,7 @@ lex-sys — the bootstrap compiler for the lex-sys systems dialect
 
 usage:
     lex-sys build <file.ls>... [-o <output>] [--emit exe|obj] [--std]
-    lex-sys check <file.ls>... [--std]
+    lex-sys check <file.ls>... [--std] [--output json]
     lex-sys run   <file.ls>... [--std]
     lex-sys ids   <file.ls>... [--std]
     lex-sys authority <file.ls>... [--std] [--output json]
@@ -41,7 +41,7 @@ options:
     -o <output>     where to write the result (default: the first input's stem)
     --emit exe|obj  emit a linked executable (default) or a bare object file
     --std           make the standard library's source available
-    --output json   `authority` as data rather than prose
+    --output json   `check` and `authority` as data rather than prose
 
 A program is the set of files named on the command line, in any order.
 Each file is in a module -- the root, unless it says `module a.b;` -- and
@@ -53,6 +53,12 @@ binary rather than looked up on disk: no search path, no manifest. It is
 not a prelude -- a program still writes `import std.io;` where it uses
 one -- and a declaration nothing calls emits nothing. See
 docs/standard-library.md.
+
+`check --output json` answers every refusal as data: a stable `rule`
+tag, the same sentence, what the rule enforces, and a position. The exit
+status is unchanged -- 1 for a refused program -- and `check` reports
+every independent refusal rather than the first. See
+docs/agent-errors.md.
 
 `ids` prints each declaration's content hash: a signature and a body for
 every function, one identity for every type. A unit hashes its content,
@@ -120,9 +126,8 @@ fn run(args: &[String]) -> Result<ExitCode, Failure> {
             Ok(ExitCode::SUCCESS)
         }
         "check" => {
-            let Invocation { inputs, with_std, .. } = parse_args(&args[1..], false)?;
-            compile_to_ir(&inputs, with_std)?;
-            Ok(ExitCode::SUCCESS)
+            let Invocation { inputs, with_std, json, .. } = parse_args(&args[1..], false)?;
+            check_program(&inputs, with_std, json)
         }
         // `docs/many-files.md` §5: printing is about text, and text is
         // what a file is -- so this renders exactly one.
@@ -280,13 +285,22 @@ fn default_output(input: &Path, emit: Emit) -> PathBuf {
 /// The `SourceMap` hands out a base offset per file and resolves any
 /// diagnostic's span back to the file it came from, so nothing downstream
 /// of here learns that a program can have more than one (§4).
-fn parse_program(inputs: &[PathBuf], with_std: bool) -> Result<(Ast, SourceMap), Failure> {
+fn parse_program(inputs: &[PathBuf], with_std: bool) -> Result<(Ast, SourceMap), ParseFailure> {
     let mut map = SourceMap::new();
     let mut ast = Ast::new();
     let mut sources = Vec::new();
     for input in inputs {
-        let text = std::fs::read_to_string(input)
-            .map_err(|e| environment(format!("cannot read `{}`: {e}", input.display())))?;
+        let text = std::fs::read_to_string(input).map_err(|e| ParseFailure {
+            rendered: environment(format!("cannot read `{}`: {e}", input.display())),
+            // Nothing was parsed, so there is no span and no rule about
+            // the program: `docs/agent-errors.md` §7 keeps the
+            // environment's failures out of the refusal vocabulary.
+            diagnostic: lex_sys_syntax::Diagnostic::new(
+                Rule::ProgramShape,
+                "unreadable input",
+                lex_sys_syntax::Span::new(0, 0),
+            ),
+        })?;
         let base = map.add(input.display().to_string(), text.clone());
         sources.push((text, base));
     }
@@ -302,16 +316,162 @@ fn parse_program(inputs: &[PathBuf], with_std: bool) -> Result<(Ast, SourceMap),
         }
     }
     for (text, base) in &sources {
-        lex_sys_syntax::parse_into(&mut ast, text, *base)
-            .map_err(|d| refused(d.render_in(&map)))?;
+        if let Err(d) = lex_sys_syntax::parse_into(&mut ast, text, *base) {
+            // The rendered sentence for the caller that wants prose, and
+            // the diagnostic itself for the one that wants the rule
+            // (`docs/agent-errors.md` §5): a parse error has a rule like
+            // any other refusal, and rendering it away was how
+            // `unknown-escape` came to report as `type-mismatch`.
+            return Err(ParseFailure { rendered: refused(d.render_in(&map)), diagnostic: d });
+        }
     }
     Ok((ast, map))
 }
 
+/// A parse refusal, before it has been reduced to a sentence.
+struct ParseFailure {
+    rendered: Failure,
+    diagnostic: lex_sys_syntax::Diagnostic,
+}
+
+impl From<ParseFailure> for Failure {
+    fn from(failure: ParseFailure) -> Failure {
+        failure.rendered
+    }
+}
+
 /// Read, parse and lower a program, reporting any refusal with its source line.
 fn compile_to_ir(inputs: &[PathBuf], with_std: bool) -> Result<lex_sys_ir::Program, Failure> {
-    let (ast, map) = parse_program(inputs, with_std)?;
-    let program = lex_sys_ir::lower(&ast).map_err(|d| refused(d.render_in(&map)))?;
+    match compile_reporting(inputs, with_std) {
+        Ok((program, _)) => Ok(program),
+        Err(refusals) => {
+            let (_, map) = parse_program(inputs, with_std)?;
+            let text: Vec<String> = refusals.iter().map(|r| r.render(&map)).collect();
+            Err(refused(text.join("\n\n")))
+        }
+    }
+}
+
+/// `check`: type-check a program and say what is wrong with it.
+///
+/// The prose is what it always was — `docs/agent-errors.md` §6 keeps
+/// every message byte for byte — and `--output json` adds the form a
+/// program can read without a regular expression over English (§5).
+///
+/// Either way the exit status is the same: **1** for a refused program.
+/// A machine-readable body does not change what happened, and this
+/// repository already has semantic exit codes.
+fn check_program(inputs: &[PathBuf], with_std: bool, json: bool) -> Result<ExitCode, Failure> {
+    let refusals = match compile_reporting(inputs, with_std) {
+        Ok(_) => Vec::new(),
+        Err(refusals) => refusals,
+    };
+    if !json {
+        if refusals.is_empty() {
+            return Ok(ExitCode::SUCCESS);
+        }
+        // Re-parsing to render is cheap beside the checking that just
+        // happened, and it keeps `compile_reporting` from having to hand
+        // back a map it could not build on a parse error.
+        let (_, map) = parse_program(inputs, with_std)?;
+        let text: Vec<String> = refusals.iter().map(|r| r.render(&map)).collect();
+        return Err(refused(text.join("\n\n")));
+    }
+
+    let map = parse_program(inputs, with_std).map(|(_, map)| map).ok();
+    if refusals.is_empty() {
+        // An empty list rather than an empty-looking one: a consumer
+        // checks the length, and `[]` is the shape it expects.
+        let stdout = io::stdout();
+        let mut out = stdout.lock();
+        let _ = out.write_all(b"{\n  \"refused\": []\n}\n").and_then(|()| out.flush());
+        return Ok(ExitCode::SUCCESS);
+    }
+    let mut body = String::from("{\n  \"refused\": [\n");
+    for (index, refusal) in refusals.iter().enumerate() {
+        let position = match (&map, refusal.span) {
+            (Some(map), Some(span)) => match map.position_of(span) {
+                Some((file, line, column)) => format!(
+                    "{{ \"file\": \"{}\", \"line\": {line}, \"column\": {column} }}",
+                    escaped(file)
+                ),
+                // §1.1: a refusal about the program rather than about a
+                // span in it has nowhere to point, and says so.
+                None => "null".to_owned(),
+            },
+            _ => "null".to_owned(),
+        };
+        let comma = if index + 1 == refusals.len() { "" } else { "," };
+        body.push_str(&format!(
+            "    {{\n      \"rule\": \"{}\",\n      \"message\": \"{}\",\n      \"explanation\": \"{}\",\n      \"position\": {position}\n    }}{comma}\n",
+            refusal.rule.tag(),
+            escaped(&refusal.message),
+            escaped(refusal.rule.explanation()),
+        ));
+    }
+    body.push_str("  ]\n}\n");
+
+    let stdout = io::stdout();
+    let mut out = stdout.lock();
+    match out.write_all(body.as_bytes()).and_then(|()| out.flush()) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::BrokenPipe => {}
+        Err(e) => return Err(environment(format!("cannot write to stdout: {e}"))),
+    }
+    if refusals.is_empty() { Ok(ExitCode::SUCCESS) } else { Ok(ExitCode::from(EXIT_REFUSED)) }
+}
+
+/// One refusal, with the rule it enforces beside the sentence it wrote.
+///
+/// `docs/agent-errors.md` §5. `position` is absent for the refusals about
+/// a program rather than a span in one (§1.1), which is an answer rather
+/// than a gap.
+struct Refusal {
+    rule: Rule,
+    message: String,
+    span: Option<lex_sys_syntax::Span>,
+}
+
+impl Refusal {
+    /// The sentence a person reads, byte for byte what it was before the
+    /// rule was attached to it (§6).
+    fn render(&self, map: &lex_sys_syntax::SourceMap) -> String {
+        match self.span {
+            Some(span) => {
+                lex_sys_syntax::Diagnostic::new(self.rule, &self.message, span).render_in(map)
+            }
+            None => self.message.clone(),
+        }
+    }
+}
+
+/// Read, parse and lower, answering **every** refusal (§4).
+fn compile_reporting(
+    inputs: &[PathBuf],
+    with_std: bool,
+) -> Result<(lex_sys_ir::Program, lex_sys_syntax::SourceMap), Vec<Refusal>> {
+    let (ast, map) = match parse_program(inputs, with_std) {
+        Ok(pair) => pair,
+        // A parse error ends the file: a program that did not parse has no
+        // reliable second error, and inventing one teaches a reader to
+        // chase phantoms (§4).
+        Err(failure) => {
+            return Err(vec![Refusal {
+                rule: failure.diagnostic.rule,
+                message: failure.rendered.message,
+                span: None,
+            }]);
+        }
+    };
+    let program = match lex_sys_ir::lower_all(&ast) {
+        Ok(program) => program,
+        Err(all) => {
+            return Err(all
+                .into_iter()
+                .map(|d| Refusal { rule: d.rule, message: d.message, span: Some(d.span) })
+                .collect());
+        }
+    };
     let where_ = inputs[0].display().to_string();
 
     // `main` becomes the process entry point, so its shape is part of the
@@ -324,20 +484,30 @@ fn compile_to_ir(inputs: &[PathBuf], with_std: bool) -> Result<lex_sys_ir::Progr
         // point still calls `main` with no arguments.
         let world = program.world();
         if entry.n_params != 1 || entry.slots.first() != Some(&world) {
-            return Err(refused(format!(
-                "{where_}: error: `main` takes one argument, the `World` the runtime hands it"
-            )));
+            return Err(vec![Refusal {
+                rule: Rule::ProgramShape,
+                message: format!(
+                    "{where_}: error: `main` takes one argument, the `World` the runtime hands it"
+                ),
+                span: None,
+            }]);
         }
         if entry.ret != lex_sys_types::Type::Int {
-            return Err(refused(format!(
-                "{where_}: error: `main` returns `int`, the process exit status"
-            )));
+            return Err(vec![Refusal {
+                rule: Rule::ProgramShape,
+                message: format!("{where_}: error: `main` returns `int`, the process exit status"),
+                span: None,
+            }]);
         }
     } else {
-        return Err(refused(format!("{where_}: error: no `main` function")));
+        return Err(vec![Refusal {
+            rule: Rule::ProgramShape,
+            message: format!("{where_}: error: no `main` function"),
+            span: None,
+        }]);
     }
 
-    Ok(program)
+    Ok((program, map))
 }
 
 /// Print every unit's content hash.

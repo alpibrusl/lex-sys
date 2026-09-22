@@ -1,4 +1,5 @@
 //~ ERROR `Shape::Circle` is matched twice
+//~ RULE match-arm-unreachable
 
 enum Shape { Circle(int), Rect(int, int) }
 

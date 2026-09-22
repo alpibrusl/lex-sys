@@ -1,4 +1,5 @@
 //~ ERROR this payload is `res`
+//~ RULE linear-value-unconsumed
 
 // The same rule one level down: `_` in a payload position drops whatever was
 // there. Fine for an `int`, not for a `File`.

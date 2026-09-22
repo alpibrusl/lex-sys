@@ -1,4 +1,5 @@
 //~ ERROR is still live here
+//~ RULE linear-value-unconsumed
 
 // `docs/mode-polymorphism.md` §3.1 and §4.
 //

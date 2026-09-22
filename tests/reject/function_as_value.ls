@@ -1,4 +1,5 @@
 //~ ERROR no function values
+//~ RULE no-function-values
 
 fn helper() -> [] int {
     return 0;

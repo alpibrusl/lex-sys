@@ -1,4 +1,5 @@
 //~ ERROR declares `io_write` but never performs it
+//~ RULE effect-declared-not-performed
 
 // §7.3: an over-wide row is an error, not a warning. The row is exact or it
 // is decoration -- and an inexact row means `[]` no longer means pure, which

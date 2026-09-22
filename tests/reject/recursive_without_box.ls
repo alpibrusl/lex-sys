@@ -1,5 +1,6 @@
 //~ ERROR contains itself
 //~ ERROR put a `Box` on the path back to it
+//~ RULE infinite-type
 
 // `docs/heap.md` §4: the size check has exactly one hole in it, and a type
 // that contains itself *directly* is not in it.

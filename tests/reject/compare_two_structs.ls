@@ -1,4 +1,5 @@
 //~ ERROR cannot be compared with `==`
+//~ RULE operator-type-mismatch
 
 struct Point { x: int, y: int }
 

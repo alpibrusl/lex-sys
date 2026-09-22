@@ -1,4 +1,5 @@
 //~ ERROR performs `io_read`
+//~ RULE effect-not-declared
 
 // §7.2: an effect performed is an effect declared. The new label is not
 // exempt.

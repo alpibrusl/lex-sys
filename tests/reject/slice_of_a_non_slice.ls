@@ -1,4 +1,5 @@
 //~ ERROR is not a slice
+//~ RULE not-a-slice
 
 // `docs/slicing.md` §1: `..` takes a range *of a run*, so there has to be
 // a run. An `int` has no elements to take a range of, and the refusal

@@ -1,4 +1,5 @@
 //~ ERROR is still live at the end of this block
+//~ RULE linear-value-unconsumed
 
 // `docs/mode-polymorphism.md` §2 — the leak, and the reason this slice
 // exists.

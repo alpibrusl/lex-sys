@@ -1,4 +1,5 @@
 //~ ERROR shared slice
+//~ RULE shared-reference-written
 
 // §3.1: an argument comes back *shared*, never unique.
 //

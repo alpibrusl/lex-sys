@@ -1,4 +1,5 @@
 //~ ERROR defined twice
+//~ RULE duplicate-declaration
 
 fn f() -> [] int {
     return 1;

@@ -1,4 +1,5 @@
 //~ ERROR is a built-in type and cannot be redeclared
+//~ RULE builtin-redeclared
 
 // A program that could declare its own `Io` could hand itself one. The
 // prelude's capability types are as reserved as `int` is, and for a sharper

@@ -1,4 +1,5 @@
 //~ ERROR has already been consumed
+//~ RULE linear-use-after-move
 
 // `docs/mode-polymorphism.md` §2, the worse half.
 //
