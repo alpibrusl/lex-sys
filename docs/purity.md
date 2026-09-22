@@ -137,6 +137,18 @@ sits there unspent.
 effects" in `cranelift-codegen` 0.121; `readonly` is a flag on *load*
 instructions, not on calls. So there is nothing to emit.
 
+> **Checked against the source (#68):
+> [`backend-limits.md`](backend-limits.md) §1.2.** It is one level
+> lower than a missing field. `ExtFuncData` is
+> `{ name, signature, colocated }` and `Signature` is
+> `{ params, returns, call_conv }`, so there is nowhere to write one —
+> and a field would not be read anyway, because
+> `inst_predicates.rs` answers the question with
+> `opcode.is_call()`, unconditionally, before anything could be
+> consulted. The clause beside it is `opcode.can_trap()`, which is what
+> `check-cost.md` measured from the outside: **this document's 158× and
+> that one's 3.35× are two clauses of the same four-line function.**
+
 **And writing our own pass is excluded on purpose.** `README.md`'s
 non-goals list "an own optimiser", and the backend plan is *"Cranelift
 for dev, LLVM for release"*. A purity-driven CSE pass in this repository
