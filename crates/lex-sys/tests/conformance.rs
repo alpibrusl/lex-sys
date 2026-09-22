@@ -4680,6 +4680,167 @@ fn a_diagnostic_only_program_touches_the_console() {
 }
 
 /// Build one of the `examples/` programs into a scratch directory.
+/// `docs/flags.md` §2 — the nine shapes, each read back as itself.
+///
+/// The fixture is the driver: `tests/accept/flags.ls` prints what it
+/// was handed, so §2's table and this test are the same claim, and a
+/// fixture that drifted from the document would fail here rather than
+/// sit in the tree agreeing with nothing.
+///
+/// `-d,` and `-d ,` produce the same line on purpose. That is the point
+/// of §3's protocol — the program asked for a value, so both spellings
+/// of giving one resolve to the same thing, and the caller never learns
+/// which was written.
+#[test]
+fn every_argument_shape() {
+    let (dir, exe) = build_example("flags-shapes", "tests/accept/flags.ls", "flags");
+
+    let cases: &[(&[&str], &str)] = &[
+        (&["-x"], "short x"),
+        (&["-xy"], "short x\nshort y"),
+        (&["-d,"], "short d=,"),
+        (&["-d", ","], "short d=,"),
+        (&["--decode"], "long decode"),
+        (&["--delimiter=,"], "long delimiter=,"),
+        (&["--delimiter", ","], "long delimiter=,"),
+        (&["--", "-x"], "operand -x"),
+        (&["-"], "operand -"),
+        (&["file.csv"], "operand file.csv"),
+        // The value runs out: an empty slice, which is the one case §3
+        // says a caller has to test.
+        (&["-d"], "short d="),
+        // A flag after `--` is an operand, and so is a second `--`.
+        (&["--", "--", "-x"], "operand --\noperand -x"),
+    ];
+
+    for (args, expected) in cases {
+        let run = Command::new(&exe).args(*args).output().expect("the program runs");
+        assert_eq!(run.status.code(), Some(0), "`{}` should exit 0", args.join(" "));
+        assert_eq!(
+            String::from_utf8_lossy(&run.stdout).trim_end(),
+            *expected,
+            "`{}` should read back as itself",
+            args.join(" ")
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `docs/flags.md` §1 — every spelling GNU accepts, on both ports.
+///
+/// The gap this closes is not a missing feature. Before `std.flags`, six
+/// of these twelve rows disagreed with GNU: `cut` refused four of them
+/// loudly, and `base64` answered two of them by **encoding its input and
+/// exiting 0**, because `--decode` is not two bytes so the test for `-d`
+/// was false and the flag was dropped.
+///
+/// And every base64 test in this file passed exactly `-d`. Twelve input
+/// sizes, both directions and three malformed inputs, all through one
+/// spelling of one flag — `line-reading.md` §1's shape again, where the
+/// dimension the suite never varied was the length of a line.
+///
+/// So this is a table of spellings rather than of data, and it compares
+/// stdout *and* exit status: a divergence that only shows in the status
+/// is how `cut` failed.
+#[test]
+fn both_ports_match_gnu_on_every_spelling() {
+    let data = b"a,b,c\n";
+    let encoded = b"aGk=\n";
+
+    // `(program, args, whether GNU and this program should agree)`. The
+    // `false` rows are the divergences `flags.md` §4 keeps on purpose,
+    // written here so they are checked rather than remembered.
+    let cases: &[(&str, &[&str], bool)] = &[
+        ("cut", &["-d,", "-f2"], true),
+        ("cut", &["-d", ",", "-f2"], true),
+        ("cut", &["--delimiter=,", "--fields=2"], true),
+        ("cut", &["--delimiter", ",", "--fields", "2"], true),
+        ("cut", &["-d,", "-f", "2"], true),
+        ("cut", &["-f2", "-d,"], true),
+        ("cut", &["-d,", "-f1,3"], true),
+        ("cut", &["-d,", "-f2", "--"], true),
+        ("cut", &["-x"], true),
+        ("cut", &["-d,,", "-f2"], true),
+        // §4: no abbreviation, because resolving one needs the option
+        // table this design does not have.
+        ("cut", &["--delim=,", "-f2"], false),
+        ("base64", &["-d"], true),
+        ("base64", &["--decode"], true),
+        ("base64", &[], true),
+        ("base64", &["--"], true),
+        ("base64", &["-q"], true),
+        // §4: `-i` and `-w` are refused rather than accepted and
+        // ignored. Neither is implementable here, and accepting one
+        // would be §1's silent lie in a second place.
+        ("base64", &["-di"], false),
+        ("base64", &["-w0"], false),
+    ];
+
+    let (cut_dir, cut_exe) = build_example("flags-cut", "examples/cut/cut.ls", "cut");
+    let (b64_dir, b64_exe) = build_example("flags-base64", "examples/base64/base64.ls", "base64");
+
+    fn feed(command: &Path, args: &[&str], input: &[u8]) -> (Vec<u8>, Option<i32>) {
+        let mut child = Command::new(command)
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("the program runs");
+        let mut stdin = child.stdin.take().expect("a piped stdin");
+        let owned = input.to_vec();
+        let writer = std::thread::spawn(move || {
+            let _ = stdin.write_all(&owned);
+            drop(stdin);
+        });
+        let out = child.wait_with_output().expect("it exits");
+        writer.join().expect("the writer thread finishes");
+        (out.stdout, out.status.code())
+    }
+
+    let mut compared = 0;
+    for (program, args, agrees) in cases {
+        let reference = PathBuf::from(format!("/usr/bin/{program}"));
+        if !reference.exists() {
+            continue;
+        }
+        let (exe, input): (&Path, &[u8]) = match *program {
+            "cut" => (&cut_exe, data),
+            _ => (&b64_exe, encoded),
+        };
+        let (theirs, their_status) = feed(&reference, args, input);
+        let (ours, our_status) = feed(exe, args, input);
+        compared += 1;
+        if *agrees {
+            assert_eq!(
+                (String::from_utf8_lossy(&ours).into_owned(), our_status),
+                (String::from_utf8_lossy(&theirs).into_owned(), their_status),
+                "`{program} {}` should match GNU",
+                args.join(" ")
+            );
+        } else {
+            assert_ne!(
+                (String::from_utf8_lossy(&ours).into_owned(), our_status),
+                (String::from_utf8_lossy(&theirs).into_owned(), their_status),
+                "`{program} {}` is a documented divergence (`flags.md` §4); \
+                 if it now agrees, move the row rather than deleting it",
+                args.join(" ")
+            );
+        }
+    }
+
+    // Both references are coreutils, so either both exist or neither
+    // does. Nothing to assert on a machine without them — and saying so
+    // is better than a test that silently checks nothing.
+    if compared > 0 {
+        assert_eq!(compared, cases.len(), "every row should have run");
+    }
+
+    let _ = std::fs::remove_dir_all(&cut_dir);
+    let _ = std::fs::remove_dir_all(&b64_dir);
+}
+
 fn build_example(tag: &str, relative: &str, binary: &str) -> (PathBuf, PathBuf) {
     let dir = scratch(tag);
     let exe = dir.join(binary);
