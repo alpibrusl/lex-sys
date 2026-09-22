@@ -186,10 +186,17 @@ does not apply that limit when it pipes a dump to a program. What does
 help is that Linux never dumps a process whose executable its user
 cannot read, the same rule that keeps a setuid binary's memory out of a
 core file. So on Linux the test makes the run-time binary execute-only
-(`0711`). It was checked as an unprivileged user, with an unlimited core
-limit and `core_pattern` set to `core`: the readable binary left a core
-file, the execute-only one did not, and both died of `SIGILL`. The
-trap is unchanged, and only the dump is skipped.
+for its owner (`0100`). It was checked as an unprivileged user, running
+a binary that user owned, with an unlimited core limit and
+`core_pattern` set to `core`: `0711` left a core file, `0100` did not,
+and both died of `SIGILL`. The trap is unchanged, and only the dump is
+skipped.
+
+The first attempt used `0711`, and CI came back at 532 ms per trap,
+the same as before. The local check that approved it had run the binary
+as a user who did not own it, so the read bit it tested was the
+"other" bit. The owner's bit stayed set, and the owner is the user
+running the tests.
 
 ---
 

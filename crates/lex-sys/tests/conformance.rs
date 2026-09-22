@@ -4225,11 +4225,13 @@ fn first[&a](a: &a Args) -> [args] int {
     // `systemd-coredump`, measured at 544 ms per trap and slowing as they
     // pile up, and a pipe ignores `RLIMIT_CORE`. Linux never dumps a
     // process whose executable its user cannot read, so the binary is
-    // made execute-only. The trap is unchanged; only the dump goes.
+    // made execute-only -- for its **owner**, who is the one running it,
+    // which is why this is `0100` and not `0711`. The trap is unchanged;
+    // only the dump goes.
     #[cfg(target_os = "linux")]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o711))
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o100))
             .expect("the runtime binary's mode can be set");
     }
 
