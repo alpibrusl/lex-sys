@@ -656,6 +656,24 @@ fn mentions_parameter(ty: &Type) -> bool {
     }
 }
 
+/// Whether a label's name bounds what it authorises.
+///
+/// Every label but one names the domain it grants: `fs_read("/tmp")` is a
+/// directory, `io_write` is one stream, `heap` reaches nothing else. The
+/// exception is `ffi`, whose argument names a *library* -- and a library
+/// is not an authority domain: `Ffi("libc")` grants sockets, processes and
+/// `unlink` in the same breath as `abs` (`docs/under-a-grant.md` §4).
+///
+/// So the report **fails closed**. A supervisor that reads nothing but the
+/// top-level `bounded` field refuses any program that reaches foreign
+/// code, which is the safe default for a report that cannot say what that
+/// code does. Reading further is how a supervisor decides to trust one
+/// anyway -- a decision about the program, which the report must not make
+/// on its behalf.
+fn bounds_its_domain(label: &str) -> bool {
+    label != "ffi"
+}
+
 fn print_authority(inputs: &[PathBuf], with_std: bool, json: bool) -> Result<(), Failure> {
     let program = compile_to_ir(inputs, with_std)?;
 
@@ -687,6 +705,8 @@ fn print_authority(inputs: &[PathBuf], with_std: bool, json: bool) -> Result<(),
     let mut kinds: Vec<&str> = performed.iter().map(|(name, _)| name.as_str()).collect();
     kinds.dedup();
 
+    let bounded = performed.iter().all(|(name, _)| bounds_its_domain(name));
+
     let mut symbols: Vec<&str> =
         program.externs.iter().map(|declared| declared.symbol.as_str()).collect();
     symbols.sort_unstable();
@@ -716,6 +736,9 @@ fn print_authority(inputs: &[PathBuf], with_std: bool, json: bool) -> Result<(),
     if json {
         let written = (|| -> io::Result<()> {
             writeln!(out, "{{")?;
+            // First on purpose: the one field a consumer that reads nothing
+            // else should read (`docs/under-a-grant.md` §5.1).
+            writeln!(out, "  \"bounded\": {bounded},")?;
             writeln!(out, "  \"effects\": [{}],", quoted(&kinds))?;
             writeln!(out, "  \"labels\": [")?;
             for (i, (name, argument)) in performed.iter().enumerate() {
@@ -726,8 +749,9 @@ fn print_authority(inputs: &[PathBuf], with_std: bool, json: bool) -> Result<(),
                 };
                 writeln!(
                     out,
-                    "    {{ \"name\": \"{}\", \"argument\": {argument} }}{comma}",
-                    escaped(name)
+                    "    {{ \"name\": \"{}\", \"argument\": {argument}, \"bounded\": {} }}{comma}",
+                    escaped(name),
+                    bounds_its_domain(name)
                 )?;
             }
             writeln!(out, "  ],")?;
@@ -746,12 +770,21 @@ fn print_authority(inputs: &[PathBuf], with_std: bool, json: bool) -> Result<(),
         };
     }
     let written = (|| -> io::Result<()> {
+        if !bounded {
+            writeln!(out, "UNBOUNDED: this program calls foreign code, and a library is")?;
+            writeln!(out, "not an authority domain -- the labels below do not bound what")?;
+            writeln!(out, "it can reach. See docs/under-a-grant.md.")?;
+        }
         if labels.is_empty() {
             writeln!(out, "performs nothing")?;
         } else {
             writeln!(out, "performs")?;
-            for label in &labels {
-                writeln!(out, "    {label}")?;
+            for (label, (name, _)) in labels.iter().zip(&performed) {
+                if bounds_its_domain(name) {
+                    writeln!(out, "    {label}")?;
+                } else {
+                    writeln!(out, "    {label}    <- unbounded")?;
+                }
             }
         }
         // The negative half, which is the one a capability language is for:

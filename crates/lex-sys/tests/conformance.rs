@@ -635,13 +635,13 @@ fn the_authority_report_has_a_machine_readable_form() {
     // The coarse kind and the precise argument, both present and distinct.
     assert!(text.contains("\"fs_read\""), "{text}");
     assert!(
-        text.contains("{ \"name\": \"fs_read\", \"argument\": \"/tmp\" }"),
+        text.contains("{ \"name\": \"fs_read\", \"argument\": \"/tmp\", \"bounded\": true }"),
         "the narrowing should survive:\n{text}"
     );
     // A label that was never narrowed carries an explicit null rather
     // than being absent, so a consumer never has to tell the two apart.
     assert!(
-        text.contains("{ \"name\": \"heap\", \"argument\": null }"),
+        text.contains("{ \"name\": \"heap\", \"argument\": null, \"bounded\": true }"),
         "an unnarrowed label needs an explicit null:\n{text}"
     );
     assert!(text.contains("\"labs\""), "the foreign symbol should be named:\n{text}");
@@ -2383,7 +2383,10 @@ fn the_authority_report_names_the_syscalls_the_row_cannot() {
 
     // Two capabilities, and it proves the absence of the other three.
     assert!(report.contains("\"effects\": [\"args\", \"ffi\"]"), "{report}");
-    assert!(report.contains("{ \"name\": \"ffi\", \"argument\": \"libc\" }"), "{report}");
+    assert!(
+        report.contains("{ \"name\": \"ffi\", \"argument\": \"libc\", \"bounded\": false }"),
+        "{report}"
+    );
 
     // The row says "calls a C library". The symbols say which library
     // calls, and those are the ones that name a socket.
@@ -4183,7 +4186,7 @@ fn main(world: World) -> [] int {
         "a handle program performs `file_read` (§4.1):\n{by_handle}"
     );
     assert!(
-        by_handle.contains("{ \"name\": \"file_read\", \"argument\": null }"),
+        by_handle.contains("{ \"name\": \"file_read\", \"argument\": null, \"bounded\": true }"),
         "`file_read` must carry no argument, or a handle would need its own path:\n{by_handle}"
     );
     assert!(!by_path.contains("file_read"), "the path program never opens a handle:\n{by_path}");
@@ -5169,6 +5172,57 @@ fn a_network_program_reports_no_network() {
             "`{expected}` should be reachable and listed"
         );
     }
+}
+
+/// `docs/under-a-grant.md` §5.1 — the report fails closed.
+///
+/// §3 found that the foreign symbol list is a proof about names and a
+/// heuristic about domains, and left the report saying `ffi` as calmly as
+/// it says `heap`. A supervisor that reads the row and trusts it would
+/// then admit `examples/serve/` under `network: None`.
+///
+/// So the report says it first, in a field a naive consumer cannot miss:
+/// `bounded` is the first key, and it is `false` whenever any reachable
+/// label fails to name its own domain -- which is exactly `ffi`. Refusing
+/// on `bounded: false` is the safe default; trusting a particular
+/// unbounded program anyway is a decision about that program, and it is
+/// the supervisor's to make rather than the report's.
+///
+/// Both directions, because a flag that is always `false` would pass the
+/// first half of this test and be worthless.
+#[test]
+fn the_report_fails_closed() {
+    let report = |relative: &str| -> String {
+        let out = Command::new(BIN)
+            .args(["authority".as_ref(), repo_root().join(relative).as_os_str()])
+            .args(["--std", "--output", "json"])
+            .output()
+            .expect("the compiler runs");
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8(out.stdout).expect("the report is utf-8")
+    };
+
+    let serve = report("examples/serve/serve.ls");
+    assert!(
+        serve.trim_start().starts_with("{\n  \"bounded\": false,"),
+        "a program reaching foreign code must lead with `bounded: false`:\n{serve}"
+    );
+
+    let cut = report("examples/cut/cut.ls");
+    assert!(
+        cut.trim_start().starts_with("{\n  \"bounded\": true,"),
+        "a program with no foreign code is bounded, or the flag means nothing:\n{cut}"
+    );
+
+    // And the prose form says so before anything else.
+    let prose = Command::new(BIN)
+        .args(["authority".as_ref(), repo_root().join("examples/serve/serve.ls").as_os_str()])
+        .arg("--std")
+        .output()
+        .expect("the compiler runs");
+    let prose = String::from_utf8_lossy(&prose.stdout);
+    assert!(prose.starts_with("UNBOUNDED"), "the prose report should open with it:\n{prose}");
+    assert!(prose.contains("ffi(\"libc\")    <- unbounded"), "and mark the label:\n{prose}");
 }
 
 /// `docs/under-a-grant.md` §3 — the symbol list is a proof about *names*.

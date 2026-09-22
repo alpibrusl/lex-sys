@@ -163,6 +163,41 @@ interface and `filesystem` already works through it. It is blocked on
 the **effect vocabulary**, which has one label where the grant has three
 dimensions.
 
+### 5.1 And the report now fails closed (#75)
+
+Until `Net` exists, the report can at least stop being calm about what
+it cannot see. An outside audit proposed it and it is the cheapest
+correct thing available:
+
+```json
+{
+  "bounded": false,
+  "effects": ["args", "ffi"],
+  "labels": [
+    { "name": "args", "argument": null,   "bounded": true },
+    { "name": "ffi",  "argument": "libc", "bounded": false }
+  ],
+  ...
+}
+```
+
+`bounded` is the **first** field, so it is the one a consumer that reads
+nothing else reads, and it is `false` whenever any reachable label fails to
+name its own domain — which today means exactly `ffi`. The prose report
+opens with `UNBOUNDED` and marks the label.
+
+What this does and does not change:
+
+* A supervisor that refuses on `bounded: false` now refuses `examples/serve/`
+  under **any** grant, including one where it would have been allowed.
+  That is the point of failing closed: the default is safe, and admitting
+  a particular unbounded program is a decision about that program, which
+  the report should not make on the supervisor's behalf.
+* It **does not** make the network enforceable. It makes the absence of
+  enforcement impossible to miss. `Net` is still §5's prerequisite.
+* The foreign symbol list stays, for the supervisor that does decide to
+  read further — §3's heuristic, now clearly labelled as one.
+
 ---
 
 ## 6. What this does not say
