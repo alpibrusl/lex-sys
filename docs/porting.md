@@ -347,6 +347,88 @@ heard of it.
 
 ---
 
+## 10. `sort` again, through a handle: the I/O went, the time did not
+
+`file-handles.md` §1 measured what the absence of handles cost this
+program: `fs_read` cannot report truncation, so `read_file` doubled a
+buffer from 64 KiB and re-read the file from the beginning each time —
+**six reads and 2.75× the file's bytes** on a 1.16 MB file, a ceiling
+where the doublings ran out, and a *"file too large"* status GNU does
+not have.
+
+Handles shipped, so this is the port. `read_file` now opens once and
+reads chunks until `file_read` answers `End`.
+
+### 10.1 The bytes
+
+`strace`, counting reads of the input's descriptor:
+
+| file | reads before | bytes before | reads after | bytes after |
+|---:|---:|---:|---:|---:|
+| 100,000 | 2 | 1.66× | 3 | **1.00×** |
+| 1,160,000 | 6 | 2.75× | 19 | **1.00×** |
+| 3,000,000 | 7 | 2.38× | 47 | **1.00×** |
+| 8,388,620 | 9 | 2.99× | 130 | **1.00×** |
+
+Exactly once, at every size, with no trend left to have. §1's figures
+reproduce to the byte, which is the part that says the method was sound.
+
+**And the syscalls go up**, because that is the trade: the old loop's
+reads grew with the *logarithm* of the file and the new one's grow with
+the file. Six large reads became nineteen small ones.
+
+### 10.2 The time, which is the part worth reading
+
+| 8.4 MB file | | |
+|---|---:|---:|
+| before, doubling retry | 450.8 ms | 1.000× |
+| after, 4 KiB chunk | 414.8 ms | 0.920× |
+| after, 64 KiB chunk | 420.0 ms | 0.932× |
+| after, 1 MiB chunk | 417.5 ms | 0.926× |
+
+**Cutting the I/O by three times bought 7%.** On the 1.16 MB file it
+bought 5.6%, which this harness cannot cleanly resolve from noise
+(`benches/README.md`).
+
+That is `bulk-io.md` §4.1's correction arriving from the other
+direction. There the lesson was that *volume written is not time spent
+writing*; here it is the same sentence about reading. A sort spends its
+time sorting, and a reader that does three times less I/O moves the
+total by single digits.
+
+The three chunk sizes are the second half of it: **4 KiB, 64 KiB and
+1 MiB are within 1.3% of each other**, at 2,048, 130 and 9 reads
+respectively. So the syscall count the port *added* costs nothing
+measurable either, and the chunk size is a free parameter rather than a
+tuning decision. 64 KiB stays because it was already there.
+
+### 10.3 What it deleted, which is the real argument
+
+The numbers are small; the code is not.
+
+* **The ceiling is gone.** Not raised — gone. There is no doubling loop
+  to run out of attempts, so the limit is the heap, which is the limit
+  a sort holding the whole file in memory always had. `sort.ls` used to
+  carry fifteen attempts and a comment explaining why fifteen.
+* **A status went with it.** `sort` exited **3** with *"file too
+  large"*, a status GNU has no equivalent for because GNU spills to
+  disk. The arm is deleted rather than handled: this program now has one
+  fewer status than GNU rather than one more.
+* **The reason is in hand.** `open_read` answers `Failed(errno)`, so
+  the number GNU turns into *No such file or directory* is finally
+  reachable from a lex-sys program. It is not spent yet — printing `2`
+  is worse than what is printed now, and the table that turns one into
+  the other is a library nothing has asked for
+  (`file-handles.md` §6).
+
+The honest summary: **handles were worth having for the code they
+delete, and the performance argument for them was never the strong
+one.** §1 said as much when it measured the cost at "a constant factor
+under 3, not a factor of six" — and 3× of something that is 7% of the
+runtime is what that constant was worth.
+
+---
+
 ## 7. Open
 
 | Question | Why it waits |
@@ -371,4 +453,4 @@ heard of it.
 | Program | Shows |
 |---|---|
 | `examples/base64/base64.ls` | The first port: bits, and a program that owns nothing |
-| `examples/sort/sort.ls` | The second: five owned resources, the heap, and rows at depth |
+| `examples/sort/sort.ls` | The second: five owned resources, the heap, and rows at depth — and, since §10, the first program to read through a handle |

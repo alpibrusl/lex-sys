@@ -61,52 +61,81 @@ fn read_stdin[&h, &i](heap: &!h Heap, io: &!i Io, text: buffer.Buffer)
 //
 // The buffer comes back either way: an error is not a reason to leak.
 fn read_file[&h, &f, &p](heap: &!h Heap, fs: &f Fs(""), path: &p [byte],
-    text: buffer.Buffer) -> [heap, fs_read("")] (buffer.Buffer, int) {
+    text: buffer.Buffer) -> [heap, fs_read(""), file_read] (buffer.Buffer, int) {
     var out = text;
-    var capacity = 65536;
-    var attempts = 0;
-    // Fifteen attempts from 64 KiB reach a largest capacity of 1 GiB:
-    // 65536 * 2^14. The read has to come back *strictly* shorter than
-    // the capacity to be believed, so that is the largest file this can
-    // hold -- and a sort that keeps the whole file in memory has worse
-    // problems past a gigabyte.
+    var total = 0;
+    var trouble = 0;
+
+    // One pass, because the handle remembers where it got to.
     //
-    // It was eight, which reached 8 MiB, under a comment claiming 16 --
-    // it counted doublings where the loop counts attempts, so the one
-    // place a reader would look for the limit said twice the real one
-    // and `examples/sort/` quietly refused an 8 MiB file.
-    // `docs/file-handles.md` §1.1 is the measurement.
+    // This used to be a doubling retry loop: `fs_read` fills as much of a
+    // buffer as the file has and answers the count, so a file that
+    // exactly fills the buffer is indistinguishable from one cut short --
+    // and the only way to tell was to try again with twice the room, from
+    // the beginning. `docs/file-handles.md` §1 measured that at **six
+    // reads and 2.75x the file's bytes** on a 1.16 MB file, with a
+    // ceiling at 1 GiB and a "too large" status GNU does not have.
     //
-    // A ceiling at all, rather than growing until something gives:
-    // `heap.md` says an allocation that fails **traps**, so without one
-    // a file bigger than memory would abort instead of reporting an
-    // error, and a sort should be able to say "too big" out loud.
-    while attempts < 15 {
-        var got = 0;
-        var scratch = buffer.empty(heap, capacity);
-        borrow mut scratch as &!s in {
-            got = fs_read(fs, path, buffer.room(s));
-            if got > 0 {
-                buffer.filled(s, got);
+    // `file_read` answers `End` when the file is over, so none of that is
+    // needed: read a chunk, append it, stop when the file says so. The
+    // ceiling goes with it -- what is left is the heap, which is the
+    // limit a sort holding the whole file in memory always had.
+    match open_read(fs, path) {
+        Opened::Failed(reason) => {
+            // The errno is here for the first time, and this program does
+            // not spend it yet: a number is worse than the sentence GNU
+            // prints, and turning one into the other wants a table
+            // nothing has asked for (`file-handles.md` §6).
+            trouble = reason;
+            if trouble == 0 {
+                trouble = 1;
             }
         }
-        if got < 0 {
-            buffer.drop(heap, scratch);
-            return (out, 0 - 1);
-        }
-        if got < capacity {
-            borrow scratch as &s in {
-                out = buffer.append(heap, out, buffer.bytes(s));
+        Opened::Ok(opened) => {
+            var file = opened;
+            var chunk = buffer.empty(heap, 65536);
+            borrow mut file as &!handle in {
+                var going = true;
+                while going {
+                    var got = 0;
+                    borrow mut chunk as &!c in {
+                        match file_read(handle, buffer.room(c)) {
+                            Read::Got(n) => {
+                                got = n;
+                                buffer.filled(c, n);
+                            }
+                            Read::End => {
+                                going = false;
+                            }
+                            Read::Failed(reason) => {
+                                going = false;
+                                trouble = reason;
+                                if trouble == 0 {
+                                    trouble = 1;
+                                }
+                            }
+                        }
+                    }
+                    if got > 0 {
+                        borrow chunk as &c in {
+                            out = buffer.append(heap, out, buffer.bytes(c));
+                        }
+                        total = total + got;
+                        borrow mut chunk as &!c in {
+                            buffer.clear(c);
+                        }
+                    }
+                }
             }
-            buffer.drop(heap, scratch);
-            return (out, got);
+            file_close(file);
+            buffer.drop(heap, chunk);
         }
-        // It filled the slice exactly, so it may have been cut short.
-        buffer.drop(heap, scratch);
-        capacity = capacity * 2;
-        attempts = attempts + 1;
     }
-    return (out, 0 - 2);
+
+    if trouble != 0 {
+        return (out, 0 - 1);
+    }
+    return (out, total);
 }
 
 // ---------------------------------------------------------------------
@@ -250,27 +279,22 @@ fn main(world: World) -> [] int {
                 while n < arg_count(g) {
                     let (grown, got) = read_file(h, f, arg(g, n), text);
                     text = grown;
-                    if got == 0 - 2 {
-                        // Larger than `read_file` can grow to hold. GNU
-                        // has no such case -- it spills to disk -- so
-                        // there is no status of its to match, and this
-                        // takes one of its own rather than hiding
-                        // inside the one for a file that is not there.
-                        status = 3;
-                        borrow mut io as &!i in {
-                            io.error_all(i, "sort: file too large: ");
-                            io.error_all(i, arg(g, n));
-                            io.error_all(i, "\n");
-                        }
-                    }
+                    // There used to be a `got == 0 - 2` arm here, exiting
+                    // 3 with "file too large": the doubling reader had a
+                    // ceiling at 1 GiB and took a status of its own
+                    // because GNU has no such case. Reading through a
+                    // handle has no ceiling, so the case is gone rather
+                    // than handled -- and `sort` has one fewer status
+                    // than GNU instead of one more.
                     if got == 0 - 1 {
                         // GNU writes the failing path to standard error
-                        // and exits 2, and now so does this
+                        // and exits 2, and so does this
                         // (`docs/standard-error.md` §7). The *reason* is
-                        // still missing -- GNU names the errno string and
-                        // `fs_read` answers `-1` with nothing attached --
-                        // which is §6's open row and
-                        // `file-handles.md` §3's to close.
+                        // no longer missing so much as unspent:
+                        // `open_read` answers `Failed(errno)` now, and
+                        // `read_file` above has the number. What is left
+                        // is turning it into GNU's sentence, which wants
+                        // a table (`file-handles.md` §6).
                         status = 2;
                         borrow mut io as &!i in {
                             io.error_all(i, "sort: cannot read: ");

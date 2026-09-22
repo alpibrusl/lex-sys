@@ -50,6 +50,19 @@ doubling and best just before one. So the cost is **a constant factor
 under 3, not a factor of six**, which is a weaker argument for handles
 than §9.1 was making. The strong arguments are the next two.
 
+> **Measured again after the port (#67): `porting.md` §10.** Every one
+> of those ratios is now **1.00×**, and the time moved **7%** on an
+> 8.4 MB file. Three times less I/O bought single digits, because a sort
+> spends its time sorting — which is `bulk-io.md` §4.1's correction
+> arriving from the reading side. The syscall count went the other way
+> (6 reads became 19 on the 1.16 MB file) and costs nothing measurable:
+> 4 KiB, 64 KiB and 1 MiB chunks are within 1.3% of each other.
+>
+> So this section's own verdict stands and sharpens. The performance
+> argument for handles was the weak one; what they were worth is in
+> §10.3 — a ceiling deleted rather than raised, a status GNU does not
+> have deleted with it, and an `errno` finally in reach.
+
 ### 1.1 The ceiling was 8 MiB, and the comment said 16
 
 `sort.ls` reads:
