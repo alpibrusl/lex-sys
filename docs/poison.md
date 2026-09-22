@@ -79,7 +79,7 @@ unchecked / trap / poison.
 | `a << b` | 21 / 0 / **53** | 1.17× | **1.00×** |
 | `-x` | 26 / 0 / **38** | 1.78× | **0.99×** |
 | `byte_of(n)` | 18 / 0 / **46** | 1.61× | **1.23×** |
-| `int_of(f)` | 13 / 0 / **59** | 3.28× | **1.33×** |
+| `truncate(f)` | 13 / 0 / **59** | 3.28× | **1.33×** |
 | `s[lo..hi]` | 26 / 0 / **43** | 2.19× | **1.98×** |
 | `a + b` overflow, on a reduction | 26 / 0 / **0** | 1.37× | **1.73×** |
 
@@ -98,7 +98,7 @@ The exception is the last row, and §3 is about it.
 | `a << b` | 18 / 0 / **48** | 1.27× | 1.64× |
 | `byte_of(n)` | 11 / 0 / **38** | 1.79× | 2.18× |
 | `s[lo..hi]` | 8 / 0 / **40** | 2.13× | 2.46× |
-| `int_of(f)` | 0 / 0 / **58** | 2.47× | 2.79× |
+| `truncate(f)` | 0 / 0 / **58** | 2.47× | 2.79× |
 | `a + b` overflow, on a reduction | 8 / 0 / 0 | 1.45× | 1.76× |
 
 **Poison vectorises here too — and is still slower.** The packed counts

@@ -34,7 +34,7 @@
 //   3  byte_of       narrowing an int to a byte
 //   4  subslice      `s[lo..hi]` -- two comparisons, not one
 //   5  negate        unary minus, which is `0 - x` and can overflow
-//   6  float_to_int  `int_of(f)`, which traps on NaN and on out of range
+//   6  float_to_int  `truncate(f)`, which traps on NaN and on out of range
 //   7  divide        `a / b`, where the trap is the hardware's already
 //   8  subslice_iv   the same two tests, on the induction variable
 //   9  overflow_each the same overflow check, element-wise not carried
@@ -229,10 +229,19 @@ long run(const long *v, const long *w, long n) {
 }
 
 #elif KERNEL == 6
-// `int_of(f)`: truncation toward zero, trapping on NaN, on the
+// `truncate(f)`: truncation toward zero, trapping on NaN, on the
 // infinities and on anything outside the integer range
-// (`floating-point.md` §2). Cranelift's trapping `fcvt_to_sint` does the
-// test itself; the C spelling makes it explicit.
+// (`floating-point.md` §2).
+//
+// This kernel is **not** the guard lex-sys emits, and
+// `docs/emitted-checks.md` §3 is the reading that says so: Cranelift
+// emits `cvttsd2si` and one `cmp $0x1`/`jno`, because the conversion
+// answers a sentinel that `rax - 1` overflows on and nothing else, while
+// the two comparisons below run on every element. Kept as it is rather
+// than rewritten, because what this file measures is what a *vectorising*
+// compiler does with a data-dependent trap, and the explicit spelling is
+// the one such a compiler would be given. The number it produces is an
+// upper bound, and §3 there says so where the number is published.
 __attribute__((noinline))
 long run(const long *v, const long *w, long n) {
     POISON_BEGIN
@@ -366,10 +375,18 @@ long run(const long *v, const long *w, long n) {
 }
 
 #else
-// Division. lex-sys emits no comparison at all here: the hardware faults
-// on a zero divisor and on `LONG_MIN / -1`, so the guarantee is already
-// in the instruction. All three modes are the same program, which is the
-// finding rather than a gap in the harness.
+// Division. All three modes are the same program, which is the finding
+// rather than a gap in the harness: integer division has no packed form
+// on any of these instruction sets, so there is nothing for a guard to
+// cost.
+//
+// This comment used to say "lex-sys emits no comparison at all here: the
+// hardware faults on a zero divisor and on `LONG_MIN / -1`". It emits
+// one -- `test %rsi,%rsi` and a branch to its own `ud2`, so a zero
+// divisor is SIGILL rather than SIGFPE -- and `%` emits a different one
+// again. `docs/emitted-checks.md` §4 reads both out of the binary. The
+// 1.00x is unaffected: one predictable compare is nothing beside a
+// 40-cycle `idiv`.
 __attribute__((noinline))
 long run(const long *v, const long *w, long n) {
     POISON_BEGIN
