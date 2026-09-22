@@ -4578,3 +4578,93 @@ fn a_clean_program_answers_an_empty_list() {
     assert_eq!(out.status.code(), Some(0));
     assert_eq!(String::from_utf8_lossy(&out.stdout), "{\n  \"refused\": []\n}\n");
 }
+
+/// `AGENTS.md`'s checked code blocks are fixtures.
+///
+/// The document is a contract with whoever writes lex-sys next, and a
+/// contract nothing enforces is a stale paragraph. So every block
+/// marked `lex-sys` must compile, and every block marked
+/// `lex-sys-refused` must be refused **with the rule it names** — the
+/// same `//~ RULE` line the fixtures under `tests/reject/` carry
+/// (`docs/agent-errors.md` §3).
+///
+/// Untagged blocks are shell, signatures or tables, and are not run.
+/// A block that makes a claim about the language is tagged.
+#[test]
+fn the_agent_guidelines_compile_as_written() {
+    let text =
+        std::fs::read_to_string(repo_root().join("AGENTS.md")).expect("AGENTS.md is readable");
+    let dir = scratch("agent-guidelines");
+
+    let mut checked = 0;
+    let mut rest = text.as_str();
+    while let Some(start) = rest.find("```lex-sys") {
+        let after = &rest[start + 3..];
+        let (kind, body_start) = match after.strip_prefix("lex-sys-refused\n") {
+            Some(body) => ("refused", body),
+            None => match after.strip_prefix("lex-sys\n") {
+                Some(body) => ("accepted", body),
+                // `lex-sys` as the start of some other word: skip it.
+                None => {
+                    rest = &rest[start + 3..];
+                    continue;
+                }
+            },
+        };
+        let end = body_start.find("```").expect("an unterminated code block in AGENTS.md");
+        let body = &body_start[..end];
+        rest = &body_start[end..];
+
+        let path = dir.join(format!("block{checked}.ls"));
+        std::fs::write(&path, body).expect("the block is written");
+        let out = Command::new(BIN)
+            .arg("check")
+            .arg(&path)
+            .args(["--std", "--output", "json"])
+            .output()
+            .expect("the compiler runs");
+        let json = String::from_utf8_lossy(&out.stdout);
+        let reported = json
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("\"rule\": \""))
+            .map(|r| r.trim_end_matches("\","));
+
+        match kind {
+            "accepted" => assert!(
+                out.status.success(),
+                "AGENTS.md block {checked} is shown as valid lex-sys and is not:\n{body}\n{json}"
+            ),
+            _ => {
+                let declared = body
+                    .lines()
+                    .find_map(|line| line.trim().strip_prefix("//~ RULE "))
+                    .map(str::trim)
+                    .unwrap_or_else(|| {
+                        panic!("AGENTS.md block {checked} is shown as refused and names no rule")
+                    });
+                assert_eq!(
+                    reported,
+                    Some(declared),
+                    "AGENTS.md block {checked} names `{declared}`:\n{body}\n{json}"
+                );
+            }
+        }
+        checked += 1;
+    }
+
+    // A document with no checked blocks would pass this test while
+    // saying nothing, which is the failure mode it exists to prevent.
+    assert!(checked >= 5, "only {checked} checked blocks in AGENTS.md");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The compiler carries the guidelines, so a reader with the binary
+/// needs no checkout.
+#[test]
+fn agent_guidelines_prints_the_file() {
+    let out = Command::new(BIN).arg("agent-guidelines").output().expect("the compiler runs");
+    assert!(out.status.success());
+    let printed = String::from_utf8_lossy(&out.stdout);
+    let onedisk = std::fs::read_to_string(repo_root().join("AGENTS.md")).expect("readable");
+    assert_eq!(printed, onedisk, "the embedded guidelines have drifted from the file");
+}
