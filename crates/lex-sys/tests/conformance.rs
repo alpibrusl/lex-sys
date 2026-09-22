@@ -4668,3 +4668,48 @@ fn agent_guidelines_prints_the_file() {
     let onedisk = std::fs::read_to_string(repo_root().join("AGENTS.md")).expect("readable");
     assert_eq!(printed, onedisk, "the embedded guidelines have drifted from the file");
 }
+
+/// `docs/line-reading.md` §2: a line longer than the buffer.
+///
+/// The dimension the eight field specs never varied. Before the fix,
+/// a 60,000-byte line lost its delimiters, so `cut` switched to the
+/// no-delimiter rule and printed 60 KB of the wrong field with exit 0 —
+/// a silently wrong answer in a program checked against GNU.
+#[test]
+fn cut_reports_a_long_line_like_gnu_cut() {
+    let (dir, exe) = build_example("example-cut-long", "examples/cut/cut.ls", "cut");
+
+    let reference = Path::new("/usr/bin/cut");
+    let have_reference = is_gnu(reference);
+
+    // Around the old 60,000-byte arena slice, and well past it.
+    for first in [59_998usize, 59_999, 60_000, 70_000, 200_000] {
+        let input = format!("{},second\n", "a".repeat(first));
+        let ours = run_without_locale(&exe, &["-d,", "-f2"], &input);
+        assert!(ours.status.success(), "a long line should not be an error");
+        assert_eq!(
+            String::from_utf8_lossy(&ours.stdout),
+            "second\n",
+            "a {first}-byte first field should not change which field comes back"
+        );
+        if have_reference {
+            let theirs = run_without_locale(reference, &["-d,", "-f2"], &input);
+            assert_eq!(
+                String::from_utf8_lossy(&ours.stdout),
+                String::from_utf8_lossy(&theirs.stdout),
+                "GNU cut answers differently on a {first}-byte field"
+            );
+        }
+    }
+
+    // And the field itself, when it is the long one: the whole of it.
+    let input = format!("first,{}\n", "b".repeat(100_000));
+    let ours = run_without_locale(&exe, &["-d,", "-f2"], &input);
+    assert_eq!(
+        String::from_utf8_lossy(&ours.stdout).trim_end().len(),
+        100_000,
+        "a long field should come back whole"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
