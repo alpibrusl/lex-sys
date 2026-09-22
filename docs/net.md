@@ -128,7 +128,7 @@ Against a grant, the mapping is then direct and is the thing
 | `egress: ["h:p"]` | `net_out("h:p")`, by prefix | **yes** |
 | `network: Full` | anything | trivially |
 
-> **Correction (#PR).** The literal in `net_out("api.example.com:443")`
+> **Correction (#77).** The literal in `net_out("api.example.com:443")`
 > is a **bound**, not a destination. `examples/fetch/` takes its address
 > from `argv`, and a client always does, so no compile-time row can name
 > where it connects. The shape that works is `Fs(prefix)`'s: a static
@@ -152,7 +152,7 @@ asks (`standard-library.md`). Counted by reading:
 **The half that would unblock the `lex-os` join has no asker**, and the
 half with an asker is the one the grant does not ask about.
 
-> **Recounted (#PR): inbound 1, outbound 1.** `examples/fetch/` is the
+> **Recounted (#77): inbound 1, outbound 1.** `examples/fetch/` is the
 > program the next paragraph asks for. One asker is still below the bar,
 > so the status stands. What did cross the bar is narrower: both network
 > programs build `struct sockaddr_in` by hand, and neither can build it
@@ -174,14 +174,14 @@ that being the step nobody can skip.
 * **No hostname resolution.** `getaddrinfo` returns a pointer. A host in
   a label is a *name to be checked*, and turning it into an address is
   either a builtin of its own or the perimeter's job — §5's program will
-  say which. *It did not choose one (#PR).* It showed that a lex-sys
+  say which. *It did not choose one (#77).* It showed that a lex-sys
   program can only ever connect to an address, while a grant only ever
   names hosts, so whoever resolves also owns the check
   ([`connect.md`](connect.md) §1).
 * **No socket type.** A descriptor is an `int`, as `File` was before
   `file-handles.md` gave it a linear type. Whether a socket wants the
   same treatment is a question that program answers too. *It answered
-  no, for now (#PR):* two `close` paths, no leak, and a linear type
+  no, for now (#77):* two `close` paths, no leak, and a linear type
   would have caught nothing ([`connect.md`](connect.md) §5).
 * **Nothing about `exec`.** The grant's third dimension has the same
   shape as this one and none of the same operations. It waits for its own
