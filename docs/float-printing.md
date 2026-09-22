@@ -71,7 +71,7 @@ bits_of(x: float) -> int          // the same 64 bits, read as an integer
 
 A bitcast, plus two instructions that give every NaN one pattern
 (`movq`, `ucomisd`, `cmovp` on x86-64; [`differential.md`](differential.md)
-§4, #PR). From there the algorithm is ordinary lex-sys: masks and
+§4, #76). From there the algorithm is ordinary lex-sys: masks and
 shifts to pull the mantissa and exponent apart (`bitwise.md`), a
 `region` to hold the working numbers, `while` loops, and a `[byte]` to
 write into. Its effect row is `[]` — printing a float performs nothing,

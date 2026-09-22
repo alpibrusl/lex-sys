@@ -285,7 +285,7 @@ and together they say something this document did not have to argue for:
 every target.** That is what makes running it early a compilation step
 rather than a gamble.
 
-> **Correction (#PR).** Until the last row was added, this sentence was
+> **Correction (#76).** Until the last row was added, this sentence was
 > false for one builtin. IEEE-754 does not fix a generated NaN's sign,
 > and the two supported targets disagree about it, so
 > `bits_of(0.0 / 0.0)` printed `-2251799813685248` on x86-64 and
