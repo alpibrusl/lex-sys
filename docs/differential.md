@@ -113,7 +113,7 @@ proves nothing:
   stop reports the number of runs, the slowest run, the time per
   trapping run and the host's `core_pattern`. This bounding was added
   after the first CI run on linux-x86_64 sat in the test step for over
-  25 minutes with no output. The test also requires every trap to end the process
+  25 minutes with no output. §3.2 has what it then reported. The test also requires every trap to end the process
   with a signal: an exit code would be a different failure, not a trap
   ([`defined-behaviour.md`](defined-behaviour.md) §1).
 
@@ -165,6 +165,31 @@ The whole comparison takes about 1.6 s with a release compiler. That
 covers three compilations of about 10,000 functions each and 437
 processes. Under `cargo test`, where the compiler is a debug build, it
 takes about 12 s.
+
+That is on a machine whose `core_pattern` is `core` with a zero core
+limit, where a trap costs **2.4 ms**. The GitHub Linux runner pipes
+every crash to `systemd-coredump`, and with the bounds above in place
+it reported:
+
+```
+a run from case 1111 neither finished nor trapped in 30 s: 270 runs,
+269 traps, 232.6s elapsed; slowest run 2.7s (from case 1056, trapped);
+544.3ms per trapping run; core_pattern
+`|/usr/lib/systemd/systemd-coredump %P %u %g %s %t 9223372036854775808 %h %d`
+```
+
+That is **544 ms per trap**, about 230 times the local cost, and it
+slows down as the crashes pile up, until one run exceeded 30 s. So the
+first CI run did not hang. It was paying for 436 core dumps, one at a
+time. Setting `RLIMIT_CORE` to zero would not help, because the kernel
+does not apply that limit when it pipes a dump to a program. What does
+help is that Linux never dumps a process whose executable its user
+cannot read, the same rule that keeps a setuid binary's memory out of a
+core file. So on Linux the test makes the run-time binary execute-only
+(`0711`). It was checked as an unprivileged user, with an unlimited core
+limit and `core_pattern` set to `core`: the readable binary left a core
+file, the execute-only one did not, and both died of `SIGILL`. The
+trap is unchanged, and only the dump is skipped.
 
 ---
 

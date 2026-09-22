@@ -4221,6 +4221,18 @@ fn first[&a](a: &a Args) -> [args] int {
         .expect("the compiler runs");
     assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
 
+    // `differential.md` §3.2: a GitHub Linux runner pipes every crash to
+    // `systemd-coredump`, measured at 544 ms per trap and slowing as they
+    // pile up, and a pipe ignores `RLIMIT_CORE`. Linux never dumps a
+    // process whose executable its user cannot read, so the binary is
+    // made execute-only. The trap is unchanged; only the dump goes.
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o711))
+            .expect("the runtime binary's mode can be set");
+    }
+
     // Every trap is a process the kernel kills, and each one costs
     // whatever the host does with a crash -- a core dump, or a handler
     // `core_pattern` pipes it to. So the loop is bounded three ways and
