@@ -190,7 +190,9 @@ instruction set makes the guarantee cheaper.
 
 `a / b` costs **1.00×** on both instruction sets, and the backend is why:
 `BinOp::Div` lowers to a bare `sdiv` and `BinOp::Rem` to a bare `srem`,
-with no comparison emitted at all. Cranelift's `sdiv`/`srem` trap on a
+with no comparison emitted at all. Cranelift says so in a boolean —
+`Opcode::Sdiv.can_trap()` is `true` where `Opcode::SaddOverflow`'s is
+`false` ([`backend-limits.md`](backend-limits.md) §2). Cranelift's `sdiv`/`srem` trap on a
 zero divisor and on `int::MIN / -1` because **the hardware does** — an
 `idiv` with a zero divisor faults, and the language gets its guarantee
 from an instruction that was going to fault anyway.
@@ -272,7 +274,8 @@ is the list of places they are.
   thesis, and a silently wrong answer is what this language exists not
   to give. Knowing the price is not an argument for not paying it.
 * **Not that these are lex-sys's numbers.** They are clang's, on kernels
-  written in C, because Cranelift emits no SIMD at all (`gpu.md` §2.3) —
+  written in C, because Cranelift has no pass that produces SIMD from
+  scalar code ([`backend-limits.md`](backend-limits.md) §1.4) —
   so the current backend pays none of this and gets none of the benefit
   either. The table is what a backend *with* a vectoriser would find,
   which is the one the roadmap wants.

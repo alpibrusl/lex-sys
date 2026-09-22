@@ -19,6 +19,11 @@ Cranelift has no GPU target — no PTX, no SPIR-V, no AMDGPU. Emitting for
 a GPU means LLVM, which `ROADMAP.md` currently places outside the next
 slices and `purity.md` §4.2 argued *down* rather than up.
 
+> **Checked (#68): [`backend-limits.md`](backend-limits.md) §1.3.**
+> `src/isa/` in `cranelift-codegen` 0.121.2 is `aarch64`,
+> `pulley_shared`, `riscv64`, `s390x` and `x64` — and `pulley` is
+> Cranelift's own portable interpreter rather than a device.
+
 So this document is not about a feature that is nearly there. It is
 about what the design would have to give up, priced.
 
@@ -88,6 +93,14 @@ lex-sys's own cost (252.1 → 137.6); everything remaining is Cranelift.
 **So removing the trap is necessary and not sufficient.** A GPU-shaped
 lex-sys on the current backend would be scalar, which on a GPU is the
 same as not having one.
+
+> **And it will stay scalar** —
+> [`backend-limits.md`](backend-limits.md) §1.4. Cranelift *has* SIMD:
+> vector types, rewrite rules, per-target lowerings. What it has no
+> pass for is producing them from scalar code, because its SIMD is
+> there for WebAssembly's `v128` rather than for a vectoriser. So the
+> 2.27× attributed to the backend here is a property of its design and
+> not a version it has not reached.
 
 ---
 
