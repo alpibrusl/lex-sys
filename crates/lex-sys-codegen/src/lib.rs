@@ -2066,6 +2066,14 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
                         let x = args[0];
                         vec![self.builder.ins().fcmp(FloatCC::NotEqual, x, x)]
                     }
+                    // One instruction -- `sqrtsd` on x86-64, `fsqrt` on
+                    // aarch64 -- and IEEE-754 requires it to be correctly
+                    // rounded, which is why `docs/float-math.md` §2 says
+                    // this cannot be library code: the instruction is the
+                    // only correct implementation there is.
+                    Callee::Builtin(Builtin::Sqrt) => {
+                        vec![self.builder.ins().sqrt(args[0])]
+                    }
                     // §2: narrow or trap. Truncation is the silently wrong
                     // answer `defined-behaviour.md` §2.1 already refused.
                     Callee::Builtin(Builtin::ByteOf) => {

@@ -231,7 +231,7 @@ the wrong side when the coordinate itself is only good to 1.5 × 10⁻⁵.
 
 | Question | Why it waits |
 |---|---|
-| `std.math` over floats | `sqrt`, `sin`, `exp`. Each is either a libc call — gated by `Ffi`, which would make arithmetic need a capability — or an implementation with its own error analysis. The capability question has to be settled first |
+| ~~`std.math` over floats~~ | **Half answered — `float-math.md`.** The capability question was the wrong question for `sqrt`: it is *one instruction*, so it reaches no library, needs no `Ffi`, and its row is `[]`. It is a builtin rather than library code for the reason §2 there measures — the two programs that hand-rolled a square root got **58.4%** of values wrong in the last place, and one was wrong by **143 orders of magnitude**, because a correctly-rounded root is not expressible in lex-sys. `sin`, `exp` and `log` are the half that really is about error analysis, and nothing has asked |
 | A total order | §5. IEEE-754 §5.10 defines `totalOrder`; the question is whether `std.math` should carry it or whether sorting floats should simply be documented as the caller's problem |
 | `f32` | §1. A second width drags conversion rules behind it, and nothing has asked |
 | Literal parsing exactness | `0.1` is read by Rust's `f64::from_str`, which is correctly rounded. Worth stating as a contract rather than an implementation detail once there is a second front end |

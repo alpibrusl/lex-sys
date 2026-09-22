@@ -4720,3 +4720,96 @@ fn cut_reports_a_long_line_like_gnu_cut() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `docs/float-math.md` §2: `sqrt` is correctly rounded, and the two
+/// hand-rolled roots it replaced were not.
+///
+/// Checked against Rust's own `f64::sqrt` — the same instruction, so
+/// this is a test that the builtin reaches it rather than a test of the
+/// hardware. The values include the four exponents where the twenty-step
+/// Newton loop in `benches/game/spectral.ls` was wrong by 10^43 and
+/// more, which is the failure this replaced.
+#[test]
+fn sqrt_agrees_with_the_hardware() {
+    let dir = scratch("float-sqrt");
+
+    // A deterministic spread: the specials, a decade sweep, and values
+    // across the exponent range where the old loop fell short.
+    let mut values: Vec<f64> = vec![0.0, 1.0, 2.0, 0.25, 1e-300, 1e-8, 1e8, 1e100, 1e200, 1e300];
+    let mut seed = 0x5eed_u64;
+    for _ in 0..2000 {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        let mantissa = f64::from(((seed >> 11) & 0xff_ffff) as u32) / 16_777_216.0;
+        let exponent = ((seed >> 40) % 600) as i32 - 300;
+        values.push(libm_ldexp(mantissa + 0.5, exponent));
+    }
+
+    /// `mantissa * 2^exponent`, without pulling in a dependency.
+    fn libm_ldexp(mantissa: f64, exponent: i32) -> f64 {
+        let mut out = mantissa;
+        let mut n = exponent;
+        while n > 0 {
+            out *= 2.0;
+            n -= 1;
+        }
+        while n < 0 {
+            out /= 2.0;
+            n += 1;
+        }
+        out
+    }
+
+    // The program prints `sqrt` of each value, shortest-round-trip, one
+    // per line — so a disagreement in the last bit is visible.
+    let mut program = String::from(
+        "import std.fmt;\nimport std.io;\n\n\
+         fn show[&i](i: &!i Io, x: float) -> [io_write] int {\n\
+         \x20   region a {\n\
+         \x20       let out = alloc_slice[a](32, byte_of(0));\n\
+         \x20       let n = fmt.float_into(out, x);\n\
+         \x20       io.write_all(i, out[0..n]);\n\
+         \x20   }\n\
+         \x20   return io.newline(i);\n\
+         }\n\n\
+         fn main(world: World) -> [] int {\n\
+         \x20   let Split { io, ffi, fs, heap, args } = split(world);\n\
+         \x20   release(ffi); release(fs); release(heap); release(args);\n\
+         \x20   borrow mut io as &!i in {\n",
+    );
+    for v in &values {
+        program.push_str(&format!("        show(i, sqrt({v:e}));\n"));
+    }
+    program.push_str("    }\n    release(io);\n    return 0;\n}\n");
+
+    let source = dir.join("sqrt.ls");
+    std::fs::write(&source, &program).expect("the program is written");
+    let exe = dir.join("sqrt");
+    let build = Command::new(BIN)
+        .args([
+            "build".as_ref(),
+            source.as_os_str(),
+            "--std".as_ref(),
+            "-o".as_ref(),
+            exe.as_os_str(),
+        ])
+        .output()
+        .expect("the compiler runs");
+    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+
+    let out = Command::new(&exe).output().expect("it runs");
+    let printed = String::from_utf8_lossy(&out.stdout);
+    let lines: Vec<&str> = printed.lines().collect();
+    assert_eq!(lines.len(), values.len(), "one line per value");
+
+    for (line, value) in lines.iter().zip(&values) {
+        let got: f64 = line.parse().unwrap_or_else(|_| panic!("`{line}` is not a float"));
+        let want = value.sqrt();
+        assert_eq!(
+            got.to_bits(),
+            want.to_bits(),
+            "sqrt({value:e}) came back {got:e}, and the hardware says {want:e}"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

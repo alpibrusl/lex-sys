@@ -35,6 +35,8 @@
 //~ STDOUT step 5 x 1.414213562373095e0 residual 4.440892098500626e-16
 //~ STDOUT q16-16 floor 1.52587890625e-5
 //~ STDOUT steps below that floor 3
+//~ STDOUT hardware sqrt 1.4142135623730951e0
+//~ STDOUT five steps are short by 1 ulp
 //~ EXIT 0
 
 import std.fmt;
@@ -63,6 +65,21 @@ fn residual(a: float, x: float) -> [] float {
 // Print one float. The buffer is 24 bytes because `float-printing.md` §6
 // says that is always enough, and it lives in a `region` because this
 // program released its `Heap` before the first number existed.
+// How many representable doubles lie between two positives.
+//
+// `bits_of` is a bitcast (`float-printing.md` §2), and for positive
+// values the bit patterns increase with the value -- so subtracting them
+// counts the representable numbers in between, which is what "one unit
+// in the last place" means.
+fn ulps_between(a: float, b: float) -> [] int {
+    let x = bits_of(a);
+    let y = bits_of(b);
+    if x > y {
+        return x - y;
+    }
+    return y - x;
+}
+
 fn show[&i](i: &!i Io, x: float) -> [io_write] int {
     region a {
         let out = alloc_slice[a](24, byte_of(0));
@@ -112,6 +129,26 @@ fn main(world: World) -> [] int {
         io.newline(i);
         io.write_all(i, "steps below that floor ");
         io.print_int(i, below);
+        io.newline(i);
+
+        // What the method is being measured against. `sqrt` is a builtin
+        // and one instruction, and IEEE-754 requires it to be correctly
+        // rounded (`docs/float-math.md`) -- so this line is the exact
+        // answer, and the five steps above end one unit in the last
+        // place below it.
+        //
+        // That gap is the point of the program rather than a defect in
+        // it: five steps of a method that doubles its digits get within
+        // an ulp of a value the hardware computes outright, which says
+        // more about how fast Newton converges than about how good the
+        // instruction is.
+        let exact = sqrt(a);
+        io.write_all(i, "hardware sqrt ");
+        show(i, exact);
+        io.newline(i);
+        io.write_all(i, "five steps are short by ");
+        io.print_int(i, ulps_between(x, exact));
+        io.write_all(i, " ulp");
         io.newline(i);
     }
 

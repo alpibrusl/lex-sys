@@ -70,6 +70,7 @@ reasoning — this table is the index, not the argument.
 | [#60](https://github.com/alpibrusl/lex-sys/pull/60) | [AGENTS.md](../AGENTS.md) | [`agent-errors.md`](agent-errors.md) §7's own next row. lex-lang's contract says a downstream repo copies `AGENT_GUIDELINES.md` as `AGENTS.md`; lex-sys is a different language with different rules, so it needs its own — and it had **none**. Measured: **90,283 words across 42 documents** and no first page, so an agent asked to write lex-sys could read all of it or guess. Written from evidence rather than taste — the rules are ranked by how many fixtures they have (`linear-value-unconsumed` 19, `effect-not-declared` 12, `reference-escapes-region` 11, `mode-bound-violated` 11), and §6's six facts are the ones that each cost this repository a compile or a SIGILL while porting a real program. `lex-sys agent-guidelines` prints it from inside the binary, the way `--std` carries the library. **Every checked code block is a fixture**: the valid ones compile, the refused ones are refused with the rule they name, and changing one rule name to a wrong one turns the suite red — checked by doing it |
 | [#61](https://github.com/alpibrusl/lex-sys/pull/61) | [A line reader, answered no](line-reading.md) | The roadmap asked for `std.lines` because *"two programs hand-roll the same loop"*. Reading them says **one does**: `tally.ls` keeps nothing, `wordcount.ls` keeps nothing, `base64.ls` buffers its *output*, `sort.ls` keeps the whole input — only `cut.ls` reads a line at a time. A documented **no**, and the useful part is what the row was pointing at. `examples/cut/` read a line into a 60,000-byte arena slice and the source called that *"truncated"*; it is worse, because a truncated line loses its **delimiters**, so `cut` switched to the no-delimiter rule and printed **60,001 bytes of the wrong field with exit 0** — a silently wrong answer, in a program checked against GNU on eight field specs, none of which varied the one dimension that mattered. Fixed by growing on the heap: **1.18×** for correctness (152.9 → 181.1 ms on 14.7 MB), and the program's authority report gains `heap`, which is `bulk-io.md` §3.2's rule meeting its mirror and not contradicting it. One function was earned — `buffer.clear`, because reusing the allocation is **13.0×** faster than `drop` plus `empty` per line, so it is a gap rather than a nicety |
 | [#62](https://github.com/alpibrusl/lex-sys/pull/62) | [GPU, and whether `lex-gpu` should exist](gpu.md) | Asked whether lex-sys could target a GPU, how a native one would work, and whether the GPU dialect should be its own language. The first two are design; the third looked like taste until the numbers came in. Same reduction, six ways, **SIMD instructions counted in the emitted code rather than inferred from the clock**: a **bounds check is free** (1.01×, SIMD unmoved at 10) and an **overflow trap is not** (1.46×, SIMD 10 → 0). So the memory half of the no-undefined-behaviour claim survives a GPU at no cost and the arithmetic half cannot — a much smaller concession than it first looked. And the one that settles the language question: **deleting the trap does not reach C.** lex-sys without traps is still scalar, 2.27× off vectorised clang and 1.55× off *scalar* clang, so the trap is 1.83× of its own cost and everything left is Cranelift — which means LLVM is what buys GPU speed, equally, whichever language the kernels are in. §2.1 **corrects `overflow-cost.md` §3.2** in place: it measured one guard and generalised to "the check" |
+| [#63](https://github.com/alpibrusl/lex-sys/pull/63) | [`sqrt`, and the capability question](float-math.md) | [`floating-point.md`](floating-point.md) §7 had carried *"`std.math` over floats — the capability question has to be settled first"* since `float` landed. The capability question turns out to be **the wrong question**: `sqrt` is *one instruction* (`sqrtsd`, `fsqrt`), so it reaches no library, needs no `Ffi`, and its row is `[]` — arithmetic does not acquire a capability after all. What decided it was measuring the two programs that hand-rolled a square root, which is how the bar was met (`newton.ls` and `benches/game/spectral.ls`, counted by reading them). **Both are wrong**: `spectral.ls`'s twenty-step Newton loop is not correctly rounded on **58.4%** of 40,008 values and is wrong by **143 orders of magnitude** on a large one — 10^300 comes back as 4.77 × 10^293, because the first guess is `x/2` and twenty halvings do not cross 143 decades. The benchmark never noticed: it only ever asks for the root of something near 1.27, which is `cut`'s long line again — the dimension the test never varied. So this is a **builtin rather than library code**, which is the opposite of the call `float-printing.md` made, for the same reason: put it where it can be correct. A correctly-rounded root is not expressible in lex-sys; the shortest decimal is. `sin`, `exp` and `log` stay open, and float `abs`/`min`/`max` are refused on §1's rule — one asker with a working alternative. And **AGENTS.md §6 was wrong**: it said there is no unary minus, and there is; the table that said so was the one part of that document the suite did not check, which it now does |
 
 ### The pattern, if there is one
 
@@ -116,11 +117,29 @@ what they may rely on.
 | ~~A line reader~~ | **Answered, no** — [`line-reading.md`](line-reading.md). This row said `examples/cut/` and `examples/tally.ls` *"both read `getchar` into a fixed buffer"*, and **`tally.ls` has no buffer**: it streams. Five programs call `getchar`, one of them reads a line at a time, and the bar here is two. What the row was right about is that something was wrong: `cut` was **silently** printing the wrong field on a long line — a truncated line loses its delimiters, so it switched to the no-delimiter rule and answered 60 KB of `a` with exit 0. Fixed by growing on the heap, at 1.18×, and the one function that *was* earned is `buffer.clear`, at 13.0× against the alternative |
 | Effect polymorphism | A function generic over the *row* it performs. Named nowhere yet, and much larger than anything above |
 
-An LLVM backend is **not** next, and `purity.md` §4.2 is why the case for
-it shrank rather than grew: the row's advantage needs a compilation
-boundary, lex-sys compiles whole programs, and LLVM infers the same fact
-itself when it can see every body. It remains the answer to the 1.6×, and
-that is a performance problem in a language that is not yet usable.
+An LLVM backend is **not** next, and the case for it is now argued from
+two directions at once — which is worth keeping written down, because
+the two arrive at opposite conclusions about its *priority* and agree
+about its *necessity*.
+
+`purity.md` §4.2 shrank it: the effect row's advantage needs a
+compilation boundary, lex-sys compiles whole programs, and LLVM infers
+the same fact itself when it can see every body. So the row buys less
+than it looked like it would.
+
+[`gpu.md`](gpu.md) §2.3 grew it, from somewhere else entirely. Asked
+what a GPU would cost the design, the measurement found that **deleting
+the overflow trap does not reach C**: lex-sys without traps is still
+scalar, 2.27× off vectorised clang and 1.55× off *scalar* clang, so the
+trap is 1.83× of its own cost and everything remaining is Cranelift.
+Removing the trap is necessary and not sufficient. That makes LLVM the
+prerequisite for two things rather than one — the CPU gap, **and any
+GPU future at all**, whichever language the kernels would be written in.
+
+It remains the answer to the 1.17–2.58×, and that is a performance
+problem in a language that is not yet usable. But it is no longer only
+a performance problem: it is the gate in front of the one direction
+this project has been asked about and cannot currently go.
 
 Ordinary work, blocked by nothing: `jo` instead of `seto`/`test`/`jne`
 (`overflow-cost.md` §3.4), and flag parsing.
