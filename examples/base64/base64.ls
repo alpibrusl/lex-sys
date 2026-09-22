@@ -246,6 +246,13 @@ fn main(world: World) -> [] int {
         } else {
             status = encode(i);
         }
+        // One diagnostic here rather than three inside `decode`, which
+        // keeps every function below at `[io_read, io_write]` and says
+        // what GNU says. `docs/standard-error.md` §1 measured this
+        // program exiting 1 in silence.
+        if status != 0 {
+            io.error_all(i, "base64: invalid input\n");
+        }
     }
     release(io);
     return status;

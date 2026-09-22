@@ -557,7 +557,10 @@ fn print_authority(inputs: &[PathBuf], with_std: bool, json: bool) -> Result<(),
         // a reader wants to know what a program *cannot* do, and an absent
         // label is exactly that.
         let untouched: Vec<&str> = [
-            ("the console", ["io_read", "io_write"].as_slice()),
+            // All three streams, because a program whose entire
+            // output is a diagnostic touches the console —
+            // `docs/standard-error.md` §4 is the lie this row prevents.
+            ("the console", ["io_read", "io_write", "err_write"].as_slice()),
             ("the filesystem", ["fs_read", "fs_write"].as_slice()),
             ("the heap", ["heap"].as_slice()),
             ("the command line", ["args"].as_slice()),

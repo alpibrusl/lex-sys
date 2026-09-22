@@ -257,12 +257,26 @@ fn main(world: World) -> [] int {
                         // takes one of its own rather than hiding
                         // inside the one for a file that is not there.
                         status = 3;
+                        borrow mut io as &!i in {
+                            io.error_all(i, "sort: file too large: ");
+                            io.error_all(i, arg(g, n));
+                            io.error_all(i, "\n");
+                        }
                     }
                     if got == 0 - 1 {
                         // GNU writes the failing path to standard error
-                        // and exits 2. There is no standard error here
-                        // yet, so this is the status alone (§9.2).
+                        // and exits 2, and now so does this
+                        // (`docs/standard-error.md` §7). The *reason* is
+                        // still missing -- GNU names the errno string and
+                        // `fs_read` answers `-1` with nothing attached --
+                        // which is §6's open row and
+                        // `file-handles.md` §3's to close.
                         status = 2;
+                        borrow mut io as &!i in {
+                            io.error_all(i, "sort: cannot read: ");
+                            io.error_all(i, arg(g, n));
+                            io.error_all(i, "\n");
+                        }
                     }
                     n = n + 1;
                 }

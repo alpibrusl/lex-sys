@@ -231,9 +231,11 @@ And one program here did not start here. `examples/base64/` is GNU
 coreutils' `base64`, ported and checked byte-for-byte against it in both
 directions. It needed the bit operators, which did not exist, and nothing
 else — no new capability, no library, no change to linearity or effect
-rows. Its authority report is three lines and every one is checkable from
-outside: `args`, `io_read`, `io_write`, and it never touches the
-filesystem, the heap or foreign code.
+rows. Its authority report is four lines and every one is checkable from
+outside: `args`, `io_read`, `io_write`, `err_write` — the last because it
+now says `base64: invalid input` rather than exiting 1 in silence
+([`docs/standard-error.md`](docs/standard-error.md)) — and it never
+touches the filesystem, the heap or foreign code.
 [`docs/porting.md`](docs/porting.md), including §6 on what one small port
 does not establish.
 

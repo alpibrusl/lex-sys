@@ -37,6 +37,14 @@ fn max_field() -> [] int {
 
 // Parse cut's `-f` syntax. Answers `-1` in `from_open` on a malformed
 // list, which `main` turns into the exit status GNU uses.
+//
+// That sentence was **false** when it was written: GNU exits 1 and this
+// exited 2, on the same input. The conformance test ran that input and
+// missed it, because it asserted the status this program *had* while
+// comparing the eight valid specs against the real `/usr/bin/cut` --
+// and it did that because a failing run produced no output to compare.
+// `docs/standard-error.md` §1.3: a stream nobody has is a comparison
+// nobody makes.
 fn parse_list[&r, &o](spec: &r [byte], bits: &!o [byte]) -> [] int {
     var open_at = 0;
     var at = 0;
@@ -141,7 +149,12 @@ fn main(world: World) -> [] int {
     release(args);
 
     var status = 0;
-    if usage { status = 2; }
+    if usage {
+        status = 1;
+        borrow mut io as &!i in {
+            io.error_all(i, "cut: usage: cut -d<c> -f<list>\n");
+        }
+    }
 
     if status == 0 {
         region a {
@@ -150,7 +163,18 @@ fn main(world: World) -> [] int {
             // a `borrow mut`, which would be a reference to a reference.
             var bits = alloc_slice[a](max_field() + 1, byte_of(0));
             let from_open = parse_list(spec, bits);
-            if from_open < 0 { status = 2; }
+            if from_open < 0 {
+                status = 1;
+                // GNU's own wording, on GNU's own stream. Four calls
+                // rather than one because there is no formatting into a
+                // buffer here and the spec is a slice of the argument
+                // (`docs/standard-error.md` §8).
+                borrow mut io as &!i in {
+                    io.error_all(i, "cut: invalid field value '");
+                    io.error_all(i, spec);
+                    io.error_all(i, "'\n");
+                }
+            }
             else {
                 // One line at a time: `getchar` is the only input
                 // primitive there is (`standard-input.md`), and a line
