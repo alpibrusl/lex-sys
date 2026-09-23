@@ -3,7 +3,9 @@
 > **Status: settled, not built.** The program §5 asked for exists now,
 > [`examples/fetch/`](../examples/fetch/fetch.ls), and
 > [`connect.md`](connect.md) is what it found: two corrections to this
-> design, marked below where they apply.
+> design, marked below where they apply. The question it opened, who
+> turns a host into an address, is decided in §4.1: **the builtin, after
+> checking the name against its capability's bound**.
 >
 > [`under-a-grant.md`](under-a-grant.md) §5 promoted
 > [`reach.md`](reach.md) §6's `Net(host)` row from a question of taste to
@@ -136,6 +138,61 @@ Against a grant, the mapping is then direct and is the thing
 > every `connect` that traps outside it. This table is still right about
 > the bound. What the run-time check compares against, a name or an
 > address, is the question [`connect.md`](connect.md) §1 opens.
+> §4.1 answers it.
+
+### 4.1 Decided: the builtin resolves names, after checking them
+
+[`connect.md`](connect.md) §1 found that a lex-sys program can only ever
+connect to an **address**, while a `lex-os` grant only ever names
+**hosts**, so whoever turns one into the other also owns the check. There
+were two candidates: a builtin that calls `getaddrinfo`, or the
+perimeter. **The builtin resolves.** `connect` takes a name and a port.
+It checks the name against the bound its `Net` capability was narrowed
+to, and only then looks it up. A name outside the bound is refused
+before any lookup happens.
+
+The deciding requirement is that **lex-sys is usable without `lex-os`**.
+Under the other answer, a program on an ordinary host could not use a
+host name at all (`fetch` takes four octets today and nothing else), and
+nothing would narrow where it connects, since the only check would live
+in a perimeter that is not there. The builtin answer gives a
+standalone program both: names, and a run-time check against its
+capability's bound, in the same shape as `Fs(prefix)`.
+
+**The perimeter answer was considered first**, and its reasons do not
+survive the requirement:
+
+| Reason given for the perimeter | Why it does not decide it |
+|---|---|
+| `lex-os` already resolves each egress host on the host machine and pins the IP (`install_egress_allowlist` in `lex-os-perimeter/src/firecracker/net.rs`) | It keeps doing so. The firewall stays as the **outer** wall, and under `lex-os` a program is checked twice, both times from the same grant |
+| Two resolvers can disagree, for example under round-robin or split-horizon DNS | Only if the box asks DNS. The perimeter can write the addresses it pinned into the guest's hosts file. With the usual lookup order (`files` before `dns`), the box then resolves each allowed name to exactly the pinned address |
+| Resolving in the box needs DNS egress the grant never listed | Not with the hosts file above: an allowed name resolves locally, and every other name is refused by the bound before a lookup is attempted |
+| One grant, one enforcer | Overstated. `lex-os` already has two enforcement points for one grant (its `CLAUDE.md`: *"one declaration, two enforcement points"*). A static check, the builtin's check and the kernel filter are three points derived from one grant, not three authorities |
+| `getaddrinfo` returns a pointer, and a foreign result is a scalar ([`reach.md`](reach.md) §3.1) | That rule is about `extern fn` declarations a program writes. A builtin keeps the pointer inside the backend, the way `malloc` already does for `box`, and hands the program an address or an error |
+
+What each part now means:
+
+| | Owner | What it checks |
+|---|---|---|
+| `net_out("host:port")` in a row | the **static** check, before the program runs | that the label is within the grant's `egress`, by name, as §4's table says |
+| The name `connect` is given | the **builtin**, at run time, before resolving | that the name and port are within the capability's bound. It traps or refuses outside it, the way `Fs(prefix)` does |
+| The address the name resolves to | the **perimeter**, under `lex-os` only | that the IP and port are ones it pinned for an allowed host |
+
+So the future `connect` builtin takes **a name and a port**, which also
+answers the shape question [`connect.md`](connect.md) §6 left open.
+
+**What this hands to `lex-os`.** For the two resolvers to agree by
+construction, the perimeter should write its pinned addresses into the
+guest's hosts file when it provisions the box. Until it does, a host with
+several addresses can resolve differently in the box than on the host.
+That is a change in `lex-os`, not here, and nothing in lex-sys depends on
+it: a mismatch fails closed, as a refused connection.
+
+**What this does not settle.** The builtin's failure for a name outside
+its bound, a trap or a refusal the program can handle, is a question for
+the implementation. `Fs(prefix)` traps. A network client may want to
+report a bad host as a usage error, as `fetch` reports a bad address
+today, so it may want a value instead.
 
 ---
 
@@ -177,7 +234,9 @@ that being the step nobody can skip.
   say which. *It did not choose one (#77).* It showed that a lex-sys
   program can only ever connect to an address, while a grant only ever
   names hosts, so whoever resolves also owns the check
-  ([`connect.md`](connect.md) §1).
+  ([`connect.md`](connect.md) §1). *Decided (#83): a `connect`
+  builtin resolves, after checking the name against its capability's
+  bound, and the perimeter stays the outer wall under `lex-os` (§4.1).*
 * **No socket type.** A descriptor is an `int`, as `File` was before
   `file-handles.md` gave it a linear type. Whether a socket wants the
   same treatment is a question that program answers too. *It answered
