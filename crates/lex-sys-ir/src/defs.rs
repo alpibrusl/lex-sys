@@ -390,13 +390,13 @@ pub(crate) fn discharged_by(defs: &[TypeDef], ty: &Type) -> Effects {
         PRELUDE_WORLD => {
             let mut all =
                 Effects::plain(["io_read", "io_write", "err_write", "heap", "args", "file_read"]);
-            // `docs/net.md` §4.1, edition 2 only: `net_out` is one more
-            // label the root discharges the unnarrowed way `ffi` and
-            // `fs_read`/`fs_write` already do. An edition-1 file's `World`
-            // discharges it just the same -- it is simply a label no
-            // edition-1 body can ever perform, since it has no way to name
-            // `Net` at all.
-            for name in ["ffi", "fs_read", "fs_write", "net_out"] {
+            // `docs/net.md` §4.1, edition 2 only: `net_out` and `net_in`
+            // are two more labels the root discharges the unnarrowed way
+            // `ffi` and `fs_read`/`fs_write` already do. An edition-1
+            // file's `World` discharges them just the same -- they are
+            // simply labels no edition-1 body can ever perform, since it
+            // has no way to name `Net` at all.
+            for name in ["ffi", "fs_read", "fs_write", "net_out", "net_in"] {
                 all.union(&Effects::new([Label {
                     name: name.to_owned(),
                     argument: Some(FFI_ROOT.to_owned()),
@@ -434,12 +434,15 @@ pub(crate) fn discharged_by(defs: &[TypeDef], ty: &Type) -> Effects {
             }
             _ => Effects::pure(),
         },
-        // `docs/net.md` §4.1: owning a `Net(bound)` discharges
-        // `net_out(bound)`, the same shape `Ffi` discharges its label.
+        // `docs/net.md` §2.1, §4.1: owning a `Net(bound)` discharges both
+        // `net_out(bound)` and `net_in(bound)`, the same shape owning an
+        // `Fs(prefix)` discharges both `fs_read(prefix)` and
+        // `fs_write(prefix)` -- one bound, either operation.
         PRELUDE_NET => match args.first() {
-            Some(Type::Lit(bound)) => {
-                Effects::new([Label { name: "net_out".to_owned(), argument: Some(bound.clone()) }])
-            }
+            Some(Type::Lit(bound)) => Effects::new([
+                Label { name: "net_out".to_owned(), argument: Some(bound.clone()) },
+                Label { name: "net_in".to_owned(), argument: Some(bound.clone()) },
+            ]),
             _ => Effects::pure(),
         },
         _ => Effects::pure(),

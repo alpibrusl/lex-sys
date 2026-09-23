@@ -757,3 +757,136 @@ fn connecting_to_the_wrong_port_traps() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `docs/listen.md` §6: `bind`, `listen` and `accept`, built, answering a
+/// real client over loopback -- the inbound mirror of
+/// `a_lex_sys_client_fetches_from_a_lex_sys_server`, but reaching `Net`
+/// directly rather than `examples/serve/`'s hand-rolled `extern fn`s.
+#[test]
+fn a_lex_sys_listener_accepts_a_real_connection() {
+    use std::io::{Read as _, Write as _};
+    use std::net::TcpStream;
+    use std::time::{Duration, Instant};
+
+    let dir = scratch("net-bind-accept");
+    let port = free_port();
+    let source = dir.join("listener.ls");
+    std::fs::write(
+        &source,
+        format!(
+            "edition 2;\n\
+             // `close` is deliberately not declared here: this compiler's\n\
+             // `extern fn` convention crosses every `int` as 64 bits\n\
+             // (`docs/reach.md` §3), while `bind`'s own internal `close`\n\
+             // (the failure path, unused on this one) is declared against\n\
+             // libc's true 32-bit `int` -- two different signatures for\n\
+             // one linker symbol, which Cranelift correctly refuses. A\n\
+             // short-lived test process needs no explicit close: the OS\n\
+             // reclaims both descriptors when it exits.\n\
+             extern fn read[&f, &b](ffi: &f Ffi(\"libc\"), fd: int, buf: &!b [byte]) -> [ffi(\"libc\")] int;\n\
+             extern fn write[&f, &b](ffi: &f Ffi(\"libc\"), fd: int, buf: &b [byte]) -> [ffi(\"libc\")] int;\n\
+             fn main(world: World) -> [] int {{\n\
+                 let Split {{ io, ffi, fs, heap, args, net }} = split(world);\n\
+                 release(io); release(fs); release(heap); release(args);\n\
+                 let libc = narrow(ffi, \"libc\");\n\
+                 let bound = narrow(net, \"{port}\");\n\
+                 var status = 1;\n\
+                 borrow bound as &n in {{\n\
+                     borrow libc as &f in {{\n\
+                         let listener = bind(n, {port});\n\
+                         if listener >= 0 {{\n\
+                             listen(listener, 1);\n\
+                             let conn = accept(listener);\n\
+                             if conn >= 0 {{\n\
+                                 region scratch {{\n\
+                                     let buf = alloc_slice[scratch](64, byte_of(0));\n\
+                                     let got = read(f, conn, buf);\n\
+                                     if got > 0 {{\n\
+                                         write(f, conn, buf[0..got]);\n\
+                                         status = 0;\n\
+                                     }}\n\
+                                 }}\n\
+                             }}\n\
+                         }}\n\
+                     }}\n\
+                 }}\n\
+                 release(libc);\n\
+                 release(bound);\n\
+                 return status;\n\
+             }}\n",
+        ),
+    )
+    .expect("a writable fixture");
+
+    let exe = dir.join("listener");
+    let build = Command::new(BIN)
+        .args([
+            "build".as_ref(),
+            source.as_os_str(),
+            "--std".as_ref(),
+            "-o".as_ref(),
+            exe.as_os_str(),
+        ])
+        .output()
+        .expect("the compiler runs");
+    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+
+    let mut child = Command::new(&exe).spawn().expect("the listener runs");
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut stream = loop {
+        match TcpStream::connect(("127.0.0.1", port)) {
+            Ok(stream) => break stream,
+            Err(_) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(e) => panic!("could not connect within the deadline: {e}"),
+        }
+    };
+    stream.write_all(b"ping").expect("the write succeeds");
+    let mut echoed = [0u8; 4];
+    stream.read_exact(&mut echoed).expect("the read succeeds");
+    assert_eq!(&echoed, b"ping", "the accepted connection should echo what was sent");
+    drop(stream);
+
+    let run = child.wait().expect("the listener exits");
+    assert_eq!(run.code(), Some(0), "the listener should report success");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// §6.1: `bind`'s port is checked against the capability's bound, the
+/// inbound mirror of `connecting_to_the_wrong_port_traps`.
+#[test]
+fn binding_the_wrong_port_traps() {
+    let dir = scratch("net-wrong-bind-port");
+    let source = dir.join("wrong_bind_port.ls");
+    std::fs::write(
+        &source,
+        "edition 2;\n\
+         fn main(world: World) -> [] int {\n\
+             let Split { io, ffi, fs, heap, args, net } = split(world);\n\
+             release(args); release(heap); release(ffi); release(fs); release(io);\n\
+             let bound = narrow(net, \"1\");\n\
+             var fd = 0;\n\
+             borrow bound as &n in {\n\
+                 fd = bind(n, 2);\n\
+             }\n\
+             release(bound);\n\
+             return fd;\n\
+         }\n",
+    )
+    .expect("a writable fixture");
+
+    let exe = dir.join("wrong_bind_port");
+    let build = Command::new(BIN)
+        .args(["build".as_ref(), source.as_os_str(), "-o".as_ref(), exe.as_os_str()])
+        .output()
+        .expect("the compiler runs");
+    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+
+    let run = Command::new(&exe).output().expect("the compiled program runs");
+    assert!(!run.status.success(), "a port outside the bound should not succeed");
+    assert_eq!(run.status.code(), None, "the process should be killed by a signal, not exit");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

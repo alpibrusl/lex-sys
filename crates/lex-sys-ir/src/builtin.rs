@@ -276,6 +276,28 @@ pub enum Builtin {
     /// it performs is the bound its `Net` capability was narrowed to, and
     /// a fixed signature has nowhere to put it.
     Connect,
+    /// `bind(net, port) -> [net_in(bound)] int` — `docs/net.md` §2.1,
+    /// edition 2 only (`docs/listen.md` §6).
+    ///
+    /// The inbound mirror of [`Builtin::Connect`]: folds `socket`,
+    /// `setsockopt(SO_REUSEADDR)` and `bind` into one call, and checks
+    /// `port` against the capability's bound -- here just a port, not a
+    /// `host:port` pair, because `net.md` §2.1 bounds inbound by *which
+    /// port* alone (`docs/listen.md` §6.1). Checked at the call site for
+    /// the same reason `connect` is.
+    Bind,
+    /// `listen(fd, backlog) -> [] int` — `listen(2)`, unchanged.
+    ///
+    /// Takes no capability: the fd already proves the authority `bind`
+    /// checked, the same way `read`/`close` need none once `open_read`
+    /// has run (`docs/file-handles.md` §4.1). A fixed signature, unlike
+    /// `bind` and `connect`, because nothing about it depends on a
+    /// literal written at the call (`docs/listen.md` §6).
+    Listen,
+    /// `accept(fd) -> [] int` — `accept(2)`, the peer address ignored
+    /// (`NULL, NULL`, as `examples/serve/`'s own hand-written call
+    /// already does). Fixed, for the same reason `listen` is.
+    Accept,
 }
 
 impl Builtin {
@@ -311,6 +333,9 @@ impl Builtin {
         Builtin::BoxSlice,
         Builtin::UnboxSlice,
         Builtin::Connect,
+        Builtin::Bind,
+        Builtin::Listen,
+        Builtin::Accept,
     ];
 
     pub fn name(self) -> &'static str {
@@ -346,6 +371,9 @@ impl Builtin {
             Builtin::BoxSlice => "box_slice",
             Builtin::UnboxSlice => "unbox_slice",
             Builtin::Connect => "connect",
+            Builtin::Bind => "bind",
+            Builtin::Listen => "listen",
+            Builtin::Accept => "accept",
         }
     }
 
@@ -360,7 +388,7 @@ impl Builtin {
     /// an earlier file the name is not a builtin at all.
     pub fn since(self) -> u32 {
         match self {
-            Builtin::Connect => 2,
+            Builtin::Connect | Builtin::Bind | Builtin::Listen | Builtin::Accept => 2,
             _ => 1,
         }
     }
@@ -562,6 +590,14 @@ impl Builtin {
             // is in the capability's type, and a fixed signature cannot
             // say that (`docs/net.md` §4.1).
             Builtin::Connect => (Vec::new(), Type::Unit),
+            // Same reason, for the inbound half's bound (`docs/listen.md`
+            // §6.1).
+            Builtin::Bind => (Vec::new(), Type::Unit),
+            // Neither takes a capability -- the fd already proves the
+            // authority `bind` checked -- so both are ordinary fixed
+            // signatures (`docs/listen.md` §6).
+            Builtin::Listen => (vec![Type::Int, Type::Int], Type::Int),
+            Builtin::Accept => (vec![Type::Int], Type::Int),
         }
     }
 

@@ -343,6 +343,15 @@ pub enum Expr {
         bound: String,
         args: Vec<Expr>,
     },
+    /// `bind(net, port)` — `docs/net.md` §2.1 (`docs/listen.md` §6): the
+    /// inbound mirror of [`Expr::Connect`], bound by a port alone.
+    ///
+    /// `args` is the capability (zero-sized, stopping at the backend) and
+    /// the port, an `int`.
+    Bind {
+        bound: String,
+        args: Vec<Expr>,
+    },
     /// A string literal's bytes (`docs/strings.md` §4). Lowered to a
     /// read-only data object plus the two leaves a slice is made of.
     Bytes(String),

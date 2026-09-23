@@ -682,6 +682,9 @@ impl<'a> FnLowering<'a> {
                 if resolved == Resolved::Builtin(Builtin::Connect) {
                     return self.connect(args, span);
                 }
+                if resolved == Resolved::Builtin(Builtin::Bind) {
+                    return self.bind(args, span);
+                }
                 let (params, ret) = if let Resolved::Builtin(builtin) = resolved {
                     // A builtin's region parameters are instantiated exactly
                     // like a written function's (§5.1): one fresh region per
