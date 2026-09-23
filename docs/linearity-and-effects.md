@@ -1004,6 +1004,10 @@ that here:
    and it is why the row-versus-set question in §7.1 could be answered so
    cheaply. When closures arrive they bring row variables with them, and this
    section is where the argument has to be re-made.
+   ([`function-values.md`](function-values.md) §4.3 re-made it for
+   captureless function values, which bring **no** row variables: a call
+   through one is checked against the row in its type. Row variables
+   arrive only with abstracting over rows.)
 
 Each function's check is one walk of its body carrying a three-valued state per
 local and a set per call. That is linear in body size with an O(nesting-depth)
