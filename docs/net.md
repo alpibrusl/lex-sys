@@ -1,11 +1,13 @@
 # The network
 
-> **Status: settled, not built.** The program §5 asked for exists now,
-> [`examples/fetch/`](../examples/fetch/fetch.ls), and
+> **Status: settled, cleared to build.** The program §5 asked for
+> exists now, [`examples/fetch/`](../examples/fetch/fetch.ls), and
 > [`connect.md`](connect.md) is what it found: two corrections to this
 > design, marked below where they apply. The question it opened, who
 > turns a host into an address, is decided in §4.1: **the builtin, after
-> checking the name against its capability's bound**.
+> checking the name against its capability's bound**. §5's two-asker
+> bar, per half, is now cleared on both sides
+> ([`connect.md`](connect.md) §6, [`listen.md`](listen.md) §4).
 >
 > [`under-a-grant.md`](under-a-grant.md) §5 promoted
 > [`reach.md`](reach.md) §6's `Net(host)` row from a question of taste to
@@ -225,10 +227,18 @@ half with an asker is the one the grant does not ask about.
 > project's own rule, and building `bind`/`listen`/`accept`/`net_in`
 > still is not, until a second inbound program arrives.
 
-That is the honest state and it is why this document ends at *settled,
-not built*, for the feature as a whole. The bar is two per half. Outbound
-has it; inbound does not, so the next step for the half that would
-unblock the `lex-os` join is still a second inbound program, not §4.
+> **Recounted (#176): inbound 2.** `examples/collect/` is a second
+> inbound program ([`listen.md`](listen.md)): it accepts more than one
+> connection without restarting and reads a request's body, the two
+> things `serve/` never had to do. **Both halves have now cleared the
+> bar.**
+
+That is the honest state up to here, and it is why this document still
+ends at *settled, not built*. Both halves of the two-asker bar §5 set
+are cleared. What is left is §3's own reason to build now rather than
+before: sockets have to come out of libc entirely, since `Ffi("libc")`
+still lets a program declare `extern fn socket` on its own and `Net`
+would contribute nothing alongside it.
 
 ---
 

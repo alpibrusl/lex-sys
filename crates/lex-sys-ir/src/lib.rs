@@ -661,3 +661,8 @@ mod foreign_tests;
 #[cfg(test)]
 #[path = "tests/linearity.rs"]
 mod linearity_tests;
+
+/// Compile-time folding's own recursion guard: `docs/fuzzing.md` §4.5.
+#[cfg(test)]
+#[path = "tests/fold.rs"]
+mod fold_tests;
