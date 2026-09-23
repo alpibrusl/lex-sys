@@ -55,10 +55,11 @@ the design question `net.md` must now answer:
 | A builtin (the backend calls `getaddrinfo`) | a host, as the grant does | the builtin, comparing the name before it resolves it |
 | The perimeter (`lex-os` already resolves egress to IP rules, its demo's second wall) | an address | the kernel's filter, which is outside the language entirely |
 
-> **Decided (#83): the perimeter.** [`net.md`](net.md) §4.1 gives the
-> reasons. The label still names a host, and it is checked against the
-> grant statically. Only the perimeter turns names into addresses, and
-> it enforces the address at run time.
+> **Decided (#83): the builtin.** [`net.md`](net.md) §4.1 gives the
+> reasons. lex-sys has to be usable without `lex-os`, and only this
+> answer gives a standalone program names and a run-time check. `connect`
+> checks the name against its capability's bound, then resolves it.
+> Under `lex-os`, the firewall stays as an outer wall.
 
 ---
 
@@ -186,8 +187,8 @@ the targets this project supports. And the builtin's shape depends on
 §1: an address builtin that takes octets and a port suits the perimeter
 answer, and a `connect` builtin that takes a name suits the builtin
 answer. Building either before choosing would decide §1 by accident.
-*§1 is now decided for the perimeter, so the builtin is the one that
-takes octets and a port.*
+*§1 is now decided for the builtin, so it is the one that takes a name
+and a port.*
 
 ---
 
