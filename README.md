@@ -538,6 +538,7 @@ fixture.
 | [`docs/README.md`](docs/README.md) | Every design document, what it settles, and whether it is built |
 | [`docs/ROADMAP.md`](docs/ROADMAP.md) | Milestones, what each slice landed and found, and what is next |
 | [`examples/README.md`](examples/README.md) | The programs, and which to read for which idea |
+| [`CONTRIBUTING.md`](CONTRIBUTING.md) | Working on the compiler: the gate, how a slice is done, the file budget, and code conventions |
 
 Design lands in `docs/` **before** the code that implements it, which is the
 cheap place for it to be wrong. When it turns out wrong anyway, the document

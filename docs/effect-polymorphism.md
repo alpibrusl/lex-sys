@@ -54,7 +54,7 @@ program's need. §2 is the argument.
 
 ## 2. A row cannot vary, and that is by construction
 
-`Signature.effects` in `crates/lex-sys-ir/src/lib.rs` carries its own
+`Signature.effects` in `crates/lex-sys-ir/src/defs.rs` carries its own
 reason:
 
 > *The declared effect row (§7.2): written at the boundary, never
