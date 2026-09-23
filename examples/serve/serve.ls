@@ -4,21 +4,30 @@
 // one connection, routes the request line, and answers with JSON. `GET
 // /health` gets a 200; anything else gets a 404.
 //
-// Nothing here is a language feature added for the purpose. There is no
-// socket type, no `Net` capability, no async runtime and no HTTP library.
-// The whole thing is eight `extern fn` declarations against libc, reached
-// through the same `Ffi("libc")` capability `examples/tour.ls` uses for
-// `labs`, and the bytes it sends are the same `&r [byte]` slices every
-// other program here builds.
+// Nothing here is a language feature added for the purpose -- this program
+// predates the one that was. There is no socket type, no async runtime and
+// no HTTP library, and at the time this was written there was no `Net`
+// capability either: the whole thing is eight `extern fn` declarations
+// against libc, reached through the same `Ffi("libc")` capability
+// `examples/tour.ls` uses for `labs`, and the bytes it sends are the same
+// `&r [byte]` slices every other program here builds.
 //
-// That is the point, and `docs/reach.md` is the argument. What decides
-// whether a program is writable is not a feature list -- it is whether the
-// authority it needs has a name. Sockets are libc, libc has a name, so
-// this program exists. The cost is that `ffi("libc")` is the *only* thing
-// its row can say: a supervisor reading the effect row alone learns that
-// this program calls a C library, not that it listens on a port. §5 of
-// that document is about what covers the difference, and why it is a
-// report rather than a row.
+// `Net` exists now (`docs/net.md`, `docs/listen.md`): `bind`, `listen` and
+// `accept` are builtins checked against a capability's bound before
+// `socket` ever runs. This program is deliberately not ported onto it --
+// `read`, `write` and `close` on the accepted connection still need
+// `extern fn`, so replacing only the three calls `Net` now covers would add
+// a capability to the authority report without removing `Ffi("libc")` from
+// it (`docs/listen.md` §6.3 has the one place that porting would collide).
+//
+// That is still the point of leaving it as it is, and `docs/reach.md` is
+// the argument. What decides whether a program is writable is not a
+// feature list -- it is whether the authority it needs has a name. Sockets
+// are libc, libc has a name, so this program exists. The cost is that
+// `ffi("libc")` is the *only* thing its row can say: a supervisor reading
+// the effect row alone learns that this program calls a C library, not
+// that it listens on a port. §5 of that document is about what covers the
+// difference, and why it is a report rather than a row.
 //
 // Read from the bottom: `main` splits the world, keeps exactly two
 // capabilities and destroys the other three, and never regains them.
