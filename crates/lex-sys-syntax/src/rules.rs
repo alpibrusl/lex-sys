@@ -9,7 +9,7 @@
 //! §1 is why this exists. Across 196 must-reject fixtures the checker
 //! produced 125 distinct message shapes, 101 of them seen exactly once —
 //! so a consumer classifying a refusal had 125 English patterns to match
-//! and no vocabulary at all. These are the 52 rules underneath them,
+//! and no vocabulary at all. These are the 53 rules underneath them,
 //! and `internal` (`docs/internal-errors.md`), which names the
 //! compiler's failures rather than the program's.
 //!
@@ -79,6 +79,7 @@ pub enum Rule {
     TypeArgsNotTaken,
     TypeMismatch,
     UnexpectedCharacter,
+    UnknownEdition,
     UnknownEscape,
     UnknownName,
     UnreachableStatement,
@@ -87,7 +88,7 @@ pub enum Rule {
 
 impl Rule {
     /// Every rule, in tag order. The catalogue as data.
-    pub const ALL: [Rule; 53] = [
+    pub const ALL: [Rule; 54] = [
         Rule::AmbiguousType,
         Rule::ArityMismatch,
         Rule::AssignToImmutable,
@@ -137,6 +138,7 @@ impl Rule {
         Rule::TypeArgsNotTaken,
         Rule::TypeMismatch,
         Rule::UnexpectedCharacter,
+        Rule::UnknownEdition,
         Rule::UnknownEscape,
         Rule::UnknownName,
         Rule::UnreachableStatement,
@@ -195,6 +197,7 @@ impl Rule {
             Rule::TypeArgsNotTaken => "type-args-not-taken",
             Rule::TypeMismatch => "type-mismatch",
             Rule::UnexpectedCharacter => "unexpected-character",
+            Rule::UnknownEdition => "unknown-edition",
             Rule::UnknownEscape => "unknown-escape",
             Rule::UnknownName => "unknown-name",
             Rule::UnreachableStatement => "unreachable-statement",
@@ -403,6 +406,10 @@ impl Rule {
             Rule::UnexpectedCharacter => {
                 "A character that begins no token in this language, or that cannot appear where it \
                  does."
+            }
+            Rule::UnknownEdition => {
+                "A file's `edition N;` marker names one of the editions this compiler knows; a \
+                 file with no marker is edition 1, and there is nothing later to name yet."
             }
             Rule::UnknownEscape => {
                 "A string literal takes the six escapes `\\n`, `\\r`, `\\t`, `\\\\`, `\\\"` and \

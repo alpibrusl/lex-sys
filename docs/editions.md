@@ -250,8 +250,13 @@ has, and that is refused like any other unknown name.
 
 ## 8. What this does not do
 
-- **It builds nothing.** The marker, its rule and the per-edition
-  `Split` land with `Net`, after `parser.rs` is split by concern.
+- **It builds nothing yet.** *(Corrected: the marker shipped ahead of
+  `Net`, not with it.)* `edition N;` parses, is stored per item
+  alongside `docs/modules.md`'s module side table, and an unknown
+  edition is refused under its own tag (`unknown-edition`). Only
+  edition 1 is known today, so this slice is unobservable from any
+  program a file can write — there is nothing to opt into until the
+  per-edition `Split` and `Net` land on top of it.
 - **It does not migrate the past.** §2's 58 revisions stay unreadable,
   and nothing in this repository needs them.
 - **It does not replace refusals with warnings.** A diagnostic here is

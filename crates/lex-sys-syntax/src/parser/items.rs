@@ -9,6 +9,38 @@ impl<'a> Parser<'a> {
     // ---- items ---------------------------------------------------------
 
     pub(crate) fn unit(&mut self) -> Result<(), Diagnostic> {
+        // `edition N;` -- the file's edition marker, if present
+        // (`docs/editions.md` §6.1). It comes before even `module`, and
+        // unlike `module`/`import` it is not a loop-body item: a file's
+        // edition cannot change partway through it, so this is checked
+        // once, here, rather than inside the loop below. That also gives
+        // "first" and "at most once" for free -- a second `edition N;`
+        // falls through to the loop as a bare identifier and is refused
+        // there the same way any other unrecognized item is.
+        if self.peek().kind == TokenKind::Ident && self.text(self.peek()) == "edition" {
+            let keyword = self.bump();
+            let tok = self.peek();
+            if tok.kind != TokenKind::Int {
+                return Err(self.err(
+                    Rule::UnknownEdition,
+                    format!("expected an edition number, found {}", tok.kind.describe()),
+                ));
+            }
+            self.bump();
+            let value = self.int_value(tok, false)?;
+            self.expect(TokenKind::Semi)?;
+            // Edition one is the language as it is today; there is nothing
+            // later than it yet to opt into (`docs/editions.md` §6.1).
+            if value != 1 {
+                return Err(Diagnostic::new(
+                    Rule::UnknownEdition,
+                    format!("unknown edition {value}; the only edition today is 1"),
+                    keyword.span.to(tok.span),
+                ));
+            }
+            self.current_edition = value as u32;
+        }
+
         // `module a.b;` is the *first* item in a file, and at most one
         // (`docs/modules.md` §3). "First" is a rule about this file, which
         // is why it is tracked here rather than on the AST: several files
@@ -123,7 +155,7 @@ impl<'a> Parser<'a> {
 
     /// Push a declaration into whichever module this file is in.
     pub(crate) fn push_decl(&mut self, item: Item, span: Span) -> ItemId {
-        self.ast.push_item_in(item, span, self.current_module)
+        self.ast.push_item_in(item, span, self.current_module, self.current_edition)
     }
 
     pub(crate) fn fn_decl(&mut self, public: bool) -> Result<ItemId, Diagnostic> {

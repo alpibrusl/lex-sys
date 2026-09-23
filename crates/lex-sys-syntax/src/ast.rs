@@ -655,6 +655,12 @@ pub struct Ast {
     /// table rather than a field on `Item`, so nothing that walks items
     /// has to know modules exist unless it asks.
     item_modules: Vec<u32>,
+    /// The edition of the file each item came from, parallel to `items`
+    /// the same way (`docs/editions.md` §6.1, §6.3). A file with no
+    /// `edition N;` marker is edition 1, which is why this is never
+    /// empty where `items` is not: `push_item` and every fixture written
+    /// before editions existed default here.
+    item_editions: Vec<u32>,
     pub exprs: Vec<Expr>,
     pub stmts: Vec<Stmt>,
     pub types: Vec<TypeExpr>,
@@ -701,6 +707,12 @@ impl Ast {
     /// The module an item belongs to.
     pub fn module_of(&self, item: ItemId) -> u32 {
         self.item_modules[item.index()]
+    }
+
+    /// The edition of the file an item was declared in
+    /// (`docs/editions.md` §6.1).
+    pub fn edition_of(&self, item: ItemId) -> u32 {
+        self.item_editions[item.index()]
     }
 
     pub fn module(&self, index: u32) -> &Module {
@@ -758,13 +770,14 @@ impl Ast {
     /// `docs/modules.md` means this, and the root is where a file with no
     /// `module` declaration puts things.
     pub fn push_item(&mut self, item: Item, span: Span) -> ItemId {
-        self.push_item_in(item, span, 0)
+        self.push_item_in(item, span, 0, 1)
     }
 
-    pub fn push_item_in(&mut self, item: Item, span: Span, module: u32) -> ItemId {
+    pub fn push_item_in(&mut self, item: Item, span: Span, module: u32, edition: u32) -> ItemId {
         self.items.push(item);
         self.item_spans.push(span);
         self.item_modules.push(module);
+        self.item_editions.push(edition);
         ItemId(self.items.len() as u32 - 1)
     }
 

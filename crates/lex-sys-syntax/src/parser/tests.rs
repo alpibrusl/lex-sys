@@ -600,3 +600,51 @@ fn a_pattern_may_name_an_enum_through_a_qualifier() {
     assert_eq!(ast.name_of(*enum_name), "Shape");
     assert_eq!(ast.name_of(*variant), "Flat");
 }
+
+/// A file with no `edition N;` marker is edition 1, forever
+/// (`docs/editions.md` §6.1) — every fixture written before editions
+/// existed is one of these.
+#[test]
+fn an_absent_edition_marker_defaults_to_one() {
+    let (ast, decl) = one_fn("fn f() -> [] int { return 1; }");
+    let item = ast.items.iter().position(|i| matches!(i, Item::Fn(d) if d.name == decl.name));
+    assert_eq!(ast.edition_of(ItemId(item.unwrap() as u32)), 1);
+}
+
+/// `edition 1;` is a no-op: it names the language as it is today, and
+/// items after it are edition 1 exactly as they would have been without
+/// it.
+#[test]
+fn edition_one_is_accepted_as_a_no_op() {
+    let (ast, decl) = one_fn("edition 1;\nfn f() -> [] int { return 1; }");
+    let item = ast.items.iter().position(|i| matches!(i, Item::Fn(d) if d.name == decl.name));
+    assert_eq!(ast.edition_of(ItemId(item.unwrap() as u32)), 1);
+}
+
+/// There is nothing later than edition 1 to opt into yet
+/// (`docs/editions.md` §6.1), so any other number is refused rather
+/// than silently accepted.
+#[test]
+fn an_unknown_edition_is_refused() {
+    let err = parse("edition 2;\nfn f() -> [] int { return 1; }").unwrap_err();
+    assert_eq!(err.rule, Rule::UnknownEdition);
+    assert!(err.message.contains("unknown edition 2"), "{}", err.message);
+}
+
+/// The marker comes before even `module` (§6.1) — checked once, ahead
+/// of the loop that parses items, so it cannot appear anywhere else in
+/// the file.
+#[test]
+fn the_edition_marker_must_come_before_the_module_declaration() {
+    let err = parse("module a;\nedition 1;\nfn f() -> [] int { return 1; }").unwrap_err();
+    assert_eq!(err.rule, Rule::TypeMismatch);
+}
+
+/// And it may appear at most once — a second one is just an
+/// unrecognized item at that point, the same refusal any other stray
+/// identifier gets.
+#[test]
+fn the_edition_marker_may_appear_at_most_once() {
+    let err = parse("edition 1;\nedition 1;\nfn f() -> [] int { return 1; }").unwrap_err();
+    assert_eq!(err.rule, Rule::TypeMismatch);
+}
