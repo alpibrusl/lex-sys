@@ -17,8 +17,7 @@ const BUDGET: usize = 2_000;
 /// had then. A ceiling may only come down: split the file, lower the
 /// number, and delete the row once the file is under [`BUDGET`]. Raising
 /// one is not a fix.
-const CEILINGS: &[(&str, usize)] =
-    &[("crates/lex-sys-codegen/src/lib.rs", 2_886), ("crates/lex-sys/tests/conformance.rs", 6_684)];
+const CEILINGS: &[(&str, usize)] = &[("crates/lex-sys/tests/conformance.rs", 6_684)];
 
 const SOURCE_EXTENSIONS: &[&str] = &["rs", "ls", "py", "c"];
 
