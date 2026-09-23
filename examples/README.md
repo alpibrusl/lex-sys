@@ -344,6 +344,31 @@ the Linux layout, which works on macOS only because BSD forgives it.
 And *could not connect* is all it can say, because `errno` is behind a
 pointer.
 
+### `report/` — the second outbound program
+
+```sh
+cargo run -p lex-sys -- build --std examples/report/report.ls -o report
+./report 127.0.0.1 8080 /result "42"
+```
+
+`docs/net.md` §5 and `docs/connect.md` §6 put the bar at two askers per
+half of the network before `Net` gets built, and `fetch/` was the only
+outbound one. This is the second: an agent that posts a result rather
+than a generic client, which is the shape a program that runs to a
+number and has to tell someone actually takes. It sends `POST <path>`
+with a body, so it needs a `Content-Length` going out the same way
+`serve/`'s responses need one coming back — the one thing that differs
+from `fetch/`, which never sends a body. Everything else about
+connecting is copied from `fetch/` unchanged, because `docs/connect.md`
+already settled it and a second program asking the same question gets
+the same answer.
+
+Sending a body large enough to matter, which `fetch/` never had to,
+found two of its own bugs rather than any new design question: a
+100,000-byte message copied into one scratch buffer overran a region's
+64 KiB arena, and the fix for that still left the header buffer five
+bytes short. Both are `docs/connect.md` §8.
+
 ### `buffer/` — growing, written out
 
 ```sh

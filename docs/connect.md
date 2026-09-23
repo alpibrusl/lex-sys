@@ -190,6 +190,16 @@ answer. Building either before choosing would decide §1 by accident.
 *§1 is now decided for the builtin, so it is the one that takes a name
 and a port.*
 
+> **Recounted (#171): outbound 2.** `examples/report/` is `fetch/`'s
+> shape with a genuinely different HTTP request: `POST <path>` with a
+> body, so a `Content-Length` goes out on the connection this time
+> rather than only coming back, the way `serve/`'s does. It found
+> nothing new about §1 through §4 — the same address rules, the same
+> layout, the same opaque `errno`, copied rather than shared because
+> there is nowhere between two examples to put a shared function. It
+> found two things §1 through §4 had no reason to raise: §8. The
+> outbound half has cleared the bar; inbound is still at one.
+
 ---
 
 ## 7. The suite
@@ -201,4 +211,46 @@ and a port.*
 | `fetch_refuses_a_name_it_cannot_resolve` | a name, three bad addresses and two bad ports are usage errors that say why | 1 |
 | `the_linux_address_layout_connects_on_both_targets` | Linux accepts `2, 0` and refuses `16, 2`; macOS accepts both. Each row is measured on its own CI runner. The first version asserted that macOS refuses `2, 0`, and CI refuted it | 3 |
 | `the_client_and_the_server_differ_only_in_their_symbols` | both reports are the same unbounded `ffi("libc")`; `connect` is in one symbol list and `bind`/`listen`/`accept` in the other | — |
-| `the_network_programs_are_counted` | inbound 1, outbound 1. It used to be `the_only_network_program_is_inbound`, written to fail the day this program arrived | 6 |
+| `the_network_programs_are_counted` | inbound 1, outbound 2. It used to be `the_only_network_program_is_inbound`, written to fail the day the first outbound program arrived | 6 |
+| `a_lex_sys_agent_reports_to_a_lex_sys_server` | `report` against `examples/serve/`: a `POST` gets the same 404 `serve/` gives any unmatched route, over a real connection | 6 |
+| `report_sends_a_body_the_server_can_read_in_full` | the request byte for byte, including `Content-Length`, with a 100,000-byte body that takes the client more than one `write` | 6 |
+
+## 8. What changed and what did not
+
+A second outbound program is exactly what §6 says it is: a test of
+whether one asker was an accident. It was not, on the design questions
+§1 through §4 already settled: `report/` reuses `fetch/`'s address
+handling, connect loop and response reader with no changes, and the one
+place it differs — assembling a request with a body — is a problem this
+project had already solved once, on the other side of the same
+connection, in `serve/`'s `respond`. Nothing there is a new design
+question, which is itself the finding: the outbound half of `Net`'s
+shape generalizes past its first asker.
+
+Writing it found two things anyway, both bugs rather than design
+questions, and both only because this program does something `fetch/`
+never needed to: send a body large enough to matter.
+
+- **A region is one 64 KiB arena chunk** (`docs/defined-behaviour.md`),
+  and `report/`'s first version copied the whole request — headers and
+  a message from `argv` — into one scratch slice before sending it, the
+  way `fetch/`'s much smaller request is built. A message over roughly
+  57 KiB made that allocation itself trap. The fix sends the header
+  block and the body as two `send_all` calls instead of one, so the
+  body streams straight from the caller's own slice and is never
+  copied into an arena at all — the same reason `fetch/` never
+  materialises a whole response body either.
+- **The header buffer was five bytes short.** Fixing the first bug
+  still left `head_out` sized `len(path) + len(host) + 64`: enough for
+  the 63 bytes of literal text around it, but with only one byte of
+  headroom for `Content-Length`'s digits. Every message this program
+  exists to send is large enough that the digit count exceeds that, so
+  `put` wrote past the end of the slice and the bounds check caught it
+  — the moment a five-figure body was tried, not before. `+ 96` is the
+  fix, the same margin `fetch/`'s own scratch buffers already use.
+
+Both were caught by a bounds check and an arena-capacity check, not by
+a wrong answer: the failure mode `docs/defined-behaviour.md` promises,
+not a silent one. And both are the ordinary cost of a second program
+that actually exercises the first one's untested edge, which is the
+entire argument for writing it rather than trusting the count.

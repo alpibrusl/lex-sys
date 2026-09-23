@@ -215,12 +215,20 @@ half with an asker is the one the grant does not ask about.
 > by hand, and they are portable only through a BSD compatibility rule
 > ([`connect.md`](connect.md) §3 and §6).
 
+> **Recounted (#171): outbound 2.** `examples/report/` is a second
+> outbound program, an agent that posts a result rather than a generic
+> client, so it exercises a shape `fetch/` does not: a request with a
+> body, needing a `Content-Length` going out the same way `serve/`'s
+> responses need one coming back. **The outbound half has cleared the
+> bar.** Inbound is still at one, so the two halves are no longer
+> together: building `connect`/`net_out` is now justified by this
+> project's own rule, and building `bind`/`listen`/`accept`/`net_in`
+> still is not, until a second inbound program arrives.
+
 That is the honest state and it is why this document ends at *settled,
-not built*. The bar is two and the outbound side has none, so the next
-step is not to implement §4 — it is a program that connects, which is
-also the only way to find out what `connect` needs that this design has
-not thought of. `porting.md` §9 and `line-reading.md` §1 are both about
-that being the step nobody can skip.
+not built*, for the feature as a whole. The bar is two per half. Outbound
+has it; inbound does not, so the next step for the half that would
+unblock the `lex-os` join is still a second inbound program, not §4.
 
 ---
 
