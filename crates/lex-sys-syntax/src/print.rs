@@ -267,7 +267,7 @@ impl Printer<'_> {
         let labels: Vec<String> = effects
             .iter()
             .map(|e| match &e.argument {
-                Some(argument) => format!("{}(\"{argument}\")", self.name(e.name)),
+                Some(argument) => format!("{}(\"{}\")", self.name(e.name), escape(argument)),
                 None => self.name(e.name).to_owned(),
             })
             .collect();
@@ -430,10 +430,7 @@ impl Printer<'_> {
                 self.ty(*inner)
             ),
             TypeExpr::Slice(inner) => format!("[{}]", self.ty(*inner)),
-            TypeExpr::Tuple(parts) => {
-                let written: Vec<String> = parts.iter().map(|p| self.ty(*p)).collect();
-                format!("({})", written.join(", "))
-            }
+            TypeExpr::Tuple(parts) => tuple(parts.iter().map(|p| self.ty(*p)).collect()),
             TypeExpr::Lit(text) => format!("\"{}\"", escape(text)),
         }
     }
@@ -487,6 +484,19 @@ impl Printer<'_> {
     /// printer puts back exactly the ones the text needs and no others.
     /// Getting that wrong shows up as a changed hash, which is what the
     /// round-trip test is for.
+    /// The base of a `.`. A numeric literal there is parenthesised: `1 . 2`
+    /// is component 2 of the integer 1, and written `1.2` it would lex as
+    /// one float token instead -- a different tree, on text that is already
+    /// a fixed point. Precedence cannot see this; it is the lexer's, and
+    /// the fuzzer found it (`docs/fuzzing.md` §4.4).
+    fn dotted(&self, base: ExprId) -> String {
+        let text = self.expr_at(base, POSTFIX);
+        match self.ast.expr(base) {
+            Expr::Int(_) | Expr::Float(_) => format!("({text})"),
+            _ => text,
+        }
+    }
+
     fn expr_at(&self, id: ExprId, level: u8) -> String {
         match self.ast.expr(id) {
             Expr::Int(value) => value.to_string(),
@@ -507,16 +517,13 @@ impl Printer<'_> {
                 }
             }
             Expr::Field { base, name } => {
-                format!("{}.{}", self.expr_at(*base, POSTFIX), self.name(*name))
+                format!("{}.{}", self.dotted(*base), self.name(*name))
             }
             // A tuple's own parentheses bind it, so it prints at any level
             // without needing the precedence wrapper.
-            Expr::Tuple(parts) => {
-                let written: Vec<String> = parts.iter().map(|p| self.expr(*p)).collect();
-                format!("({})", written.join(", "))
-            }
+            Expr::Tuple(parts) => tuple(parts.iter().map(|p| self.expr(*p)).collect()),
             Expr::TupleField { base, index } => {
-                format!("{}.{index}", self.expr_at(*base, POSTFIX))
+                format!("{}.{index}", self.dotted(*base))
             }
             Expr::Index { base, index } => {
                 format!("{}[{}]", self.expr_at(*base, POSTFIX), self.expr(*index))
@@ -590,10 +597,18 @@ impl Printer<'_> {
 
 /// Binding powers, loosest first. They only have to *order* the same way the
 /// parser's do; the numbers themselves never leave this file.
-const UNARY: u8 = 9;
-const POSTFIX: u8 = 10;
+///
+/// The two below are derived from the tightest binary operator rather than
+/// written as numbers. They used to be `9` and `10`, which was right until
+/// the bitwise operators pushed `+` to 9 and `*` to 10 (`docs/bitwise.md`)
+/// and left prefix and postfix no tighter than a product: `-(a / 10)` then
+/// printed as `-a / 10`, a different tree. The fuzzer found it
+/// (`docs/fuzzing.md`); deriving them means a new operator cannot do it
+/// again.
+const UNARY: u8 = binding_power(BinOp::Mul) + 1;
+const POSTFIX: u8 = UNARY + 1;
 
-fn binding_power(op: BinOp) -> u8 {
+const fn binding_power(op: BinOp) -> u8 {
     match op {
         BinOp::Or => 1,
         BinOp::And => 2,
@@ -671,6 +686,21 @@ fn escape(text: &str) -> String {
         }
     }
     out
+}
+
+/// A tuple's parentheses, with the comma that makes a one-part tuple one.
+///
+/// The parser accepts `(e,)` and the checker refuses it (`docs/tuples.md`
+/// §2.1), so a one-part tuple is reachable in the AST. Printed without the
+/// comma it would reparse as grouping -- a different tree, and one the
+/// checker accepts -- so the comma stays. Printing is a fixed point on
+/// everything that parses, not only on what checks.
+fn tuple(written: Vec<String>) -> String {
+    if written.len() == 1 {
+        format!("({},)", written[0])
+    } else {
+        format!("({})", written.join(", "))
+    }
 }
 
 /// `docs/modules.md` §5. Written before the mode, so a declaration reads
@@ -856,5 +886,72 @@ mod tests {
             text,
             "fn f(a: int) -> [] int {\n    if a > 0 {\n        return 1;\n    }\n    return 0;\n}\n"
         );
+    }
+
+    // The two below were found by `tests/fuzz.rs` and minimized by hand.
+    // Neither program checks; both parse, and printing has to be a fixed
+    // point on everything that parses (`docs/fuzzing.md`).
+
+    #[test]
+    fn a_one_part_tuple_keeps_its_comma() {
+        // Without it `(1,)` would print as `(1)`, which is grouping -- the
+        // reparse would be a different tree, and one the checker accepts.
+        assert_eq!(printed_expr("(a,)"), "(a,)");
+        round_trip("fn f(p: (int,)) -> [] int { return 0; }");
+    }
+
+    #[test]
+    fn a_label_argument_keeps_its_escapes() {
+        // The argument is held unescaped, like a literal's bytes; printed
+        // raw, the newline would land inside the quotes and not reparse.
+        let text = round_trip("fn f() -> [ffi(\"a\\n\\\"b\")] int { return 0; }");
+        assert!(text.contains("ffi(\"a\\n\\\"b\")"), "{text}");
+    }
+
+    #[test]
+    fn prefix_and_postfix_bind_tighter_than_every_binary_operator() {
+        // The third fuzz finding. Each of these used to reprint as a
+        // different tree, because `UNARY` and `POSTFIX` had fallen level
+        // with `*` when the bitwise operators moved the powers up.
+        assert_eq!(printed_expr("-(a / b) * c"), "-(a / b) * c");
+        assert_eq!(printed_expr("-a / b"), "-a / b");
+        assert_eq!(printed_expr("~(a * b)"), "~(a * b)");
+        assert_eq!(printed_expr("a + -(b % c)"), "a + -(b % c)");
+        round_trip("fn f(xs: [int], a: int, b: int) -> [] int { return (xs[a] * b) + xs[a * b]; }");
+        for op in [
+            BinOp::And,
+            BinOp::Or,
+            BinOp::Add,
+            BinOp::Sub,
+            BinOp::Mul,
+            BinOp::Div,
+            BinOp::Rem,
+            BinOp::Eq,
+            BinOp::Ne,
+            BinOp::Lt,
+            BinOp::Le,
+            BinOp::Gt,
+            BinOp::Ge,
+            BinOp::BitAnd,
+            BinOp::BitOr,
+            BinOp::BitXor,
+            BinOp::Shl,
+            BinOp::Shr,
+        ] {
+            assert!(binding_power(op) < UNARY, "{op:?} binds as tightly as a prefix operator");
+        }
+    }
+
+    #[test]
+    fn a_numeric_literal_before_a_dot_keeps_its_parentheses() {
+        // The fourth fuzz finding, and the first only the tree comparison
+        // could see: `1.2` reprints as itself, as a float.
+        assert_eq!(printed_expr("(1).2"), "(1).2");
+        assert_eq!(printed_expr("1 . 2"), "(1).2");
+        assert_eq!(printed_expr("(1).x"), "(1).x");
+        assert_eq!(printed_expr("(1).e5"), "(1).e5");
+        assert_eq!(printed_expr("(1.5).0"), "(1.5).0");
+        // A literal that is not the base needs nothing.
+        assert_eq!(printed_expr("a.0 + 1"), "a.0 + 1");
     }
 }

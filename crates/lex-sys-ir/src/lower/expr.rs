@@ -205,7 +205,7 @@ impl<'a> FnLowering<'a> {
                 if parts.len() < 2 {
                     return Err(Diagnostic::new(
                         Rule::PatternShape,
-                        "a tuple has two components or more; `(e)` is grouping, and there is no `()`",
+                        "a tuple has two components or more; `(e)` is grouping, and neither `(e,)` nor `()` is a tuple",
                         span,
                     ));
                 }

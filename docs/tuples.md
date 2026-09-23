@@ -71,10 +71,19 @@ two things. A tuple has two components or more, and that is the whole
 rule.
 
 Note what that does and does not refuse. `()` is an error — it parses as
-a tuple and is rejected for having no components. `(e)` is **not** an
-error: it is grouping, and was grouping before tuples existed. There is
-no fixture for a one-tuple because there is no one-tuple to write, which
-is the point of choosing the rule this way round.
+a tuple and is rejected for having no components. `(e,)` is an error the
+same way — the comma makes it a tuple, and it is rejected for having one.
+`(e)` is **not** an error: it is grouping, and was grouping before tuples
+existed.
+
+> **Corrected.** This paragraph used to say there was no fixture for a
+> one-tuple "because there is no one-tuple to write". That was false: the
+> parser has always accepted a trailing comma, so `(e,)` parsed as a
+> one-part tuple, and the checker refused it with the rule above. Nobody
+> had written it; the fuzzer did (`docs/fuzzing.md`), and found that the
+> printer dropped the comma, turning a refused program into an accepted
+> one on reprint. The printer now keeps it, and `one_tuple.ls` pins the
+> refusal. The rule — two components or more — did not change.
 
 ### 2.2 Structural, so there is no declaration
 
@@ -241,6 +250,7 @@ Stated before the code, the way `linearity-and-effects.md` §11 was.
 | `res_tuple_component_through_reference.ls` | Nothing moves out of a reference | 3.1 |
 | `tuple_leaked.ls` | A `res` tuple is consumed exactly once | 2.3 |
 | `empty_tuple_type.ls` | A tuple has two components or more | 2.1 |
+| `one_tuple.ls` | A tuple has two components or more, `(e,)` included | 2.1 |
 | `tuple_type_mismatch.ls` | `(int, bool)` and `(bool, int)` are different types | 2.2 |
 | `nested_tuple_pattern.ls` | No nested patterns | 4 |
 
