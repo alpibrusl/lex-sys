@@ -2,17 +2,15 @@
 
 use crate::*;
 
-/// `struct addrinfo`'s byte offsets, the same on every target this project
-/// supports (`docs/connect.md` §10.2): POSIX's `<netdb.h>`, standardised
-/// after both platforms already existed, unlike `struct sockaddr_in`'s
-/// family byte.
+/// `struct addrinfo`'s byte offsets that agree on every target this
+/// project supports: POSIX's `<netdb.h>` fixes the four `int`s and
+/// `ai_addrlen` first, and `ai_next` last, the same way on glibc and on
+/// Darwin's libc.
 const AI_FLAGS: i32 = 0;
 const AI_FAMILY: i32 = 4;
 const AI_SOCKTYPE: i32 = 8;
 const AI_PROTOCOL: i32 = 12;
 const AI_ADDRLEN: i32 = 16;
-const AI_ADDR: i32 = 24;
-const AI_CANONNAME: i32 = 32;
 const AI_NEXT: i32 = 40;
 const ADDRINFO_SIZE: u32 = 48;
 
@@ -113,6 +111,17 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
         }
         let host = self.checked_host(host_bound, &name);
 
+        // `ai_addr` and `ai_canonname` swap places between glibc and
+        // Darwin's libc -- BSD's original `getaddrinfo` (RFC 2553) put
+        // `ai_canonname` first, and glibc did not follow it. Every other
+        // field agrees (`docs/connect.md` §10.2's table), which is why
+        // only these two need a target check, the same way `errno`'s
+        // symbol name already does.
+        let (ai_addr, ai_canonname) = match self.module.isa().triple().operating_system {
+            target_lexicon::OperatingSystem::Darwin(_) => (32, 24),
+            _ => (24, 32),
+        };
+
         // `struct addrinfo hints`, zeroed except the two fields that ask
         // for one address family and one socket kind -- IPv4 and TCP, the
         // only shape this project has ever built a `sockaddr_in` for.
@@ -131,8 +140,8 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
         self.builder.ins().store(MemFlags::trusted(), sock_stream, hints, AI_SOCKTYPE);
         self.builder.ins().store(MemFlags::trusted(), zero32, hints, AI_PROTOCOL);
         self.builder.ins().store(MemFlags::trusted(), zero32, hints, AI_ADDRLEN);
-        self.builder.ins().store(MemFlags::trusted(), null, hints, AI_ADDR);
-        self.builder.ins().store(MemFlags::trusted(), null, hints, AI_CANONNAME);
+        self.builder.ins().store(MemFlags::trusted(), null, hints, ai_addr);
+        self.builder.ins().store(MemFlags::trusted(), null, hints, ai_canonname);
         self.builder.ins().store(MemFlags::trusted(), null, hints, AI_NEXT);
 
         let res_slot = self.builder.create_sized_stack_slot(StackSlotData::new(
@@ -169,7 +178,7 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
         // The first result is enough: this program connects once, and
         // every candidate is the one host it asked for.
         let res = self.builder.ins().load(pointer, MemFlags::trusted(), res_addr, 0);
-        let addr = self.builder.ins().load(pointer, MemFlags::trusted(), res, AI_ADDR);
+        let addr = self.builder.ins().load(pointer, MemFlags::trusted(), res, ai_addr);
         let addrlen = self.builder.ins().load(types::I32, MemFlags::trusted(), res, AI_ADDRLEN);
         let freeaddrinfo = self.libc_fn("freeaddrinfo", &[pointer], &[]);
         let freeaddrinfo = self.module.declare_func_in_func(freeaddrinfo, self.builder.func);

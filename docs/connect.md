@@ -358,11 +358,22 @@ bytes `examples/fetch/`'s `address` writes by hand, and `connect.md`
 Linux and macOS. Patching the port after resolving needs no layout
 assumption beyond that one, already measured.
 
-`struct addrinfo` is the same 48 bytes, in the same field order, on
-every target this project supports — glibc and Darwin's libc both
-follow POSIX's `<netdb.h>`, which was standardised after both platforms
-existed, unlike `struct sockaddr_in`'s family byte, which predates the
-standard that would have settled it:
+`struct addrinfo` is 48 bytes on every target this project supports,
+but **not in the same field order**.
+
+> **Correction.** This section first claimed the order was the same
+> everywhere, reasoned by analogy with the rest of `<netdb.h>`'s fields
+> rather than measured — precisely the mistake §3's own correction
+> warns against, in the same document. The darwin-aarch64 runner
+> refuted it on the first CI run: `connect_a_refused_address` printed
+> nothing at all, because the backend read `ai_canonname` where it
+> expected `ai_addr` and either patched a NUL pointer's non-existent
+> port bytes or handed `connect(2)` an address that was never a
+> `sockaddr`. `struct sockaddr_in`'s family byte predates POSIX
+> settling it (§3); `ai_addr` and `ai_canonname` did not need history
+> to disagree — the original BSD `getaddrinfo` (RFC 2553) declared
+> `ai_canonname` before `ai_addr`, Darwin's libc still does, and glibc
+> does not.
 
 | Offset | Field | Size |
 |---:|---|---:|
@@ -372,9 +383,16 @@ standard that would have settled it:
 | 12 | `ai_protocol` | 4 |
 | 16 | `ai_addrlen` | 4 |
 | 20 | (padding) | 4 |
-| 24 | `ai_addr` | 8 |
-| 32 | `ai_canonname` | 8 |
+| 24 | `ai_addr` (glibc) / `ai_canonname` (Darwin) | 8 |
+| 32 | `ai_canonname` (glibc) / `ai_addr` (Darwin) | 8 |
 | 40 | `ai_next` | 8 |
+
+Six of the eight fields — everything but the pointer pair at 24 and 32
+— agree on every target, the same way `connect.md` §3 found that only
+`struct sockaddr_in`'s first two bytes disagree. The backend picks
+`ai_addr`'s offset from `self.module.isa().triple().operating_system`,
+the same target check `errno`'s symbol name already makes, rather than
+assuming glibc's order everywhere.
 
 Read once, for the first result: `ai_addr` (a `struct sockaddr *`) and
 `ai_addrlen`. The backend never reconstructs the address itself here —
@@ -393,12 +411,10 @@ than its first entry.
 - **No port lookup by service name.** `service` is always `NULL`; a
   `Net` bound is `"host:port"`, and this reads the port half itself
   rather than asking the resolver to look up `"http"` or `"https"`.
-- **The struct offsets above are asserted, not measured with a
-  CI-per-target table the way `struct sockaddr_in`'s were** (§3). They
-  follow directly from a documented, versioned interface rather than
-  from an implementation this project has already caught disagreeing
-  once, so the bar was lower — but `tests/accept/connect_a_refused_address.ls`
-  reads through them via a real `connect` on every target this suite
-  runs (`accepted_programs_build_and_run`), which is the same
-  build-and-run-on-both-runners check §3's table formalised, without a
-  table of its own: there is only one row to disagree, not several.
+- **The struct offsets above were asserted rather than measured, and
+  CI found the one that was wrong within its first run** (§10.2's
+  correction). `tests/accept/connect_a_refused_address.ls` reads through
+  all of them via a real `connect` on every target this suite runs
+  (`accepted_programs_build_and_run`), the same build-and-run-on-both-
+  runners check §3's table formalised, without a table of its own —
+  there was only one row to disagree, and it did.
