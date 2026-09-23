@@ -241,7 +241,7 @@ that being the step nobody can skip.
   say which. *It did not choose one (#77).* It showed that a lex-sys
   program can only ever connect to an address, while a grant only ever
   names hosts, so whoever resolves also owns the check
-  ([`connect.md`](connect.md) §1). *Decided (#PR): the perimeter
+  ([`connect.md`](connect.md) §1). *Decided (#83): the perimeter
   resolves, and lex-sys never does (§4.1).*
 * **No socket type.** A descriptor is an `int`, as `File` was before
   `file-handles.md` gave it a linear type. Whether a socket wants the

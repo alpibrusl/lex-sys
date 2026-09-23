@@ -55,7 +55,7 @@ the design question `net.md` must now answer:
 | A builtin (the backend calls `getaddrinfo`) | a host, as the grant does | the builtin, comparing the name before it resolves it |
 | The perimeter (`lex-os` already resolves egress to IP rules, its demo's second wall) | an address | the kernel's filter, which is outside the language entirely |
 
-> **Decided (#PR): the perimeter.** [`net.md`](net.md) §4.1 gives the
+> **Decided (#83): the perimeter.** [`net.md`](net.md) §4.1 gives the
 > reasons. The label still names a host, and it is checked against the
 > grant statically. Only the perimeter turns names into addresses, and
 > it enforces the address at run time.
