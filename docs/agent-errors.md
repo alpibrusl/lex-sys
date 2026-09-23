@@ -286,8 +286,8 @@ for the same reason.
 * `position` — absent for §1.1's three program-level refusals, rather
   than invented.
 
-> **Corrected (#PR).** For a **parse** error, none of the above held
-> until #PR. The message was the whole rendered refusal (path, source
+> **Corrected (#84).** For a **parse** error, none of the above held
+> until #84. The message was the whole rendered refusal (path, source
 > line and caret) instead of the sentence, the position was `null`, and
 > because the rendering has newlines in it and the writer escaped only
 > quotes and backslashes, the answer **was not valid JSON**. That was
