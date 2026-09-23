@@ -89,7 +89,7 @@ And the causes are not spread out. Classified by first error:
 | 4 | an unknown type |
 | 3 | a builtin's arity changed |
 
-> **Re-measured (#PR).** [`editions.md`](editions.md) §2 replays the
+> **Re-measured (#85).** [`editions.md`](editions.md) §2 replays the
 > same history with a harness that is in the repository
 > (`scripts/history.py`) and gives each file the program it belonged to:
 > **58 of 141** revisions (41%) no longer check, and the `io` split is
