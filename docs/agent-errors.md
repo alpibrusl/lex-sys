@@ -286,6 +286,17 @@ for the same reason.
 * `position` — absent for §1.1's three program-level refusals, rather
   than invented.
 
+> **Corrected (#84).** For a **parse** error, none of the above held
+> until #84. The message was the whole rendered refusal (path, source
+> line and caret) instead of the sentence, the position was `null`, and
+> because the rendering has newlines in it and the writer escaped only
+> quotes and backslashes, the answer **was not valid JSON**. That was
+> 20 of the 214 reject fixtures. `the_prose_is_unchanged_by_the_json`
+> compared one line of each message and passed throughout. Found while
+> replaying this repository's history through `check --output json`.
+> `every_refusal_is_valid_json_with_a_position` now reads every
+> fixture's answer with a strict JSON reader.
+
 The exit code is unchanged: **1** for a refused program. Semantic exit
 codes already exist here (1 refused, 2 usage, 3 environment) and a
 machine-readable body does not change what happened.

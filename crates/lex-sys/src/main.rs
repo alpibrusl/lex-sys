@@ -336,6 +336,7 @@ fn parse_program(inputs: &[PathBuf], with_std: bool) -> Result<(Ast, SourceMap),
                 "unreadable input",
                 lex_sys_syntax::Span::new(0, 0),
             ),
+            map: None,
         })?;
         let base = map.add(input.display().to_string(), text.clone());
         sources.push((text, base));
@@ -358,7 +359,8 @@ fn parse_program(inputs: &[PathBuf], with_std: bool) -> Result<(Ast, SourceMap),
             // (`docs/agent-errors.md` §5): a parse error has a rule like
             // any other refusal, and rendering it away was how
             // `unknown-escape` came to report as `type-mismatch`.
-            return Err(ParseFailure { rendered: refused(d.render_in(&map)), diagnostic: d });
+            let rendered = refused(d.render_in(&map));
+            return Err(ParseFailure { rendered, diagnostic: d, map: Some(map) });
         }
     }
     Ok((ast, map))
@@ -368,6 +370,10 @@ fn parse_program(inputs: &[PathBuf], with_std: bool) -> Result<(Ast, SourceMap),
 struct ParseFailure {
     rendered: Failure,
     diagnostic: lex_sys_syntax::Diagnostic,
+    /// The files read so far, when the failure is a parse error rather
+    /// than an unreadable input: what `--output json` resolves the
+    /// diagnostic's span against.
+    map: Option<SourceMap>,
 }
 
 impl From<ParseFailure> for Failure {
@@ -421,7 +427,10 @@ fn check_program(inputs: &[PathBuf], with_std: bool, json: bool) -> Result<ExitC
         return Err(refused(text.join("\n\n")));
     }
 
-    let map = parse_program(inputs, with_std).map(|(_, map)| map).ok();
+    let map = match parse_program(inputs, with_std) {
+        Ok((_, map)) => Some(map),
+        Err(failure) => failure.map,
+    };
     if refusals.is_empty() {
         // An empty list rather than an empty-looking one: a consumer
         // checks the length, and `[]` is the shape it expects.
@@ -498,6 +507,18 @@ fn compile_reporting(
         // A parse error ends the file: a program that did not parse has no
         // reliable second error, and inventing one teaches a reader to
         // chase phantoms (§4).
+        // A parse error is a sentence at a span, like any other refusal,
+        // so `--output json` gets both (`docs/agent-errors.md` §5). The
+        // prose callers never see this: they parse again, fail the same
+        // way, and print the rendered failure.
+        Err(ParseFailure { diagnostic, map: Some(_), .. }) => {
+            return Err(vec![Refusal {
+                rule: diagnostic.rule,
+                message: diagnostic.message,
+                span: Some(diagnostic.span),
+            }]);
+        }
+        // An unreadable input has no span to point at.
         Err(failure) => {
             return Err(vec![Refusal {
                 rule: failure.diagnostic.rule,
@@ -613,8 +634,24 @@ fn quoted(values: &[&str]) -> String {
 /// an identifier and a narrowing is a path or a library name, so neither
 /// can contain a control character -- but escaping here rather than
 /// trusting that is what keeps the output parseable if either widens.
+/// A JSON string body. Quotes and backslashes are not enough: a control
+/// character inside a string is invalid JSON, and a parse error's message
+/// once carried the whole rendered excerpt, newlines and all, which no
+/// JSON parser would read (`docs/agent-errors.md` §5).
 fn escaped(value: &str) -> String {
-    value.replace('\\', "\\\\").replace('"', "\\\"")
+    let mut out = String::with_capacity(value.len());
+    for c in value.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// `lex-sys authority <file>` — what a program can do
