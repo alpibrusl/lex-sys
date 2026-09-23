@@ -330,15 +330,15 @@ pub enum Expr {
         prefix: String,
         args: Vec<Expr>,
     },
-    /// `connect(net, a, b, c, d, port)` — `docs/net.md` §4.1, slice 1
-    /// (`docs/connect.md` §1): the address is four octets a caller already
-    /// has, with no name to resolve yet.
+    /// `connect(net, name, port)` — `docs/net.md` §4.1
+    /// (`docs/connect.md` §10): the name is checked against the bound at
+    /// run time, then resolved with `getaddrinfo`.
     ///
     /// The bound the capability was narrowed to travels with the node for
     /// the same reason [`Expr::FileOp`]'s prefix does: the row it performs
     /// is this bound, and the type it came from is gone by lowering time.
-    /// `args` is the capability (zero-sized, stopping at the backend) and
-    /// the four octets and the port, each an `int`.
+    /// `args` is the capability (zero-sized, stopping at the backend), the
+    /// name as `&r [byte]`, and the port as an `int`.
     Connect {
         bound: String,
         args: Vec<Expr>,

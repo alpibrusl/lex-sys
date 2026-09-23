@@ -1,14 +1,16 @@
 # The network
 
-> **Status: outbound slice 1 built.** `Net`, `net_out` and a `connect`
-> builtin exist now, behind `edition 2;` ([`editions.md`](editions.md)
-> §7). The builtin's shape is split into three slices, agreed when the
-> scope came into view mid-implementation: (1) the edition-2 plumbing,
-> the capability, and a `connect` that takes an address a caller already
-> has, no name to resolve — this slice; (2) `getaddrinfo`-based name
-> resolution, closing §4.1's "the builtin resolves" the rest of the way;
-> (3) inbound — `bind`, `listen`, `accept` and `net_in`. `examples/fetch/`
-> and `examples/report/` are **not** ported onto it yet: both still need
+> **Status: outbound slices 1 and 2 built.** `Net`, `net_out` and a
+> `connect` builtin exist now, behind `edition 2;`
+> ([`editions.md`](editions.md) §7), and `connect` takes a **name**, not
+> octets: it checks the name and the port against the capability's
+> bound, then resolves with `getaddrinfo` (§4.1, [`connect.md`](connect.md)
+> §10). Split into three slices, agreed when the scope came into view
+> mid-implementation: (1) the edition-2 plumbing and the capability
+> (2) `getaddrinfo`-based resolution, closing §4.1's "the builtin
+> resolves" the rest of the way — these two; (3) inbound — `bind`,
+> `listen`, `accept` and `net_in`, not yet built. `examples/fetch/` and
+> `examples/report/` are **still not** ported onto it: both still need
 > `read`, `write` and `close` on the socket `connect` opens, and those
 > stay `extern fn` against libc until a later slice, so porting now would
 > add `Net` to their capability list without removing `Ffi("libc")` from
@@ -16,9 +18,10 @@
 > was for (§3 already names the day that gap closes). §5.1's framing
 > describes neither side, which §1 below found; the question §4.1 opened,
 > who turns a host into an address, is decided there: **the builtin,
-> after checking the name against its capability's bound** — resolution
-> itself is slice 2. §5's two-asker bar, per half, is cleared on both
-> sides ([`connect.md`](connect.md) §6, [`listen.md`](listen.md) §4).
+> after checking the name against its capability's bound**, which is now
+> built exactly that way. §5's two-asker bar, per half, is cleared on
+> both sides ([`connect.md`](connect.md) §6, [`listen.md`](listen.md)
+> §4).
 >
 > [`under-a-grant.md`](under-a-grant.md) §5 promoted
 > [`reach.md`](reach.md) §6's `Net(host)` row from a question of taste to
@@ -261,19 +264,22 @@ which needs the remaining socket operations to become builtins too.
 
 * **No TLS.** `reach.md` §3.1's rule stands: a foreign result is a
   scalar, so OpenSSL's opaque handles are out regardless of `Net`.
-* **No hostname resolution, still.** `getaddrinfo` returns a pointer. A
-  host in a label is a *name to be checked*, and turning it into an
-  address is either a builtin of its own or the perimeter's job — §5's
-  program will say which. *It did not choose one (#77).* It showed that
-  a lex-sys program can only ever connect to an address, while a grant
+* **Hostname resolution: built.** `getaddrinfo` returns a pointer, so
+  it stays inside the backend the way `malloc` already does for `box` —
+  a program never sees it, only the address or the failure. A host in a
+  label is a *name to be checked*, and turning it into an address is
+  either a builtin of its own or the perimeter's job — §5's program
+  will say which. *It did not choose one (#77).* It showed that a
+  lex-sys program can only ever connect to an address, while a grant
   only ever names hosts, so whoever resolves also owns the check
   ([`connect.md`](connect.md) §1). *Decided (#83): a `connect`
   builtin resolves, after checking the name against its capability's
   bound, and the perimeter stays the outer wall under `lex-os` (§4.1).*
-  Slice 1 built `connect` for an address a caller already has, the
+  Slice 1 built `connect` for an address a caller already had, the
   `octets_of` half of `examples/fetch/` moved into the backend
-  (`docs/connect.md` §1). Resolving a *name* is slice 2's, not yet
-  built.
+  (`docs/connect.md` §1); slice 2 replaced it with a `connect` that
+  takes a name and resolves it (`docs/connect.md` §10) — the shape §4.1
+  actually decided, now built exactly that way.
 * **No socket type.** A descriptor is an `int`, as `File` was before
   `file-handles.md` gave it a linear type. Whether a socket wants the
   same treatment is a question that program answers too. *It answered

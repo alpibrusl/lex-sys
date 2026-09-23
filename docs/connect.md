@@ -295,3 +295,110 @@ both still need `read`, `write` and `close` on the socket `connect`
 opens, and those stay `extern fn` against libc (`ffi("libc")`) until a
 later slice, so porting now would add `Net` to their report without
 removing the wider capability from it.
+
+---
+
+## 10. Slice 2: `getaddrinfo` resolves
+
+`connect`'s shape changes from slice 1's `connect(net, a, b, c, d,
+port)` to `connect(net, name, port)`, where `name` is `&r [byte]` — the
+one design §1 through §4.1 actually asked for. Octets were a stand-in
+for "no resolver exists yet"; `getaddrinfo` accepts a numeric address
+exactly as it accepts a symbolic one, so a single name-taking builtin
+covers what the four-octet one did and what `fetch/`'s `octets_of`
+never could.
+
+### 10.1 The bound is checked before anything is resolved
+
+§4.1 decided this order for a reason: a name outside the bound must
+never reach the resolver, or a program could use its narrowed `Net` to
+probe DNS for names it was never granted. `connect` takes the name and
+the port as two arguments (§4.1's own words), while the bound is one
+string, `"host:port"` (§4). The two are split once, at compile time,
+since the bound is fixed at that point and neither half needs a
+run-time parse: everything up to the last `:` is the host bound,
+everything after it the port bound. A bound with no `:` at all —
+`""`, unnarrowed, included — has no port bound, which means no
+restriction on it.
+
+The host half is `checked_host` (mirroring `checked_path`,
+`docs/filesystem.md` §4): it copies `name` into a NUL-terminated stack
+buffer while comparing it, byte for byte, against the host bound. Two
+things `checked_path` checks that this does not, because neither is a
+fact about a host name: the `..`-traversal refusal, and the
+requirement that a match land on a separator. `net.md` §4 bounds
+`net_out` by plain prefix, with no boundary character of its own —
+`narrow`'s own `Net` branch already says so (`lower/mod.rs`) — so
+`"api.example.com"` narrows a host bound of `"api"` exactly as far as
+the bytes agree and no further rule applies. An unnarrowed `Net` (the
+bound is `""`) matches every name, the same way an unnarrowed
+`Fs`/`Ffi` matches every path or library.
+
+The port half is different in kind, not degree: `"host:8443"` names
+*one* port, not a prefix of ports the way a directory is a prefix of
+paths, so the check is equality — the dialled port either is 8443 or
+the capability was not narrowed to authorise this call — and it traps
+before the host is even copied. A bound with no port restricts
+nothing there, the same permissive default the host half has for an
+empty bound.
+
+### 10.2 What the resolver is asked for, and what comes back
+
+`getaddrinfo(host, NULL, &hints, &res)`, with `hints` a zeroed `struct
+addrinfo` except `ai_family = AF_INET` (2) and `ai_socktype =
+SOCK_STREAM` (1) — IPv4 only, matching the one address family this
+project has ever built a `struct sockaddr_in` for, and one connection
+kind. `service` is `NULL` rather than the port as a decimal string:
+building that string is exactly the work `net.md` §6 keeps out of this
+language (`std.fmt`'s printer is the one place digits are the language's
+problem), and it is unnecessary — the port is two bytes at a fixed
+offset in whatever `sockaddr_in` the resolver hands back, the same two
+bytes `examples/fetch/`'s `address` writes by hand, and `connect.md`
+§3's whole finding was that **only the family bytes differ** between
+Linux and macOS. Patching the port after resolving needs no layout
+assumption beyond that one, already measured.
+
+`struct addrinfo` is the same 48 bytes, in the same field order, on
+every target this project supports — glibc and Darwin's libc both
+follow POSIX's `<netdb.h>`, which was standardised after both platforms
+existed, unlike `struct sockaddr_in`'s family byte, which predates the
+standard that would have settled it:
+
+| Offset | Field | Size |
+|---:|---|---:|
+| 0 | `ai_flags` | 4 |
+| 4 | `ai_family` | 4 |
+| 8 | `ai_socktype` | 4 |
+| 12 | `ai_protocol` | 4 |
+| 16 | `ai_addrlen` | 4 |
+| 20 | (padding) | 4 |
+| 24 | `ai_addr` | 8 |
+| 32 | `ai_canonname` | 8 |
+| 40 | `ai_next` | 8 |
+
+Read once, for the first result: `ai_addr` (a `struct sockaddr *`) and
+`ai_addrlen`. The backend never reconstructs the address itself here —
+unlike slice 1, where there was no resolver to ask — it patches the
+port at `ai_addr[2..4]` and passes `ai_addr`/`ai_addrlen` straight to
+`connect(2)`, the same call slice 1 already made. `freeaddrinfo(res)`
+releases the list; a client connects once, so nothing here needs more
+than its first entry.
+
+### 10.3 What this does not do
+
+- **No IPv6.** `ai_family = AF_INET` asks the resolver to filter it
+  out, rather than this project deciding what a `Net` bound means for
+  two address families that write hosts differently in `host:port`
+  text. That question is still open.
+- **No port lookup by service name.** `service` is always `NULL`; a
+  `Net` bound is `"host:port"`, and this reads the port half itself
+  rather than asking the resolver to look up `"http"` or `"https"`.
+- **The struct offsets above are asserted, not measured with a
+  CI-per-target table the way `struct sockaddr_in`'s were** (§3). They
+  follow directly from a documented, versioned interface rather than
+  from an implementation this project has already caught disagreeing
+  once, so the bar was lower — but `tests/accept/connect_a_refused_address.ls`
+  reads through them via a real `connect` on every target this suite
+  runs (`accepted_programs_build_and_run`), which is the same
+  build-and-run-on-both-runners check §3's table formalised, without a
+  table of its own: there is only one row to disagree, not several.

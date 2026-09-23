@@ -36,10 +36,9 @@ impl<'a> FnLowering<'a> {
         ))
     }
 
-    /// `connect(net, a, b, c, d, port)` — `docs/net.md` §4.1, slice 1 of
-    /// `Net` (`docs/connect.md` §1): the address is four octets a caller
-    /// already has, the same shape `examples/fetch/`'s `connect_to` builds
-    /// by hand today, with no name to resolve yet.
+    /// `connect(net, name, port)` — `docs/net.md` §4.1: a name and a port,
+    /// checked against the capability's bound and only then resolved
+    /// (`docs/connect.md` §10).
     ///
     /// Checked here rather than through a written signature because the
     /// row it performs is the bound its `Net` capability was narrowed to,
@@ -49,11 +48,11 @@ impl<'a> FnLowering<'a> {
         args: &[ExprId],
         span: Span,
     ) -> Result<(Expr, Type), Diagnostic> {
-        let [capability, a, b, c, d, port] = args else {
+        let [capability, name, port] = args else {
             return Err(Diagnostic::new(
                 Rule::ArityMismatch,
                 format!(
-                    "`connect` takes 6 arguments -- the capability, four octets and a port -- but {} were given",
+                    "`connect` takes 3 arguments -- the capability, the name and a port -- but {} were given",
                     args.len()
                 ),
                 span,
@@ -63,20 +62,25 @@ impl<'a> FnLowering<'a> {
         let (net_value, net_ty) = self.expr(*capability)?;
         let bound = self.granted_net_bound(&net_ty, capability_span)?;
 
-        let mut lowered = vec![net_value];
-        for octet in [*a, *b, *c, *d, *port] {
-            let octet_span = self.ast.expr_span(octet);
-            let (value, found) = self.expr(octet)?;
-            self.expect_type(&Type::Int, &found, octet_span)?;
-            lowered.push(value);
-        }
+        let bytes = Type::Ref {
+            unique: false,
+            region: self.unifier.fresh_region(),
+            inner: Box::new(Type::Slice(Box::new(Type::Byte))),
+        };
+        let name_span = self.ast.expr_span(*name);
+        let (name_value, name_ty) = self.expr(*name)?;
+        self.expect_type(&bytes, &name_ty, name_span)?;
+
+        let port_span = self.ast.expr_span(*port);
+        let (port_value, port_ty) = self.expr(*port)?;
+        self.expect_type(&Type::Int, &port_ty, port_span)?;
 
         self.performed.union(&Effects::new([Label {
             name: "net_out".to_owned(),
             argument: Some(bound.clone()),
         }]));
 
-        Ok((Expr::Connect { bound, args: lowered }, Type::Int))
+        Ok((Expr::Connect { bound, args: vec![net_value, name_value, port_value] }, Type::Int))
     }
 
     /// The `host:port` bound a borrowed `Net` was narrowed to, the same

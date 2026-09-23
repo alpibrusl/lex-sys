@@ -682,3 +682,78 @@ fn collect_reads_a_body_larger_than_one_read() {
     assert_eq!(collected, body, "the body should arrive whole and in order");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `docs/connect.md` §10.1: `connect` checks the dialled host against the
+/// capability's bound *before* resolving anything, the same order
+/// `a_path_outside_the_granted_prefix_traps` pins for `Fs`.
+#[test]
+fn connecting_outside_the_granted_host_traps() {
+    let dir = scratch("net-outside-host");
+    let source = dir.join("outside_host.ls");
+    std::fs::write(
+        &source,
+        "edition 2;\n\
+         fn main(world: World) -> [] int {\n\
+             let Split { io, ffi, fs, heap, args, net } = split(world);\n\
+             release(args); release(heap); release(ffi); release(fs); release(io);\n\
+             let bound = narrow(net, \"127.0.0.1:1\");\n\
+             var fd = 0;\n\
+             borrow bound as &n in {\n\
+                 fd = connect(n, \"10.0.0.1\", 1);\n\
+             }\n\
+             release(bound);\n\
+             return fd;\n\
+         }\n",
+    )
+    .expect("a writable fixture");
+
+    let exe = dir.join("outside_host");
+    let build = Command::new(BIN)
+        .args(["build".as_ref(), source.as_os_str(), "-o".as_ref(), exe.as_os_str()])
+        .output()
+        .expect("the compiler runs");
+    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+
+    let run = Command::new(&exe).output().expect("the compiled program runs");
+    assert!(!run.status.success(), "a host outside the bound should not succeed");
+    assert_eq!(run.status.code(), None, "the process should be killed by a signal, not exit");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// §10.1: the bound's port half is checked too, exactly, not as a prefix
+/// -- `"127.0.0.1:1"` authorises port 1 and no other.
+#[test]
+fn connecting_to_the_wrong_port_traps() {
+    let dir = scratch("net-wrong-port");
+    let source = dir.join("wrong_port.ls");
+    std::fs::write(
+        &source,
+        "edition 2;\n\
+         fn main(world: World) -> [] int {\n\
+             let Split { io, ffi, fs, heap, args, net } = split(world);\n\
+             release(args); release(heap); release(ffi); release(fs); release(io);\n\
+             let bound = narrow(net, \"127.0.0.1:1\");\n\
+             var fd = 0;\n\
+             borrow bound as &n in {\n\
+                 fd = connect(n, \"127.0.0.1\", 2);\n\
+             }\n\
+             release(bound);\n\
+             return fd;\n\
+         }\n",
+    )
+    .expect("a writable fixture");
+
+    let exe = dir.join("wrong_port");
+    let build = Command::new(BIN)
+        .args(["build".as_ref(), source.as_os_str(), "-o".as_ref(), exe.as_os_str()])
+        .output()
+        .expect("the compiler runs");
+    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+
+    let run = Command::new(&exe).output().expect("the compiled program runs");
+    assert!(!run.status.success(), "a port outside the bound should not succeed");
+    assert_eq!(run.status.code(), None, "the process should be killed by a signal, not exit");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
