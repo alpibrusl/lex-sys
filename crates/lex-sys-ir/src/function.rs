@@ -116,7 +116,7 @@ pub(crate) fn settle_expr(expr: &mut Expr, unifier: &Unifier) {
         }
         Expr::Len(inner) => settle_expr(inner, unifier),
         Expr::Bytes(_) => {}
-        Expr::FileOp { args, .. } | Expr::OpenFile { args, .. } => {
+        Expr::FileOp { args, .. } | Expr::OpenFile { args, .. } | Expr::Connect { args, .. } => {
             for arg in args {
                 settle_expr(arg, unifier);
             }
@@ -215,6 +215,7 @@ pub(crate) fn lower_static(
         ret: ret.clone(),
         trace: Trace::new(),
         module,
+        edition: ast.edition_of(ast::ItemId(item as u32)),
         bounds: Vec::new(),
     };
 
@@ -338,6 +339,7 @@ pub(crate) fn lower_function(
         ret: ret.clone(),
         trace: Trace::new(),
         module: signature.module,
+        edition: ast.edition_of(ast::ItemId(signature.item as u32)),
         // A copy being emitted has its parameters substituted away, so
         // only the rigid check of pass 1 has bounds to consult.
         bounds: if args.iter().any(|a| matches!(a, Type::Param(_))) || args.is_empty() {
@@ -593,6 +595,11 @@ pub(crate) struct Resolving<'a> {
     pub(crate) defs: &'a [TypeDef],
     pub(crate) unifier: &'a Unifier,
     pub(crate) module: u32,
+    /// The edition of the file the type is written in
+    /// (`docs/editions.md` §6.1). What a name may resolve to: a `TypeDef`
+    /// whose `since` is later than this is invisible, the same as if it
+    /// did not exist.
+    pub(crate) edition: u32,
 }
 
 /// The type parameters of the declaration a type is written *inside*: their
@@ -636,7 +643,7 @@ pub(crate) fn resolve_type_at(
     id: TypeId,
     unsized_ok: bool,
 ) -> Result<Type, Diagnostic> {
-    let Resolving { ast, defs, unifier, module } = cx;
+    let Resolving { ast, defs, unifier, module, edition } = cx;
     let generics = params.names;
     let span = ast.type_span(id);
 
@@ -753,8 +760,17 @@ pub(crate) fn resolve_type_at(
             span,
         ));
     };
+    // `docs/editions.md` §7: `Split` is two declarations, one name. A file
+    // at an earlier edition must see only the earlier one, and a file that
+    // can see both (edition 2's own `Split` and edition 1's, since an
+    // addition is never withdrawn) must see the later -- so this is not
+    // "first match", it is "latest match this file's edition allows".
     let lookup = |defs: &[TypeDef]| -> Option<usize> {
-        defs.iter().position(|d| d.name == written_name && d.visible_from(target))
+        defs.iter()
+            .enumerate()
+            .filter(|(_, d)| d.name == written_name && d.visible_from(target) && d.since <= edition)
+            .max_by_key(|(_, d)| d.since)
+            .map(|(index, _)| index)
     };
 
     // `Box[[T]]` is the one place an unsized referent may stand as a type

@@ -254,3 +254,44 @@ a wrong answer: the failure mode `docs/defined-behaviour.md` promises,
 not a silent one. And both are the ordinary cost of a second program
 that actually exercises the first one's untested edge, which is the
 entire argument for writing it rather than trusting the count.
+
+---
+
+## 9. Slice 1: an address a caller already has
+
+Once both halves cleared §6's bar, `Net` turned out to be bigger than
+one slice: `edition N;` parsed but nothing consumed it
+([`editions.md`](editions.md) §8), so making edition 2 a real edition
+meant threading it through every place a written name resolves — a
+function's parameters and return type, a `let` that destructures a
+struct, a struct literal, a variant constructor — not only the one
+`resolve_type_at` already had a `lookup` closure for. Agreed as three
+slices once that came into view: this one (the edition, `Net`, and a
+`connect` that takes octets), name resolution, then inbound.
+
+What is built: `Net(bound)`, narrowed the way `Fs(prefix)` is (plain
+prefix widening, with no `/`-boundary rule of its own — §4's table has
+no boundary character to land on); edition 2's six-field `Split`, a
+second declaration of the same source name rather than a sixth field
+added to the one all 210 files destructure, because `Split` is `res`
+by inference and a field nothing could unname would have to be
+consumed by every caller — exactly what
+[`editions.md`](editions.md) §7 says an edition must not do; and
+`connect(net, a, b, c, d, port)`, which builds the same sixteen-byte
+`struct sockaddr_in`, in the same Linux layout §3 measured, that
+`examples/fetch/`'s `address` builds by hand — once, in the backend,
+so a program with `Net` gets it instead of writing it again.
+
+What is not: the bound is not checked against what is dialled. §4.1's
+run-time check compares a *name*, and slice 1 has none to compare —
+its row is honestly the bound the capability was narrowed to, exactly
+as `open_read`'s row is the directory `Fs` was narrowed to, but nothing
+yet traps a `connect` whose octets land outside it. That is slice 2's
+`getaddrinfo` call, not a bug in this one: a name is what makes the
+check meaningful, and octets alone would only be checking a program
+against itself. `examples/fetch/` and `examples/report/` are not
+ported onto `connect` for the same reason `net.md`'s status note gives:
+both still need `read`, `write` and `close` on the socket `connect`
+opens, and those stay `extern fn` against libc (`ffi("libc")`) until a
+later slice, so porting now would add `Net` to their report without
+removing the wider capability from it.

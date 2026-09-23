@@ -94,8 +94,15 @@ impl<'a> FnLowering<'a> {
             AstExpr::StructLit { name, qualifier, fields } => {
                 let text = self.ast.name_of(*name);
                 let target = self.target_module(*qualifier, span)?;
-                let Some(def) =
-                    self.defs.iter().find(|d| d.name == *name && d.visible_from(target))
+                // `docs/editions.md` §7: same "latest match this file's
+                // edition allows" rule as `resolve_type_at`'s `lookup`.
+                let Some(def) = self
+                    .defs
+                    .iter()
+                    .filter(|d| {
+                        d.name == *name && d.visible_from(target) && d.since <= self.edition
+                    })
+                    .max_by_key(|d| d.since)
                 else {
                     return Err(Diagnostic::new(
                         Rule::NotAStruct,
@@ -378,8 +385,15 @@ impl<'a> FnLowering<'a> {
                 let enum_text = self.ast.name_of(*enum_name);
                 let variant_text = self.ast.name_of(*variant);
                 let target = self.target_module(*qualifier, span)?;
-                let Some(def) =
-                    self.defs.iter().find(|d| d.name == *enum_name && d.visible_from(target))
+                // `docs/editions.md` §7: same "latest match this file's
+                // edition allows" rule as `resolve_type_at`'s `lookup`.
+                let Some(def) = self
+                    .defs
+                    .iter()
+                    .filter(|d| {
+                        d.name == *enum_name && d.visible_from(target) && d.since <= self.edition
+                    })
+                    .max_by_key(|d| d.since)
                 else {
                     return Err(Diagnostic::new(
                         Rule::NotAnEnum,
@@ -654,6 +668,19 @@ impl<'a> FnLowering<'a> {
                 }
                 if Builtin::from_name(text) == Some(Builtin::UnboxSlice) {
                     return self.unboxed_slice(args, span);
+                }
+                // `docs/editions.md` §7: `split`'s return type depends on
+                // the caller's edition, which a fixed signature cannot
+                // express. `resolved` rather than `Builtin::from_name`
+                // guards this and `connect` below, because only `resolved`
+                // has already been filtered by edition (`Resolved::find`)
+                // -- an edition-1 file's own `extern fn connect` must reach
+                // its `Extern` arm, not this one.
+                if resolved == Resolved::Builtin(Builtin::Split) {
+                    return self.split(args, span);
+                }
+                if resolved == Resolved::Builtin(Builtin::Connect) {
+                    return self.connect(args, span);
                 }
                 let (params, ret) = if let Resolved::Builtin(builtin) = resolved {
                     // A builtin's region parameters are instantiated exactly

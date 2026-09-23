@@ -135,6 +135,12 @@ pub(crate) struct TypeDef {
     pub(crate) declared_mode: Option<Mode>,
     pub(crate) kind: DefKind,
     pub(crate) span: Span,
+    /// The edition a file must be at to name this declaration
+    /// (`docs/editions.md` §7). `1` for everything a program could
+    /// always name; the prelude's own edition-2 additions are the
+    /// first thing to write anything else here. A user declaration
+    /// carries the edition of the file that wrote it.
+    pub(crate) since: u32,
 }
 
 impl TypeDef {
@@ -232,7 +238,13 @@ pub fn leaf_free(ty: &Type) -> bool {
     matches!(ty, Type::Named(def, _)
     if matches!(
         def.0 as usize,
-        PRELUDE_WORLD | PRELUDE_IO | PRELUDE_FFI | PRELUDE_FS | PRELUDE_HEAP | PRELUDE_ARGS
+        PRELUDE_WORLD
+            | PRELUDE_IO
+            | PRELUDE_FFI
+            | PRELUDE_FS
+            | PRELUDE_HEAP
+            | PRELUDE_ARGS
+            | PRELUDE_NET
     ))
 }
 
@@ -263,6 +275,8 @@ pub(crate) fn is_capability(def: DefId) -> bool {
             | PRELUDE_HEAP
             | PRELUDE_ARGS
             | PRELUDE_SPLIT
+            | PRELUDE_SPLIT_NET
+            | PRELUDE_NET
             // §8.2 again, and more sharply: a program that could write
             // `File { }` would be conjuring a descriptor, which is worse
             // than conjuring authority because the number would be someone
@@ -280,7 +294,13 @@ pub(crate) fn is_capability(def: DefId) -> bool {
 pub(crate) fn released_only(def: DefId) -> bool {
     matches!(
         def.0 as usize,
-        PRELUDE_WORLD | PRELUDE_IO | PRELUDE_FFI | PRELUDE_FS | PRELUDE_HEAP | PRELUDE_ARGS
+        PRELUDE_WORLD
+            | PRELUDE_IO
+            | PRELUDE_FFI
+            | PRELUDE_FS
+            | PRELUDE_HEAP
+            | PRELUDE_ARGS
+            | PRELUDE_NET
     )
 }
 
@@ -370,7 +390,13 @@ pub(crate) fn discharged_by(defs: &[TypeDef], ty: &Type) -> Effects {
         PRELUDE_WORLD => {
             let mut all =
                 Effects::plain(["io_read", "io_write", "err_write", "heap", "args", "file_read"]);
-            for name in ["ffi", "fs_read", "fs_write"] {
+            // `docs/net.md` §4.1, edition 2 only: `net_out` is one more
+            // label the root discharges the unnarrowed way `ffi` and
+            // `fs_read`/`fs_write` already do. An edition-1 file's `World`
+            // discharges it just the same -- it is simply a label no
+            // edition-1 body can ever perform, since it has no way to name
+            // `Net` at all.
+            for name in ["ffi", "fs_read", "fs_write", "net_out"] {
                 all.union(&Effects::new([Label {
                     name: name.to_owned(),
                     argument: Some(FFI_ROOT.to_owned()),
@@ -408,6 +434,14 @@ pub(crate) fn discharged_by(defs: &[TypeDef], ty: &Type) -> Effects {
             }
             _ => Effects::pure(),
         },
+        // `docs/net.md` §4.1: owning a `Net(bound)` discharges
+        // `net_out(bound)`, the same shape `Ffi` discharges its label.
+        PRELUDE_NET => match args.first() {
+            Some(Type::Lit(bound)) => {
+                Effects::new([Label { name: "net_out".to_owned(), argument: Some(bound.clone()) }])
+            }
+            _ => Effects::pure(),
+        },
         _ => Effects::pure(),
     }
 }
@@ -439,6 +473,12 @@ pub(crate) fn prelude_types(ast: &Ast, unifier: &mut Unifier) -> Vec<TypeDef> {
     let file = symbol("File");
     let opened = symbol("Opened");
     let read_answer = symbol("Read");
+    // `docs/net.md`: edition 2's outbound capability, and the `Split` that
+    // carries it. Both reuse names already interned above (`Split`, `P`) --
+    // `split_net` is a second, distinct declaration of the same source
+    // name, not a rename.
+    let net = symbol("Net");
+    let split_net = symbol("Split");
     let ok_arm = symbol("Ok");
     let failed_arm = symbol("Failed");
     let got_arm = symbol("Got");
@@ -453,6 +493,7 @@ pub(crate) fn prelude_types(ast: &Ast, unifier: &mut Unifier) -> Vec<TypeDef> {
     let fs_field = symbol("fs");
     let heap_field = symbol("heap");
     let args_field = symbol("args");
+    let net_field = symbol("net");
 
     let world_def = unifier.declare("World");
     let io_def = unifier.declare("Io");
@@ -468,6 +509,12 @@ pub(crate) fn prelude_types(ast: &Ast, unifier: &mut Unifier) -> Vec<TypeDef> {
     let file_def = unifier.declare("File");
     let opened_def = unifier.declare("Opened");
     let read_def = unifier.declare("Read");
+    // `PRELUDE_NET` and `PRELUDE_SPLIT_NET` (`ir.rs`): edition 2 only. A
+    // second `declare("Split")` call is deliberate -- it is a distinct
+    // `DefId` for the same source name, not a redeclaration, and `since`
+    // below is what keeps an edition-1 file from ever resolving to it.
+    let net_def = unifier.declare("Net");
+    let split_net_def = unifier.declare("Split");
 
     vec![
         TypeDef {
@@ -480,6 +527,7 @@ pub(crate) fn prelude_types(ast: &Ast, unifier: &mut Unifier) -> Vec<TypeDef> {
             declared_mode: Some(Mode::Res),
             kind: DefKind::Struct(Vec::new()),
             span,
+            since: 1,
         },
         TypeDef {
             name: io,
@@ -491,6 +539,7 @@ pub(crate) fn prelude_types(ast: &Ast, unifier: &mut Unifier) -> Vec<TypeDef> {
             declared_mode: Some(Mode::Res),
             kind: DefKind::Struct(Vec::new()),
             span,
+            since: 1,
         },
         // §8.4's capability, and the first one that carries data: `Ffi` is
         // indexed by the library it names, so `Ffi("libc")` and `Ffi("libm")`
@@ -506,6 +555,7 @@ pub(crate) fn prelude_types(ast: &Ast, unifier: &mut Unifier) -> Vec<TypeDef> {
             declared_mode: Some(Mode::Res),
             kind: DefKind::Struct(Vec::new()),
             span,
+            since: 1,
         },
         // `docs/filesystem.md` §1: the same shape as `Ffi`, pointed at a
         // different kind of name. `Fs("/var")` narrows to
@@ -520,6 +570,7 @@ pub(crate) fn prelude_types(ast: &Ast, unifier: &mut Unifier) -> Vec<TypeDef> {
             declared_mode: Some(Mode::Res),
             kind: DefKind::Struct(Vec::new()),
             span,
+            since: 1,
         },
         // `docs/heap.md` §2: the fifth capability, and the second that
         // carries nothing. A heap has no parts to name, so there is nothing
@@ -534,6 +585,7 @@ pub(crate) fn prelude_types(ast: &Ast, unifier: &mut Unifier) -> Vec<TypeDef> {
             declared_mode: Some(Mode::Res),
             kind: DefKind::Struct(Vec::new()),
             span,
+            since: 1,
         },
         // `docs/heap.md` §3: one value, one allocation. Declared `res`
         // whatever `B` is -- `B`'s mode says whether the *contents* must be
@@ -553,6 +605,7 @@ pub(crate) fn prelude_types(ast: &Ast, unifier: &mut Unifier) -> Vec<TypeDef> {
             declared_mode: Some(Mode::Res),
             kind: DefKind::Struct(Vec::new()),
             span,
+            since: 1,
         },
         // `docs/arguments.md` §2: the sixth capability, and the third that
         // carries nothing. Reading argv is an effect because a function
@@ -569,6 +622,7 @@ pub(crate) fn prelude_types(ast: &Ast, unifier: &mut Unifier) -> Vec<TypeDef> {
             declared_mode: Some(Mode::Res),
             kind: DefKind::Struct(Vec::new()),
             span,
+            since: 1,
         },
         // `res` by inference, because it holds five.
         TypeDef {
@@ -592,6 +646,7 @@ pub(crate) fn prelude_types(ast: &Ast, unifier: &mut Unifier) -> Vec<TypeDef> {
                 (args_field, Type::Named(args_def, Vec::new())),
             ]),
             span,
+            since: 1,
         },
         // `docs/file-handles.md`: the handle. `res`, because a descriptor
         // is owned exactly once and `close` is what ends it -- the same
@@ -610,6 +665,7 @@ pub(crate) fn prelude_types(ast: &Ast, unifier: &mut Unifier) -> Vec<TypeDef> {
             declared_mode: Some(Mode::Res),
             kind: DefKind::Struct(Vec::new()),
             span,
+            since: 1,
         },
         // §2.1: what `open_read` answers, because `Result[T, E]` is
         // `std.result` and a builtin's signature is the prelude. Two arms,
@@ -627,6 +683,7 @@ pub(crate) fn prelude_types(ast: &Ast, unifier: &mut Unifier) -> Vec<TypeDef> {
                 (failed_arm, vec![Type::Int]),
             ]),
             span,
+            since: 1,
         },
         // §3: three constructors because a read has three outcomes, and an
         // enum rather than a sentinel because a sentinel is how `getchar`
@@ -647,6 +704,47 @@ pub(crate) fn prelude_types(ast: &Ast, unifier: &mut Unifier) -> Vec<TypeDef> {
                 (failed_arm, vec![Type::Int]),
             ]),
             span,
+            since: 1,
+        },
+        // `docs/net.md` §1: the outbound capability, edition 2 only. Same
+        // shape as `Fs` -- indexed by a prefix, narrowed and never widened
+        // -- because `net_out`'s bound is `host:port` text matched the same
+        // way `Fs`'s is a path.
+        TypeDef {
+            name: net,
+            def: net_def,
+            module: PRELUDE_MODULE,
+            public: true,
+            generics: vec![prefix],
+            bounds: Vec::new(),
+            declared_mode: Some(Mode::Res),
+            kind: DefKind::Struct(Vec::new()),
+            span,
+            since: 2,
+        },
+        // `docs/editions.md` §7: edition 2's `Split`, a distinct `DefId`
+        // from the edition-1 one above so that naming it does not force
+        // every edition-1 `main` to consume a field it never asked for.
+        // `split()` picks between the two by the caller's edition
+        // (`function.rs`); the two never coexist in one file's resolution.
+        TypeDef {
+            name: split_net,
+            def: split_net_def,
+            module: PRELUDE_MODULE,
+            public: true,
+            generics: Vec::new(),
+            bounds: Vec::new(),
+            declared_mode: None,
+            kind: DefKind::Struct(vec![
+                (io_field, Type::Named(io_def, Vec::new())),
+                (ffi_field, Type::Named(ffi_def, vec![Type::Lit(FFI_ROOT.to_owned())])),
+                (fs_field, Type::Named(fs_def, vec![Type::Lit(FFI_ROOT.to_owned())])),
+                (heap_field, Type::Named(heap_def, Vec::new())),
+                (args_field, Type::Named(args_def, Vec::new())),
+                (net_field, Type::Named(net_def, vec![Type::Lit(FFI_ROOT.to_owned())])),
+            ]),
+            span,
+            since: 2,
         },
     ]
 }
@@ -783,11 +881,16 @@ pub(crate) fn collect_types(ast: &Ast, unifier: &mut Unifier) -> Result<Vec<Type
             declared_mode,
             kind,
             span,
+            // A user declaration is never edition-gated -- only the
+            // prelude's own additions are (`docs/editions.md` §7).
+            since: 1,
         });
     }
 
     for (index, item) in ast.items.iter().enumerate() {
-        let module = ast.module_of(ast::ItemId(index as u32));
+        let item_id = ast::ItemId(index as u32);
+        let module = ast.module_of(item_id);
+        let edition = ast.edition_of(item_id);
         match item {
             Item::Struct(decl) => {
                 let position = defs
@@ -813,7 +916,7 @@ pub(crate) fn collect_types(ast: &Ast, unifier: &mut Unifier) -> Result<Vec<Type
                     fields.push((
                         field.name,
                         resolve_type(
-                            Resolving { ast, defs: &defs, unifier, module },
+                            Resolving { ast, defs: &defs, unifier, module, edition },
                             Params { names: &generics, bounds: &bounds },
                             &[],
                             field.ty,
@@ -858,7 +961,7 @@ pub(crate) fn collect_types(ast: &Ast, unifier: &mut Unifier) -> Result<Vec<Type
                         .iter()
                         .map(|ty| {
                             resolve_type(
-                                Resolving { ast, defs: &defs, unifier, module },
+                                Resolving { ast, defs: &defs, unifier, module, edition },
                                 Params { names: &generics, bounds: &bounds },
                                 &[],
                                 *ty,

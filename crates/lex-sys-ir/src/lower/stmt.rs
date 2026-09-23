@@ -271,7 +271,16 @@ impl<'a> FnLowering<'a> {
 
         let text = self.ast.name_of(struct_name);
         let target = self.target_module(qualifier, span)?;
-        let Some(def) = self.defs.iter().find(|d| d.name == struct_name && d.visible_from(target))
+        // `docs/editions.md` §7: the same "latest match this file's
+        // edition allows" rule `resolve_type_at`'s `lookup` uses, and for
+        // the same reason -- `Split` is two declarations, one name, and an
+        // edition-2 file destructuring what `split()` handed back must
+        // land on the six-field one.
+        let Some(def) = self
+            .defs
+            .iter()
+            .filter(|d| d.name == struct_name && d.visible_from(target) && d.since <= self.edition)
+            .max_by_key(|d| d.since)
         else {
             return Err(Diagnostic::new(
                 Rule::NotAStruct,

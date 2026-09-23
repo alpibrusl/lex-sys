@@ -1,11 +1,20 @@
 # Editions: what one can absorb, measured on this repository's past
 
-> **Status: design, measured, and the marker built.** *(Corrected:
-> the marker shipped ahead of `Net`, not with it — #87, after the
-> `parser.rs` split ([`CONTRIBUTING.md`](../CONTRIBUTING.md)) this
-> paragraph originally said it needed.)* Only edition 1 is known so
-> far; `Net` is the first feature to ask for edition 2, which is what
-> the rest of this section is about.
+> **Status: edition 2 is real.** *(Corrected: the marker shipped ahead
+> of `Net`, not with it — #87, after the `parser.rs` split
+> ([`CONTRIBUTING.md`](../CONTRIBUTING.md)) this paragraph originally
+> said it needed.)* §7 turned out to need more than the marker: nothing
+> in the compiler consumed `Ast::edition_of` outside the parser's own
+> unit tests, so every place a written name resolves — a signature's
+> parameters and return type, a `let` that destructures a struct, a
+> struct literal, a variant constructor — needed the same "which
+> declarations can this file see" question `resolve_type_at`'s `lookup`
+> now answers, not only that one function
+> ([`connect.md`](connect.md) §9). Edition 2 is `Net`'s first slice:
+> the capability, its `net_out` label, and a `connect` that takes an
+> address a caller already has. `Net`'s remaining two slices — name
+> resolution, then inbound — are additions of the same shape and need
+> nothing further here.
 >
 > The audit's L2 asked for **an edition marker, a label-alias path so a
 > rename is a warning for one edition, and a vocabulary freeze once
@@ -238,11 +247,23 @@ planned, and none is: `Net` is additive.
 ## 7. What `Net` needs from this
 
 **Edition 2 is edition 1 plus `Net`**: the `net` field on `Split`, the
-`net_in` and `net_out` labels, and the socket builtins. An edition-1
-file's `split` returns today's five fields, and its programs cannot
-reach `Net`, which they never could. The 210 files that destructure
-`Split` stay as they are. A program that wants the network writes
-`edition 2;` in the file whose `main` calls `split`.
+`net_in` and `net_out` labels, and the socket builtins. Built so far
+(slice 1, [`connect.md`](connect.md) §9): the `net` field, `net_out`,
+and `connect`. `net_in` and the rest of the socket builtins are slice
+3. An edition-1 file's `split` returns today's five fields, and its
+programs cannot reach `Net`, which they never could. The 210 files
+that destructure `Split` stay as they are. A program that wants the
+network writes `edition 2;` in the file whose `main` calls `split`.
+
+`Split` is two declarations of one source name rather than a sixth
+field appended to the existing one, and that is the part §6.2 did not
+anticipate: `Split` is `res` by inference, so a sixth field nothing
+edition-gated could unname would still have to be consumed by every
+caller, which is exactly the break an addition must not cause. Name
+resolution now asks two questions where it asked one — is this
+declaration visible at all, and (new) is it the latest one this file's
+edition can see — everywhere a written name resolves to a declaration,
+not only in `resolve_type_at`.
 
 A program can mix editions. Library files written in edition 1 are
 used by an edition-2 `main` unchanged, since nothing in them mentions
@@ -253,13 +274,13 @@ has, and that is refused like any other unknown name.
 
 ## 8. What this does not do
 
-- **It builds nothing yet.** *(Corrected: the marker shipped ahead of
-  `Net`, not with it.)* `edition N;` parses, is stored per item
-  alongside `docs/modules.md`'s module side table, and an unknown
-  edition is refused under its own tag (`unknown-edition`). Only
-  edition 1 is known today, so this slice is unobservable from any
-  program a file can write — there is nothing to opt into until the
-  per-edition `Split` and `Net` land on top of it.
+- **The marker built nothing on its own.** *(Corrected: it shipped
+  ahead of `Net`, not with it.)* `edition N;` parses and is stored per
+  item alongside `docs/modules.md`'s module side table; an unknown
+  edition is refused under its own tag (`unknown-edition`). That slice
+  landed unobservable from any program a file could write, since
+  nothing yet named anything edition 2 added. `Net`'s slice 1 is what
+  makes edition 2 observable for the first time.
 - **It does not migrate the past.** §2's 58 revisions stay unreadable,
   and nothing in this repository needs them.
 - **It does not replace refusals with warnings.** A diagnostic here is

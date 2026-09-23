@@ -262,6 +262,21 @@ pub enum Builtin {
     /// signature cannot say that without a type parameter the builtin
     /// table has no way to bind.
     Len,
+    /// `connect(net, a, b, c, d, port) -> [net_out(bound)] int` —
+    /// `docs/net.md` §4.1, edition 2 only (`docs/editions.md` §7).
+    ///
+    /// Slice 1 of `Net` (`docs/connect.md` §1): the address is four octets
+    /// a caller already has, the same shape `examples/fetch/`'s
+    /// `connect_to` builds by hand today, and there is no name to resolve
+    /// yet. A socket operation rather than an `extern fn`, for the reason
+    /// `filesystem.md` §2 gives for `fs_read`: an `extern` would be gated
+    /// by `Ffi("libc")` alone, and then the FFI capability would open any
+    /// socket, with `Net` contributing nothing.
+    ///
+    /// Checked at the call site like [`Builtin::FsRead`], because the row
+    /// it performs is the bound its `Net` capability was narrowed to, and
+    /// a fixed signature has nowhere to put it.
+    Connect,
 }
 
 impl Builtin {
@@ -296,6 +311,7 @@ impl Builtin {
         Builtin::Arg,
         Builtin::BoxSlice,
         Builtin::UnboxSlice,
+        Builtin::Connect,
     ];
 
     pub fn name(self) -> &'static str {
@@ -330,6 +346,23 @@ impl Builtin {
             Builtin::Arg => "arg",
             Builtin::BoxSlice => "box_slice",
             Builtin::UnboxSlice => "unbox_slice",
+            Builtin::Connect => "connect",
+        }
+    }
+
+    /// The edition a file must be at to name this builtin
+    /// (`docs/editions.md` §7). `1` for every builtin that predates
+    /// editions; `Net`'s are the first to answer `2`.
+    ///
+    /// This is what keeps `connect` from shadowing the `extern fn connect`
+    /// an edition-1 file may already declare against libc, the way
+    /// `examples/fetch/` does today: name resolution only answers this
+    /// builtin when the calling file's edition is at least this one, so to
+    /// an earlier file the name is not a builtin at all.
+    pub fn since(self) -> u32 {
+        match self {
+            Builtin::Connect => 2,
+            _ => 1,
         }
     }
 
@@ -442,7 +475,10 @@ impl Builtin {
                 }],
                 Type::Int,
             ),
-            Builtin::Split => (vec![named(PRELUDE_WORLD)], named(PRELUDE_SPLIT)),
+            // Checked at the call site (`docs/editions.md` §7): the return
+            // type depends on the caller's edition, and a fixed signature
+            // cannot say that.
+            Builtin::Split => (Vec::new(), Type::Unit),
             Builtin::WrappingAdd | Builtin::WrappingSub | Builtin::WrappingMul => {
                 (vec![Type::Int, Type::Int], Type::Int)
             }
@@ -523,6 +559,10 @@ impl Builtin {
             // argument *and* a result that depend on the literal written at
             // the call.
             Builtin::Release | Builtin::Narrow => (Vec::new(), Type::Unit),
+            // Checked at the call site, exactly as `fs_read` is: the bound
+            // is in the capability's type, and a fixed signature cannot
+            // say that (`docs/net.md` §4.1).
+            Builtin::Connect => (Vec::new(), Type::Unit),
         }
     }
 

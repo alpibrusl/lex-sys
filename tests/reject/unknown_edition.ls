@@ -1,13 +1,14 @@
-//~ ERROR unknown edition 2; the only edition today is 1
+//~ ERROR unknown edition 3; the only editions today are 1 and 2
 //~ RULE unknown-edition
 
-// `docs/editions.md` §6.1.
+// `docs/editions.md` §6.1, §7.
 //
 // A file's `edition N;` marker names one of the editions this compiler
 // knows. Edition 1 is the language as it is today and needs no marker
-// at all; there is nothing later than it yet to opt into.
+// at all; edition 2 adds `Net`. There is nothing later than that yet to
+// opt into.
 
-edition 2;
+edition 3;
 
 fn main(world: World) -> [] int {
     let Split { io, ffi, fs, heap, args } = split(world);
