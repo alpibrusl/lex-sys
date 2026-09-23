@@ -155,6 +155,10 @@ fn the_authority_report_names_the_syscalls_the_row_cannot() {
 /// reason: the bar for building `Net` is two askers per half, and whoever
 /// adds the next network program should have to change a number here and
 /// the sentence in §5 that rests on it.
+///
+/// `examples/report/` is that next program: `docs/connect.md` §6
+/// recounted outbound to 2, clearing that half's bar. Inbound is still
+/// at 1, so it is the half without an asker now.
 #[test]
 fn the_network_programs_are_counted() {
     let root = repo_root();
@@ -197,8 +201,11 @@ fn the_network_programs_are_counted() {
             inbound.iter().map(String::as_str).collect::<Vec<_>>(),
             outbound.iter().map(String::as_str).collect::<Vec<_>>()
         ),
-        (vec!["examples/serve/serve.ls"], vec!["examples/fetch/fetch.ls"]),
-        "the network programs changed: `net.md` §5 counts one per half, and \
+        (
+            vec!["examples/serve/serve.ls"],
+            vec!["examples/fetch/fetch.ls", "examples/report/report.ls"]
+        ),
+        "the network programs changed: `net.md` §5 counts inbound 1, outbound 2, and \
          two is the bar for building `Net`. Rewrite §5, then this."
     );
 }
@@ -437,4 +444,122 @@ fn the_client_and_the_server_differ_only_in_their_symbols() {
         assert!(server_symbols.contains(&inbound.to_owned()), "{server_symbols:?}");
     }
     assert!(!server_symbols.contains(&"connect".to_owned()), "{server_symbols:?}");
+}
+
+// ---------------------------------------------------------------------
+// `examples/report/` — the second outbound program (`docs/connect.md` §6, #171)
+// ---------------------------------------------------------------------
+
+/// A lex-sys agent, posting to a lex-sys server.
+///
+/// `serve/`'s router only matches `GET /health`; everything else,
+/// including a `POST`, gets its 404 default. That is enough to prove
+/// `report` speaks real HTTP over a real connection to another lex-sys
+/// program, the same way `a_lex_sys_client_fetches_from_a_lex_sys_server`
+/// does for `fetch` -- without needing `serve/` to grow a route it has
+/// no asker for.
+#[test]
+fn a_lex_sys_agent_reports_to_a_lex_sys_server() {
+    use std::time::{Duration, Instant};
+    let (server_dir, server) = build_example("report-server", "examples/serve/serve.ls", "serve");
+    let (client_dir, client) =
+        build_example("report-client", "examples/report/report.ls", "report");
+
+    let port = free_port().to_string();
+    let mut child = Command::new(&server)
+        .arg(&port)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("the server runs");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let run = loop {
+        let run = Command::new(&client)
+            .args(["127.0.0.1", port.as_str(), "/result", "42"])
+            .output()
+            .expect("the client runs");
+        if run.status.code() != Some(3) || Instant::now() > deadline {
+            break run;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let _ = child.wait();
+    assert_eq!(
+        String::from_utf8_lossy(&run.stdout),
+        "{\"error\":\"not found\"}",
+        "`report` should print exactly the body; stderr:\n{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(run.status.code(), Some(1), "`report` exited wrongly for a 404");
+    let _ = std::fs::remove_dir_all(&server_dir);
+    let _ = std::fs::remove_dir_all(&client_dir);
+}
+
+/// What `report` sends, byte for byte -- a `POST` with a `Content-Length`
+/// matching the body that follows it -- and that a body larger than the
+/// client's own 4 KiB buffers still arrives whole, which takes more than
+/// one `write` on the socket.
+#[test]
+fn report_sends_a_body_the_server_can_read_in_full() {
+    use std::io::{Read, Write as _};
+    use std::time::Duration;
+    let (dir, client) = build_example("report-wire", "examples/report/report.ls", "report");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback listener");
+    let port = listener.local_addr().expect("a bound address").port().to_string();
+    let message: String = (0..100_000u32).map(|i| (b'a' + (i % 26) as u8) as char).collect();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("the client connects");
+        stream.set_read_timeout(Some(Duration::from_secs(10))).expect("a timeout");
+        let mut request = Vec::new();
+        let mut chunk = [0u8; 4096];
+        loop {
+            let n = stream.read(&mut chunk).expect("the request arrives");
+            assert!(n > 0, "the client closed before finishing its request");
+            request.extend_from_slice(&chunk[..n]);
+            let Some(header_end) = find_double_crlf(&request) else { continue };
+            let content_length = header_of(&request[..header_end], "Content-Length")
+                .expect("a Content-Length header")
+                .parse::<usize>()
+                .expect("a numeric Content-Length");
+            if request.len() >= header_end + 4 + content_length {
+                break;
+            }
+        }
+        stream.write_all(b"HTTP/1.0 200 OK\r\nContent-Length: 2\r\n\r\nok").expect("a write");
+        request
+    });
+    let run = Command::new(&client)
+        .args(["127.0.0.1", port.as_str(), "/result", &message])
+        .output()
+        .expect("the client runs");
+    let request = server.join().expect("the server thread finishes");
+    let header_end = find_double_crlf(&request).expect("a complete header block");
+    assert_eq!(
+        &request[..header_end],
+        format!(
+            "POST /result HTTP/1.0\r\nHost: 127.0.0.1\r\nContent-Length: {}\r\nConnection: close",
+            message.len()
+        )
+        .as_bytes()
+    );
+    assert_eq!(&request[header_end + 4..], message.as_bytes(), "the body did not arrive whole");
+    assert_eq!(run.status.code(), Some(0), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(run.stdout, b"ok", "the client should print the response body");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn find_double_crlf(buf: &[u8]) -> Option<usize> {
+    buf.windows(4).position(|w| w == b"\r\n\r\n")
+}
+
+/// The value of one header in a raw HTTP header block, case-sensitive --
+/// enough for a test that wrote the request itself and knows its casing.
+fn header_of<'a>(head: &'a [u8], name: &str) -> Option<&'a str> {
+    let head = std::str::from_utf8(head).ok()?;
+    for line in head.split("\r\n") {
+        if let Some(rest) = line.strip_prefix(name).and_then(|r| r.strip_prefix(": ")) {
+            return Some(rest);
+        }
+    }
+    None
 }
