@@ -13,11 +13,15 @@ use std::path::{Path, PathBuf};
 /// point, so the bar is 2,000.
 const BUDGET: usize = 2_000;
 
-/// Files over the budget when it was introduced, each held to the size it
-/// had then. A ceiling may only come down: split the file, lower the
-/// number, and delete the row once the file is under [`BUDGET`]. Raising
-/// one is not a fix.
-const CEILINGS: &[(&str, usize)] = &[("crates/lex-sys/tests/conformance.rs", 6_684)];
+/// Files over the budget, each held to its size: a ceiling may only come
+/// down. Split the file, lower the number, and delete the row once the
+/// file is under [`BUDGET`]. Raising one is not a fix.
+///
+/// Empty. The two files over the budget when it was introduced,
+/// `lex-sys-codegen/src/lib.rs` (2,886) and `tests/conformance.rs` (6,684),
+/// were split right after it. The table stays, for the day the budget is
+/// tightened and the files over the new line need somewhere to wait.
+const CEILINGS: &[(&str, usize)] = &[];
 
 const SOURCE_EXTENSIONS: &[&str] = &["rs", "ls", "py", "c"];
 
