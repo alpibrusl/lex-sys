@@ -89,6 +89,13 @@ And the causes are not spread out. Classified by first error:
 | 4 | an unknown type |
 | 3 | a builtin's arity changed |
 
+> **Re-measured (#PR).** [`editions.md`](editions.md) §2 replays the
+> same history with a harness that is in the repository
+> (`scripts/history.py`) and gives each file the program it belonged to:
+> **58 of 141** revisions (41%) no longer check, and the `io` split is
+> still the largest class, at 45. §2 there also shows that an alias
+> cannot absorb it, because rows are exact.
+
 **One label rename accounts for 42% of the unreadable past.** When
 `standard-input.md` §2 split `io` into `io_read` and `io_write` —
 correctly, and for reasons that document argues well — it invalidated
