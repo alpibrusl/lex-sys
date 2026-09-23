@@ -284,7 +284,7 @@ Not by assertion. Every rule above is a fixture:
 
 | Rule | Where |
 |---|---|
-| Overflow traps | `crates/lex-sys/tests/conformance.rs` — builds a program and checks the process died by signal |
+| Overflow traps | `crates/lex-sys/tests/conformance/traps.rs` — builds a program and checks the process died by signal |
 | Indexing past a slice traps | same, for `xs[5]` and `xs[-1]` on a slice of 3 |
 | `byte_of` traps outside a byte | same, for `byte_of(256)` and `byte_of(-1)` |
 | Division by zero traps | same, and it predates this document |

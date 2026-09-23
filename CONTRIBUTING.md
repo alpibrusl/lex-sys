@@ -46,10 +46,12 @@ programs, the documentation link check, and the file budget below.
 **No source file over 2,000 lines.** `crates/lex-sys/tests/files.rs`
 enforces it on every `.rs`, `.ls`, `.py` and `.c` file in the
 repository. rustc's own `tidy` refuses files over 3,000 lines, and these
-crates are smaller. The two files that were already over the budget
-when it was introduced have **ceilings**: each may only shrink, its
-number comes down as it does, and its row is deleted once it is under
-the budget. Raising a ceiling is not a fix.
+crates are smaller. A file over the budget can be given a **ceiling**,
+its current size, which may only come down: the number drops as the
+file shrinks and the row is deleted once it is under the budget.
+Raising a ceiling is not a fix. The table is empty today: the three
+files that were over the line (`lex-sys-ir`, `lex-sys-codegen`, and the
+conformance suite) were each split when the rule arrived.
 
 When a file gets close, split it **by concern**, not by size:
 
@@ -65,6 +67,10 @@ When a file gets close, split it **by concern**, not by size:
 - **Unit tests live in their own files**, beside the code. They are
   declared with `#[cfg(test)] #[path = "tests/…"] mod …;` so a test's
   name does not change when it moves.
+- **Integration tests are one binary with topic modules**:
+  `tests/conformance/main.rs` holds the shared helpers and each topic
+  (`traps`, `net`, `ports`, …) is a module beside it. One binary links
+  once; a helper used by one topic lives in that topic's file.
 - **A move is a pure move.** Splitting a file changes no behaviour, and
   shows that: the same test names and counts before and after, and
   every line of the old file present in the new ones apart from
