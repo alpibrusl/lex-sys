@@ -14,17 +14,18 @@ content-addressable, designed in from day one rather than retrofitted.
 > capabilities, exact effect rows, one-way narrowing, lexical borrowing,
 > arenas and a general heap, file handles, the console in three
 > directions, libc FFI, compile-time evaluation, a standard library
-> written in lex-sys, and `lex-sys authority`, which computes what a
-> program can reach from the same reachability that decides what goes in
-> the binary. Real programs: GNU `base64` and `sort` ported and checked
-> byte-for-byte against the originals, and a REST endpoint answered over
-> a real socket.
+> written in lex-sys, a `Net` capability with outbound `connect` and
+> inbound `bind`/`listen`/`accept` (edition 2, [`docs/net.md`](docs/net.md)),
+> and `lex-sys authority`, which computes what a program can reach from
+> the same reachability that decides what goes in the binary. Real
+> programs: GNU `base64` and `sort` ported and checked byte-for-byte
+> against the originals, and a REST endpoint answered over a real socket.
 >
 > **What does not:** it is **not a usable language yet** — no threads, no
-> `Net` capability, no TLS, and a **1.17×–2.58×** gap to C that is a
-> property of the backend rather than of the design
-> ([below](#performance-honestly)). [`docs/ROADMAP.md`](docs/ROADMAP.md)
-> tracks what landed, what is next, and what each slice found.
+> TLS, and a **1.17×–2.58×** gap to C that is a property of the backend
+> rather than of the design ([below](#performance-honestly)).
+> [`docs/ROADMAP.md`](docs/ROADMAP.md) tracks what landed, what is next,
+> and what each slice found.
 
 > **Writing lex-sys?** [`AGENTS.md`](AGENTS.md) is the one page — the
 > rules, the six things that cost this repository a compile each, and
@@ -79,7 +80,7 @@ are named and both are gated —
 | Join | State |
 |---|---|
 | lex-sys code in `lex-vcs` | 81% of that crate is already language-agnostic; gated on a **plateau** in the effect vocabulary rather than on a feature — [`hash-stability.md`](docs/hash-stability.md) |
-| lex-sys code under a lex-os grant | Not a compiler integration: `authority --output json` is already the right interface, and the grant's **filesystem** dimension works through it today. Blocked instead on the effect vocabulary — `network` and `exec` are invisible behind `ffi("libc")` — [`under-a-grant.md`](docs/under-a-grant.md) |
+| lex-sys code under a lex-os grant | Not a compiler integration: `authority --output json` is already the right interface, and the grant's **filesystem** dimension works through it today. The vocabulary now has `network` too — `net_out`/`net_in`, [`net.md`](docs/net.md) — but no program in this repository has been ported onto it yet, so today's reports still say `ffi("libc")`; `exec` remains invisible either way — [`under-a-grant.md`](docs/under-a-grant.md) |
 
 Saying so plainly is deliberate: a reader of an earlier version of this
 page could not tell that `lex-os` existed at all, which is what
@@ -111,7 +112,7 @@ combines:
 
 | | | Settled by |
 |---|---|---|
-| **Capabilities** | `World`, `Io`, `Fs(prefix)`, `Ffi(lib)`, `Heap`, `Args`, `File` — linear values, `split` once, released by name | [`linearity-and-effects.md`](docs/linearity-and-effects.md) |
+| **Capabilities** | `World`, `Io`, `Fs(prefix)`, `Ffi(lib)`, `Heap`, `Args`, `File`, `Net(bound)` — linear values, `split` once, released by name | [`linearity-and-effects.md`](docs/linearity-and-effects.md) |
 | **Effect rows** | A canonically ordered set, exact in both directions, every label tracing to a builtin | [`linearity-and-effects.md`](docs/linearity-and-effects.md) |
 | **Narrowing** | Prefix extension, one way, and it *consumes* what it attenuates | [`filesystem.md`](docs/filesystem.md), [`reach.md`](docs/reach.md) |
 | **Authority report** | `lex-sys authority`, computed from reachability; `--output json` for a supervisor, and it **fails closed** on foreign code | [`authority.md`](docs/authority.md) |
@@ -283,10 +284,20 @@ also showed that `struct sockaddr_in` is different bytes on Linux and
 macOS, and that both programs are portable only because macOS forgives
 the Linux bytes ([`docs/connect.md`](docs/connect.md)).
 
-There is no socket type, no `Net` capability and no HTTP library. Sockets
-are libc, libc has a name, and the capability that names it has existed
-since M2 — **what decides whether a program is writable here is not a
-feature list, it is whether the authority it needs has a name.**
+There is no socket type and no HTTP library. There **is** now a `Net`
+capability: `connect(net, name, port)` dials out and `bind(net, port)`,
+`listen` and `accept` take connections in, each checked against the
+capability's bound before `getaddrinfo` or `socket` ever runs
+([`docs/net.md`](docs/net.md)). `examples/serve/` and `examples/fetch/`,
+shown above, predate it and still declare `socket`/`bind`/`listen`/
+`accept`/`connect` by hand against `Ffi("libc")` — deliberately not
+ported, since `read`, `write` and `close` on the resulting socket still
+need `extern fn`, and porting only the calls `Net` now covers would add
+a capability to the authority report without removing `Ffi("libc")` from
+it. Sockets are libc, libc has a name, and the capability that names it
+has existed since M2 — **what decides whether a program is writable
+here is not a feature list, it is whether the authority it needs has a
+name.**
 
 The same rule says what is out of reach, and it is one sentence: a foreign
 *result* is a scalar, so anything that hands back an opaque pointer — TLS,
@@ -296,9 +307,11 @@ Threads are out for a different reason: `pthread_create` wants a function
 pointer, and there are no function values; `fork` returns an `int`, so
 several processes are fine.
 
-[`docs/reach.md`](docs/reach.md) is the measured version, including the
-place where narrowing runs out: the row says `ffi("libc")` and cannot say
-`net`, because a library is not an authority domain.
+[`docs/reach.md`](docs/reach.md) is the measured version of the gap `Net`
+was built to close; [`docs/under-a-grant.md`](docs/under-a-grant.md) is
+what a supervisor sees today, since neither program above has been ported
+onto the capability that would let its row say `net` instead of
+`ffi("libc")`.
 
 And one program here did not start here. `examples/base64/` is GNU
 coreutils' `base64`, ported and checked byte-for-byte against it in both

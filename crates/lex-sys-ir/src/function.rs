@@ -116,7 +116,10 @@ pub(crate) fn settle_expr(expr: &mut Expr, unifier: &Unifier) {
         }
         Expr::Len(inner) => settle_expr(inner, unifier),
         Expr::Bytes(_) => {}
-        Expr::FileOp { args, .. } | Expr::OpenFile { args, .. } | Expr::Connect { args, .. } => {
+        Expr::FileOp { args, .. }
+        | Expr::OpenFile { args, .. }
+        | Expr::Connect { args, .. }
+        | Expr::Bind { args, .. } => {
             for arg in args {
                 settle_expr(arg, unifier);
             }

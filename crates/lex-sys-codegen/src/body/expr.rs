@@ -144,6 +144,10 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
                 let (bound, args) = (bound.clone(), args.clone());
                 self.connect(&bound, &args)
             }
+            Expr::Bind { bound, args } => {
+                let (bound, args) = (bound.clone(), args.clone());
+                self.bind(&bound, &args)
+            }
             Expr::FieldRef { base, def, args, index } => {
                 let address = self.scalar(base);
                 let TypeInfo::Struct { fields, .. } = self.program.type_info(*def) else {
@@ -450,6 +454,34 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
                     // node (`docs/net.md` §4.1).
                     Callee::Builtin(Builtin::Connect) => {
                         unreachable!("`connect` is lowered as `Expr::Connect`")
+                    }
+                    Callee::Builtin(Builtin::Bind) => {
+                        unreachable!("`bind` is lowered as `Expr::Bind`")
+                    }
+                    // Neither takes a capability, so both are ordinary
+                    // fixed-signature calls (`docs/listen.md` §6).
+                    Callee::Builtin(Builtin::Listen) => {
+                        let listen =
+                            self.libc_fn("listen", &[types::I32, types::I32], &[types::I32]);
+                        let listen = self.module.declare_func_in_func(listen, self.builder.func);
+                        let fd = self.builder.ins().ireduce(types::I32, args[0]);
+                        let backlog = self.builder.ins().ireduce(types::I32, args[1]);
+                        let call = self.builder.ins().call(listen, &[fd, backlog]);
+                        let answer = self.builder.inst_results(call)[0];
+                        vec![self.builder.ins().sextend(types::I64, answer)]
+                    }
+                    // The peer address is ignored -- `NULL, NULL` -- the
+                    // same as `examples/serve/`'s own hand-written call.
+                    Callee::Builtin(Builtin::Accept) => {
+                        let pointer = self.pointer;
+                        let accept =
+                            self.libc_fn("accept", &[types::I32, pointer, pointer], &[types::I32]);
+                        let accept = self.module.declare_func_in_func(accept, self.builder.func);
+                        let fd = self.builder.ins().ireduce(types::I32, args[0]);
+                        let null = self.builder.ins().iconst(pointer, 0);
+                        let call = self.builder.ins().call(accept, &[fd, null, null]);
+                        let answer = self.builder.inst_results(call)[0];
+                        vec![self.builder.ins().sextend(types::I64, answer)]
                     }
                     // `docs/file-handles.md` §3. `read(2)` answers a count,
                     // zero at the end, and `-1` with the reason in `errno` --

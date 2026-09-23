@@ -1,4 +1,5 @@
-//! `connect` (`docs/net.md` §4.1, `docs/connect.md` §10).
+//! `connect` and `bind` (`docs/net.md` §4.1, §2.1; `docs/connect.md`
+//! §10; `docs/listen.md` §6).
 
 use crate::*;
 
@@ -13,6 +14,20 @@ const AI_PROTOCOL: i32 = 12;
 const AI_ADDRLEN: i32 = 16;
 const AI_NEXT: i32 = 40;
 const ADDRINFO_SIZE: u32 = 48;
+
+/// A bound's port half, read at compile time: `None` for no restriction
+/// (an empty half -- an unnarrowed bound, or `net.md` §2.1's outbound
+/// bound with no `:` at all), `Some(port)` for one that names a port.
+///
+/// A half that is not empty and does not parse -- `narrow` never checks
+/// that a bound's text is numeric -- reads as `-1`, a port `connect`/
+/// `bind` can never be asked to dial, rather than as `None`: a malformed
+/// bound is not the same fact as an absent one, and reading them alike
+/// would let a narrowing that failed to *tighten* as intended enforce
+/// nothing instead (`docs/listen.md` §6.2).
+fn port_bound_of(text: &str) -> Option<i64> {
+    if text.is_empty() { None } else { Some(text.parse().unwrap_or(-1)) }
+}
 
 impl<'a, 'f> BodyEmitter<'a, 'f> {
     /// The bound a `Net` was narrowed to, checked against a dialled name at
@@ -102,7 +117,7 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
         // prefix (`docs/connect.md` §10.1). A bound with no `:` -- `""`,
         // unnarrowed, included -- restricts the port to none.
         let (host_bound, port_bound) = match bound.rsplit_once(':') {
-            Some((host, digits)) => (host, digits.parse::<i64>().ok()),
+            Some((host, digits)) => (host, port_bound_of(digits)),
             None => (bound, None),
         };
         if let Some(expected) = port_bound {
@@ -236,6 +251,122 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
         let close = self.module.declare_func_in_func(close, self.builder.func);
         self.builder.ins().call(close, &[fd]);
         self.builder.ins().call(freeaddrinfo, &[res]);
+        self.builder.ins().jump(merge, &[minus_one.into()]);
+
+        self.builder.switch_to_block(merge);
+        self.builder.seal_block(merge);
+        vec![self.builder.block_params(merge)[0]]
+    }
+
+    /// `bind(net, port)` (`docs/listen.md` §6): the inbound mirror of
+    /// [`Self::connect`]. Folds `socket`, `setsockopt(SO_REUSEADDR)` and
+    /// `bind` into one call, the way `examples/serve/`'s own `serve`
+    /// builds the same `struct sockaddr_in` by hand -- family bytes, the
+    /// port big-endian, then `INADDR_ANY`: eight zero bytes where
+    /// `connect`'s has four octets, because a listener binds every
+    /// address the host has. `args` is the capability (zero-sized,
+    /// stopping here) and the port.
+    pub(crate) fn bind(&mut self, bound: &str, args: &[Expr]) -> Vec<Value> {
+        let pointer = self.pointer;
+        let port = self.scalar(&args[1]);
+
+        // §6.1: the bound is the port alone, not `"host:port"`, so there
+        // is no host half to split off first.
+        if let Some(expected) = port_bound_of(bound) {
+            let wrong_port = self.builder.ins().icmp_imm(IntCC::NotEqual, port, expected);
+            self.builder.ins().trapnz(wrong_port, TrapCode::HEAP_OUT_OF_BOUNDS);
+        }
+
+        let slot = self.builder.create_sized_stack_slot(StackSlotData::new(
+            StackSlotKind::ExplicitSlot,
+            16,
+            0,
+        ));
+        let addr = self.builder.ins().stack_addr(pointer, slot, 0);
+        let zero8 = self.builder.ins().iconst(types::I8, 0);
+        let family = self.builder.ins().iconst(types::I8, 2);
+        self.builder.ins().store(MemFlags::trusted(), family, addr, 0);
+        self.builder.ins().store(MemFlags::trusted(), zero8, addr, 1);
+        let port32 = self.builder.ins().ireduce(types::I32, port);
+        let high = self.builder.ins().ushr_imm(port32, 8);
+        let high = self.builder.ins().ireduce(types::I8, high);
+        let low = self.builder.ins().ireduce(types::I8, port32);
+        self.builder.ins().store(MemFlags::trusted(), high, addr, 2);
+        self.builder.ins().store(MemFlags::trusted(), low, addr, 3);
+        // `INADDR_ANY`: every remaining byte, including the address
+        // itself, is zero.
+        for i in 4..16i32 {
+            self.builder.ins().store(MemFlags::trusted(), zero8, addr, i);
+        }
+
+        let socket = self.libc_fn("socket", &[types::I32, types::I32, types::I32], &[types::I32]);
+        let socket = self.module.declare_func_in_func(socket, self.builder.func);
+        let domain = self.builder.ins().iconst(types::I32, 2);
+        let kind = self.builder.ins().iconst(types::I32, 1);
+        let proto = self.builder.ins().iconst(types::I32, 0);
+        let call = self.builder.ins().call(socket, &[domain, kind, proto]);
+        let fd = self.builder.inst_results(call)[0];
+        let minus_one = self.builder.ins().iconst(types::I64, -1);
+
+        let no_socket = self.builder.create_block();
+        let have_socket = self.builder.create_block();
+        let merge = self.builder.create_block();
+        self.builder.append_block_param(merge, types::I64);
+        let bad_socket = self.builder.ins().icmp_imm(IntCC::SignedLessThan, fd, 0);
+        self.builder.ins().brif(bad_socket, no_socket, &[], have_socket, &[]);
+
+        self.builder.switch_to_block(no_socket);
+        self.builder.seal_block(no_socket);
+        self.builder.ins().jump(merge, &[minus_one.into()]);
+
+        self.builder.switch_to_block(have_socket);
+        self.builder.seal_block(have_socket);
+        // `SOL_SOCKET` (1), `SO_REUSEADDR` (2): a C `int`, four bytes,
+        // least significant first, the same value `serve.ls` assembles by
+        // hand (`docs/reach.md` §3.2).
+        let reuse_slot = self.builder.create_sized_stack_slot(StackSlotData::new(
+            StackSlotKind::ExplicitSlot,
+            4,
+            0,
+        ));
+        let reuse = self.builder.ins().stack_addr(pointer, reuse_slot, 0);
+        let one8 = self.builder.ins().iconst(types::I8, 1);
+        self.builder.ins().store(MemFlags::trusted(), one8, reuse, 0);
+        self.builder.ins().store(MemFlags::trusted(), zero8, reuse, 1);
+        self.builder.ins().store(MemFlags::trusted(), zero8, reuse, 2);
+        self.builder.ins().store(MemFlags::trusted(), zero8, reuse, 3);
+        let setsockopt = self.libc_fn(
+            "setsockopt",
+            &[types::I32, types::I32, types::I32, pointer, types::I32],
+            &[types::I32],
+        );
+        let setsockopt = self.module.declare_func_in_func(setsockopt, self.builder.func);
+        let sol_socket = self.builder.ins().iconst(types::I32, 1);
+        let so_reuseaddr = self.builder.ins().iconst(types::I32, 2);
+        let reuse_len = self.builder.ins().iconst(types::I32, 4);
+        self.builder.ins().call(setsockopt, &[fd, sol_socket, so_reuseaddr, reuse, reuse_len]);
+
+        let bind = self.libc_fn("bind", &[types::I32, pointer, types::I32], &[types::I32]);
+        let bind = self.module.declare_func_in_func(bind, self.builder.func);
+        let len = self.builder.ins().iconst(types::I32, 16);
+        let call = self.builder.ins().call(bind, &[fd, addr, len]);
+        let result = self.builder.inst_results(call)[0];
+
+        let bound_ok = self.builder.create_block();
+        let bind_failed = self.builder.create_block();
+        let ok = self.builder.ins().icmp_imm(IntCC::Equal, result, 0);
+        self.builder.ins().brif(ok, bound_ok, &[], bind_failed, &[]);
+
+        self.builder.switch_to_block(bound_ok);
+        self.builder.seal_block(bound_ok);
+        let fd64 = self.builder.ins().sextend(types::I64, fd);
+        self.builder.ins().jump(merge, &[fd64.into()]);
+
+        self.builder.switch_to_block(bind_failed);
+        self.builder.seal_block(bind_failed);
+        let close = self.libc_fn("close", &[types::I32], &[types::I32]);
+        let close = self.module.declare_func_in_func(close, self.builder.func);
+        self.builder.ins().call(close, &[fd]);
         self.builder.ins().jump(merge, &[minus_one.into()]);
 
         self.builder.switch_to_block(merge);

@@ -1,24 +1,29 @@
 # The network
 
-> **Status: outbound slices 1 and 2 built.** `Net`, `net_out` and a
-> `connect` builtin exist now, behind `edition 2;`
-> ([`editions.md`](editions.md) §7), and `connect` takes a **name**, not
+> **Status: all three slices built.** `Net`, `net_out`/`net_in` and
+> `connect`/`bind`/`listen`/`accept` all exist now, behind `edition 2;`
+> ([`editions.md`](editions.md) §7). `connect` takes a **name**, not
 > octets: it checks the name and the port against the capability's
 > bound, then resolves with `getaddrinfo` (§4.1, [`connect.md`](connect.md)
-> §10). Split into three slices, agreed when the scope came into view
-> mid-implementation: (1) the edition-2 plumbing and the capability
-> (2) `getaddrinfo`-based resolution, closing §4.1's "the builtin
-> resolves" the rest of the way — these two; (3) inbound — `bind`,
-> `listen`, `accept` and `net_in`, not yet built. `examples/fetch/` and
-> `examples/report/` are **still not** ported onto it: both still need
-> `read`, `write` and `close` on the socket `connect` opens, and those
-> stay `extern fn` against libc until a later slice, so porting now would
-> add `Net` to their capability list without removing `Ffi("libc")` from
-> it — the report would read wider, not narrower, which is not what this
-> was for (§3 already names the day that gap closes). §5.1's framing
-> describes neither side, which §1 below found; the question §4.1 opened,
-> who turns a host into an address, is decided there: **the builtin,
-> after checking the name against its capability's bound**, which is now
+> §10). `bind` takes a **port**, not a name (§2.1, [`listen.md`](listen.md)
+> §6.1), checks it against the capability's bound, and folds `socket`,
+> `setsockopt(SO_REUSEADDR)` and `bind` into one call; `listen` and
+> `accept` take no capability at all, the fd already being what `bind`
+> proved the authority for. Split into three slices, agreed when the
+> scope came into view mid-implementation: (1) the edition-2 plumbing
+> and the capability, (2) `getaddrinfo`-based resolution, closing §4.1's
+> "the builtin resolves" the rest of the way, (3) inbound — `bind`,
+> `listen`, `accept` and `net_in` ([`listen.md`](listen.md) §6) — all
+> three now built. `examples/fetch/` and `examples/report/` are **still
+> not** ported onto it: both still need `read`, `write` and `close` on
+> the socket `connect` opens, and those stay `extern fn` against libc
+> until a later slice, so porting now would add `Net` to their
+> capability list without removing `Ffi("libc")` from it — the report
+> would read wider, not narrower, which is not what this was for (§3
+> already names the day that gap closes). §5.1's framing describes
+> neither side, which §1 below found; the question §4.1 opened, who
+> turns a host into an address, is decided there: **the builtin, after
+> checking the name against its capability's bound**, which is now
 > built exactly that way. §5's two-asker bar, per half, is cleared on
 > both sides ([`connect.md`](connect.md) §6, [`listen.md`](listen.md)
 > §4).
