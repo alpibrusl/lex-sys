@@ -140,9 +140,9 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
                 let (prefix, args) = (prefix.clone(), args.clone());
                 self.open_file(&prefix, &args)
             }
-            Expr::Connect { args, .. } => {
-                let args = args.clone();
-                self.connect(&args)
+            Expr::Connect { bound, args } => {
+                let (bound, args) = (bound.clone(), args.clone());
+                self.connect(&bound, &args)
             }
             Expr::FieldRef { base, def, args, index } => {
                 let address = self.scalar(base);

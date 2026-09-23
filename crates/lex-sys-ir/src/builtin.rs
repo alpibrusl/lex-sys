@@ -262,16 +262,15 @@ pub enum Builtin {
     /// signature cannot say that without a type parameter the builtin
     /// table has no way to bind.
     Len,
-    /// `connect(net, a, b, c, d, port) -> [net_out(bound)] int` —
+    /// `connect(net, name, port) -> [net_out(bound)] int` —
     /// `docs/net.md` §4.1, edition 2 only (`docs/editions.md` §7).
     ///
-    /// Slice 1 of `Net` (`docs/connect.md` §1): the address is four octets
-    /// a caller already has, the same shape `examples/fetch/`'s
-    /// `connect_to` builds by hand today, and there is no name to resolve
-    /// yet. A socket operation rather than an `extern fn`, for the reason
-    /// `filesystem.md` §2 gives for `fs_read`: an `extern` would be gated
-    /// by `Ffi("libc")` alone, and then the FFI capability would open any
-    /// socket, with `Net` contributing nothing.
+    /// The name is checked against the capability's bound, then resolved
+    /// with `getaddrinfo` (`docs/connect.md` §10). A socket operation
+    /// rather than an `extern fn`, for the reason `filesystem.md` §2 gives
+    /// for `fs_read`: an `extern` would be gated by `Ffi("libc")` alone,
+    /// and then the FFI capability would open any socket, with `Net`
+    /// contributing nothing.
     ///
     /// Checked at the call site like [`Builtin::FsRead`], because the row
     /// it performs is the bound its `Net` capability was narrowed to, and

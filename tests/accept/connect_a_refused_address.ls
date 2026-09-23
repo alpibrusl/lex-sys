@@ -1,7 +1,6 @@
-// `docs/net.md` §4.1, `docs/connect.md` §1: slice 1 of `Net`
-// (`docs/editions.md` §7). `connect` takes an address a caller already
-// has -- four octets and a port, the same shape `examples/fetch/` builds
-// by hand -- and there is no name to resolve yet.
+// `docs/net.md` §4.1, `docs/connect.md` §10: `connect` takes a name and a
+// port, checked against the capability's bound and only then resolved
+// with `getaddrinfo`.
 //
 // Read `probe`'s row: `net_out("127.0.0.1:1")` is the whole authority
 // story, exactly as `roundtrip`'s `fs_read("/tmp")` is in
@@ -16,11 +15,12 @@ edition 2;
 import std.io;
 
 // The row names the bound, exactly as `roundtrip`'s names a directory.
-fn probe[&n, &i](
+fn probe[&n, &a, &i](
     net: &n Net("127.0.0.1:1"),
+    host: &a [byte],
     io: &!i Io,
 ) -> [net_out("127.0.0.1:1"), io_write] int {
-    let fd = connect(net, 127, 0, 0, 1, 1);
+    let fd = connect(net, host, 1);
     io.print_int(io, fd);
     putchar(io, 10);
     return fd;
@@ -42,7 +42,7 @@ fn main(world: World) -> [] int {
     var fd = 0;
     borrow bound as &n in {
         borrow mut io as &!i in {
-            fd = probe(n, i);
+            fd = probe(n, "127.0.0.1", i);
         }
     }
     release(bound);
