@@ -38,7 +38,10 @@ import time
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 GAME = ROOT / "benches" / "game"
 
-# (name, timed N, verified N, the output the Benchmarks Game publishes for it)
+# (name, timed N, verified N, the output the Benchmarks Game publishes for
+# it -- or None to read it from `<name>-<verified N>.txt` beside the
+# source, which is how `fasta`'s N=1000 answer gets here without a
+# 171-line string literal in this file).
 PROGRAMS = [
     ("fannkuch", 11, 7, "228\nPfannkuchen(7) = 16\n"),
     ("spectral", 2000, 100, "1.274219991\n"),
@@ -53,9 +56,16 @@ PROGRAMS = [
         "16\t trees of depth 10\t check: 32752\n"
         "long lived tree of depth 10\t check: 2047\n",
     ),
+    ("fasta", 1_000_000, 1000, None),
 ]
 
-QUICK = {"fannkuch": 9, "spectral": 500, "binarytrees": 14}
+QUICK = {"fannkuch": 9, "spectral": 500, "binarytrees": 14, "fasta": 200_000}
+
+# `revcomp` takes no size argument -- it reads a FASTA file from stdin --
+# so it is not one of `PROGRAMS` and is measured separately, on the input
+# `fasta` generates at this N.
+REVCOMP_TIMED_N = 1_000_000
+REVCOMP_QUICK_N = 200_000
 
 
 def build(tmp: pathlib.Path, name: str) -> tuple[pathlib.Path, pathlib.Path]:
@@ -85,6 +95,20 @@ def samples(exe: pathlib.Path, n: int, rounds: int) -> tuple[list[float], str]:
     return times, output
 
 
+def samples_stdin(exe: pathlib.Path, data: str, rounds: int) -> tuple[list[float], str]:
+    """Like `samples`, but for a program that reads its input from stdin
+    rather than taking N on the command line -- `revcomp`."""
+    times, output = [], None
+    for _ in range(rounds):
+        start = time.perf_counter()
+        done = subprocess.run([str(exe)], input=data, capture_output=True, text=True)
+        times.append(time.perf_counter() - start)
+        if done.returncode != 0:
+            sys.exit(f"{exe.name} exited {done.returncode}")
+        output = done.stdout
+    return times, output
+
+
 def spread(times: list[float]) -> str:
     """How far the samples ranged, as a percentage of the fastest."""
     return f"{(max(times) - min(times)) / min(times) * 100:4.1f}%"
@@ -100,9 +124,14 @@ def main() -> int:
     print(f"{'program':<14}{'N':>6}  {'lex-sys':>18}  {'C -O2':>18}   ratio")
     print(f"{'':14}{'':>6}  {'median  (spread)':>18}  {'median  (spread)':>18}")
     ratios = []
+    fasta_ls = None  # kept, so revcomp's input is generated once, below
     try:
         for name, timed, verified, expected in PROGRAMS:
+            if expected is None:
+                expected = (GAME / f"{name}-{verified}.txt").read_text()
             ls, c = build(tmp, name)
+            if name == "fasta":
+                fasta_ls = ls
 
             # Correctness first, at the size the Benchmarks Game publishes
             # an answer for. A fast wrong answer is not a result.
@@ -123,6 +152,35 @@ def main() -> int:
                 f"{name:<14}{n:>6}  {a * 1000:>10.1f}ms ({spread(ls_times)})"
                 f"  {b * 1000:>10.1f}ms ({spread(c_times)})   {a / b:.2f}x"
             )
+
+        # `revcomp` reads a FASTA file from stdin rather than taking N on
+        # the command line, so it is not in `PROGRAMS` -- built and timed
+        # here instead, fed by `fasta`'s own output.
+        assert fasta_ls is not None, "fasta must run before revcomp"
+        revcomp_ls, revcomp_c = build(tmp, "revcomp")
+
+        fasta_expected = (GAME / "fasta-1000.txt").read_text()
+        revcomp_expected = (GAME / "revcomp-1000.txt").read_text()
+        for exe in (revcomp_ls, revcomp_c):
+            _, got = samples_stdin(exe, fasta_expected, 1)
+            if got != revcomp_expected:
+                sys.exit(f"{exe.name} on fasta-1000.txt printed:\n{got!r}\nwanted:\n{revcomp_expected!r}")
+
+        n = REVCOMP_QUICK_N if args.quick else REVCOMP_TIMED_N
+        data = subprocess.run(
+            [str(fasta_ls), str(n)], capture_output=True, text=True, check=True
+        ).stdout
+        ls_times, ls_out = samples_stdin(revcomp_ls, data, args.rounds)
+        c_times, c_out = samples_stdin(revcomp_c, data, args.rounds)
+        if ls_out != c_out:
+            sys.exit(f"revcomp: the two builds disagree on fasta's N={n} output")
+
+        a, b = statistics.median(ls_times), statistics.median(c_times)
+        ratios.append(a / b)
+        print(
+            f"{'revcomp':<14}{n:>6}  {a * 1000:>10.1f}ms ({spread(ls_times)})"
+            f"  {b * 1000:>10.1f}ms ({spread(c_times)})   {a / b:.2f}x"
+        )
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

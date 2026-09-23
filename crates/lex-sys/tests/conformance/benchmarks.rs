@@ -369,3 +369,96 @@ fn benchmark_game_programs_print_the_published_answer() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `docs/benchmarks-game.md` §2.1 -- fasta and reverse-complement, the two
+/// programs that were waiting on `docs/bulk-io.md` and nothing else.
+///
+/// Both are checked against `benches/game/fasta-1000.txt`, which is two
+/// things at once: it is what `fasta` must print at N=1000 (the size the
+/// Benchmarks Game states an answer for), and it is also the Game's own
+/// N=1000 test input for `revcomp` -- so feeding it back in and checking
+/// against `benches/game/revcomp-1000.txt` is the same published-answer
+/// check `benchmark_game_programs_print_the_published_answer` runs,
+/// `revcomp` just reads its N from a file instead of an argument. Both
+/// fixtures were fetched from benchmarksgame-team.pages.debian.net and
+/// are reproduced here rather than downloaded at test time.
+///
+/// Not a timing gate, for the reason `every_benchmark_pair_agrees` gives.
+/// `scripts/game.py` is where the numbers come from.
+#[test]
+fn fasta_and_reverse_complement_print_the_published_answer() {
+    let root = repo_root().join("benches").join("game");
+    let dir = scratch("benchmark-game-io");
+
+    let fasta_expected =
+        std::fs::read_to_string(root.join("fasta-1000.txt")).expect("fasta-1000.txt is readable");
+    let revcomp_expected = std::fs::read_to_string(root.join("revcomp-1000.txt"))
+        .expect("revcomp-1000.txt is readable");
+
+    let cases: [(&str, &[&str], Option<&str>, &str); 2] = [
+        ("fasta", &["1000"], None, &fasta_expected),
+        ("revcomp", &[], Some(fasta_expected.as_str()), &revcomp_expected),
+    ];
+
+    for (name, args, stdin, expected) in cases {
+        let exe = dir.join(name);
+        let build = Command::new(BIN)
+            .args([
+                "build".as_ref(),
+                "--std".as_ref(),
+                root.join(format!("{name}.ls")).as_os_str(),
+                "-o".as_ref(),
+                exe.as_os_str(),
+            ])
+            .output()
+            .expect("the compiler runs");
+        assert!(
+            build.status.success(),
+            "`{name}` should compile:\n{}",
+            String::from_utf8_lossy(&build.stderr)
+        );
+        let out = run_piped(&exe, args, stdin);
+        assert_eq!(out, expected, "`{name}` should print what the Benchmarks Game publishes");
+
+        // And the C counterpart, which is only a fair comparison if it
+        // computes the same thing (§2's rule).
+        let c_exe = dir.join(format!("{name}_c"));
+        let cc = Command::new("cc")
+            .args([
+                "-O2".as_ref(),
+                root.join(format!("{name}.c")).as_os_str(),
+                "-o".as_ref(),
+                c_exe.as_os_str(),
+            ])
+            .output()
+            .expect("a C compiler");
+        assert!(cc.status.success(), "{}", String::from_utf8_lossy(&cc.stderr));
+        let c_out = run_piped(&c_exe, args, stdin);
+        assert_eq!(
+            c_out, expected,
+            "`{name}.c` must compute the same thing, or the timing means nothing"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Run `exe` with `args`, feeding `stdin` verbatim if given (closing the
+/// pipe either way, which is what lets a reader see end of input), and
+/// hand back what it printed.
+fn run_piped(exe: &Path, args: &[&str], stdin: Option<&str>) -> String {
+    let mut child = Command::new(exe)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("the program runs");
+    {
+        let mut pipe = child.stdin.take().expect("a piped stdin");
+        if let Some(text) = stdin {
+            pipe.write_all(text.as_bytes()).expect("the program accepts its input");
+        }
+    }
+    let out = child.wait_with_output().expect("the program finishes");
+    assert_eq!(out.status.code(), Some(0), "`{}` should exit 0", exe.display());
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
