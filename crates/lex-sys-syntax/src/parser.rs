@@ -48,6 +48,7 @@ pub fn parse_into(ast: &mut Ast, source: &str, base: u32) -> Result<(), Diagnost
         ast: owned,
         no_struct_literal: false,
         current_module: 0,
+        current_edition: 1,
     };
     let outcome = p.unit();
     *ast = p.ast;
@@ -75,6 +76,11 @@ struct Parser<'a> {
     /// puts things -- so this starts at zero for every file and every
     /// program written before modules is unaffected.
     current_module: u32,
+    /// This file's edition (`docs/editions.md` §6.1). One is the
+    /// language as it is today, and a file with no `edition N;` marker
+    /// stays there forever -- so this starts at one for every file and
+    /// every program written before editions existed is unaffected.
+    current_edition: u32,
 }
 
 mod expr;
