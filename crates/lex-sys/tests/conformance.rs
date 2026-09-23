@@ -235,7 +235,12 @@ fn every_rule_has_a_fixture() {
     // one module, and a fixture here is one file. It is covered by
     // `the_module_rules_are_enforced_across_files`, which is where a
     // second file exists.
-    const COVERED_ELSEWHERE: [&str; 1] = ["not-public"];
+    //
+    // And one no source file can reach on purpose: `internal` names the
+    // compiler's failures, and a fixture that produced one would be a bug
+    // report. `docs/internal-errors.md` §5: it is covered by the unit
+    // tests in `lex-sys` and `lex-sys-codegen`, which break the IR by hand.
+    const COVERED_ELSEWHERE: [&str; 2] = ["not-public", "internal"];
 
     let declared: BTreeSet<String> = fixtures("reject")
         .iter()

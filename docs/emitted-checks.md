@@ -34,7 +34,9 @@ error: code generation failed: in `main`: Compilation error: Verifier errors
 ```
 
 No span, no rule tag, no way for a programmer to act on it — the shape
-[`agent-errors.md`](agent-errors.md) exists to eliminate. Three
+[`agent-errors.md`](agent-errors.md) exists to eliminate. (Since #78 a
+failure like this is an `internal` refusal located at the function, and
+`check` reports it too: [`internal-errors.md`](internal-errors.md).) Three
 spellings reached it:
 
 | Written | |

@@ -140,7 +140,8 @@ But a refusal is what a fixture reached, and the catalogue has to cover
 what the *checker* can say. Classifying the **187 error sites in the
 source** instead, and then correcting the classification site by site
 while tagging them, gives **52 rules** — and the largest are the ones a
-reader would expect:
+reader would expect. (A 53rd, `internal`, was added later for the
+compiler's own failures, not the program's: [`internal-errors.md`](internal-errors.md).)
 
 | | rule |
 |---|---|
@@ -334,4 +335,4 @@ That last is a property worth testing rather than intending, and
 | `AGENTS.md` for lex-sys | lex-lang's contract says a downstream repo copies `AGENT_GUIDELINES.md` as `AGENTS.md`. lex-sys is not a Lex codebase — different language, different rules — so it needs its own, and it has **none**: an agent writing lex-sys today has 41 design documents and no entry point. Larger than this slice and the obvious one after it |
 | `lex-sys skill`, the CLI surface as data | lex-lang has `lex skill`; lex-os emits acli envelopes. This adds the third piece — machine-readable *errors* — and the surface is the piece still missing |
 | Warnings | There are none. If one is ever added, §5's object needs a severity and every consumer needs to handle it; adding the field before the first warning would be designing for a language that does not exist |
-| Whether `build` and `run` answer JSON too | §5 is about `check`. `build` fails for reasons that are not the program's — a linker, a missing `cc` — which is exit 3's territory and a different vocabulary |
+| Whether `build` and `run` answer JSON too | §5 is about `check`. `build` fails for reasons that are not the program's — a linker, a missing `cc` — which is exit 3's territory and a different vocabulary. *Narrowed (#78):* a backend failure used to be one of those exit-3 reasons, and it was the compiler's fault, not the environment's. It is now an `internal` refusal that `check` reports too ([`internal-errors.md`](internal-errors.md)), so what is left for `build` alone really is the environment |

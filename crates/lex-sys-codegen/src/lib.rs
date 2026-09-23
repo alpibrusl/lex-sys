@@ -236,12 +236,30 @@ const PREFIX: &str = "lexs_";
 const ARGC_GLOBAL: &str = "lexs_argc";
 const ARGV_GLOBAL: &str = "lexs_argv";
 
+/// Code generation failed (`docs/internal-errors.md`).
+///
+/// Every one of these is a bug in the compiler, not in the program: the
+/// checker accepted it. `function` is what makes that reportable -- the
+/// CLI turns it into an `internal` refusal located at the function's
+/// declaration -- and it is `None` only for a failure outside any one
+/// function, such as defining a data object or finishing the module.
 #[derive(Debug)]
-pub struct CodegenError(String);
+pub struct CodegenError {
+    /// The index into `Program::funcs` of the function being generated.
+    pub function: Option<usize>,
+    /// Cranelift's own text, or the panic's: what a bug report needs.
+    pub message: String,
+}
+
+impl CodegenError {
+    fn plain(message: impl Into<String>) -> CodegenError {
+        CodegenError { function: None, message: message.into() }
+    }
+}
 
 impl fmt::Display for CodegenError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(&self.message)
     }
 }
 
@@ -249,7 +267,19 @@ impl std::error::Error for CodegenError {}
 
 impl From<String> for CodegenError {
     fn from(s: String) -> Self {
-        CodegenError(s)
+        CodegenError::plain(s)
+    }
+}
+
+/// The text a panic carried, which is a `&str` or a `String` for every
+/// `panic!`, `unreachable!` and `expect` in this crate.
+fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(text) = payload.downcast_ref::<&str>() {
+        (*text).to_owned()
+    } else if let Some(text) = payload.downcast_ref::<String>() {
+        text.clone()
+    } else {
+        "a panic with no message".to_owned()
     }
 }
 
@@ -281,25 +311,25 @@ pub fn compile_object_for(
 ) -> Result<Vec<u8>, CodegenError> {
     let mut flags = settings::builder();
     // Position-independent code: both default targets link PIE by default.
-    flags.set("is_pic", "true").map_err(|e| CodegenError(e.to_string()))?;
+    flags.set("is_pic", "true").map_err(|e| CodegenError::plain(e.to_string()))?;
     // Deterministic output matters more here than the last few percent (#1).
-    flags.set("opt_level", "speed").map_err(|e| CodegenError(e.to_string()))?;
+    flags.set("opt_level", "speed").map_err(|e| CodegenError::plain(e.to_string()))?;
     let flags = settings::Flags::new(flags);
 
     let isa = isa::lookup(triple.clone())
-        .map_err(|e| CodegenError(format!("unsupported host `{triple}`: {e}")))?
+        .map_err(|e| CodegenError::plain(format!("unsupported host `{triple}`: {e}")))?
         .finish(flags)
-        .map_err(|e| CodegenError(e.to_string()))?;
+        .map_err(|e| CodegenError::plain(e.to_string()))?;
 
     let builder = ObjectBuilder::new(isa, "lex-sys", default_libcall_names())
-        .map_err(|e| CodegenError(e.to_string()))?;
+        .map_err(|e| CodegenError::plain(e.to_string()))?;
     let mut module = ObjectModule::new(builder);
 
     let mut emitter = Emitter { module, program };
     emitter.emit(entry)?;
     module = emitter.module;
 
-    module.finish().emit().map_err(|e| CodegenError(e.to_string()))
+    module.finish().emit().map_err(|e| CodegenError::plain(e.to_string()))
 }
 
 struct Emitter<'a> {
@@ -348,8 +378,10 @@ impl<'a> Emitter<'a> {
             let id = self
                 .module
                 .declare_data(&name, Linkage::Local, false, false)
-                .map_err(|e| CodegenError(e.to_string()))?;
-            self.module.define_data(id, &description).map_err(|e| CodegenError(e.to_string()))?;
+                .map_err(|e| CodegenError::plain(e.to_string()))?;
+            self.module
+                .define_data(id, &description)
+                .map_err(|e| CodegenError::plain(e.to_string()))?;
         }
 
         // Declare every lex-sys function first: calls are resolved against
@@ -375,7 +407,7 @@ impl<'a> Emitter<'a> {
             let id = self
                 .module
                 .declare_function(&format!("{PREFIX}{}", func.name), Linkage::Local, &sig)
-                .map_err(|e| CodegenError(e.to_string()))?;
+                .map_err(|e| CodegenError::plain(e.to_string()))?;
             declared.push(id);
         }
 
@@ -392,7 +424,7 @@ impl<'a> Emitter<'a> {
                 Linkage::Import,
                 &putchar_sig,
             )
-            .map_err(|e| CodegenError(e.to_string()))?;
+            .map_err(|e| CodegenError::plain(e.to_string()))?;
 
         // `docs/standard-input.md` §3: the mirror. `int getchar(void)` --
         // no parameter, and the same `i32` result that widens at the edge,
@@ -408,7 +440,7 @@ impl<'a> Emitter<'a> {
                 Linkage::Import,
                 &getchar_sig,
             )
-            .map_err(|e| CodegenError(e.to_string()))?;
+            .map_err(|e| CodegenError::plain(e.to_string()))?;
 
         // `size_t fwrite(const void *, size_t, size_t, FILE *)` — four
         // pointer-or-size arguments and a count back.
@@ -426,7 +458,7 @@ impl<'a> Emitter<'a> {
                 Linkage::Import,
                 &fwrite_sig,
             )
-            .map_err(|e| CodegenError(e.to_string()))?;
+            .map_err(|e| CodegenError::plain(e.to_string()))?;
 
         let stdout_symbol = match self.module.isa().triple().operating_system {
             target_lexicon::OperatingSystem::Darwin(_) => "__stdoutp",
@@ -435,7 +467,7 @@ impl<'a> Emitter<'a> {
         let stdout = self
             .module
             .declare_data(stdout_symbol, Linkage::Import, true, false)
-            .map_err(|e| CodegenError(e.to_string()))?;
+            .map_err(|e| CodegenError::plain(e.to_string()))?;
 
         let stderr_symbol = match self.module.isa().triple().operating_system {
             target_lexicon::OperatingSystem::Darwin(_) => "__stderrp",
@@ -444,7 +476,7 @@ impl<'a> Emitter<'a> {
         let stderr = self
             .module
             .declare_data(stderr_symbol, Linkage::Import, true, false)
-            .map_err(|e| CodegenError(e.to_string()))?;
+            .map_err(|e| CodegenError::plain(e.to_string()))?;
         let console = Console { putchar, getchar, fwrite, stdout, stderr };
 
         // §8.4: a foreign function is an import under the symbol its
@@ -467,7 +499,7 @@ impl<'a> Emitter<'a> {
             let id = self
                 .module
                 .declare_function(&ext.symbol, Linkage::Import, &sig)
-                .map_err(|e| CodegenError(e.to_string()))?;
+                .map_err(|e| CodegenError::plain(e.to_string()))?;
             foreign.push(id);
         }
 
@@ -479,30 +511,41 @@ impl<'a> Emitter<'a> {
             ctx.func.signature =
                 self.module.declarations().get_function_decl(declared[index]).signature.clone();
 
-            {
-                let builder = FunctionBuilder::new(&mut ctx.func, &mut fb_ctx);
-                let mut body = BodyEmitter::new(
-                    builder,
-                    &mut self.module,
-                    &declared,
-                    &foreign,
-                    console,
-                    func,
-                    program,
-                );
-                body.emit_func(func);
-                body.builder.finalize();
+            // `docs/internal-errors.md` §4: every assertion below is an
+            // invariant between the checker and this crate, and one that
+            // breaks is the compiler's bug. Caught here, at the function,
+            // so it is reported against the function it happened in
+            // rather than as a bare panic. Nothing is resumed: the first
+            // failure ends code generation for the whole program.
+            let module = &mut self.module;
+            let generated = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                {
+                    let builder = FunctionBuilder::new(&mut ctx.func, &mut fb_ctx);
+                    let mut body = BodyEmitter::new(
+                        builder, module, &declared, &foreign, console, func, program,
+                    );
+                    body.emit_func(func);
+                    body.builder.finalize();
+                }
+                module.define_function(declared[index], &mut ctx).map_err(|e| e.to_string())
+            }));
+            match generated {
+                Ok(Ok(())) => {}
+                Ok(Err(message)) => {
+                    return Err(CodegenError { function: Some(index), message });
+                }
+                Err(payload) => {
+                    return Err(CodegenError {
+                        function: Some(index),
+                        message: panic_text(payload.as_ref()),
+                    });
+                }
             }
-
-            self.module
-                .define_function(declared[index], &mut ctx)
-                .map_err(|e| CodegenError(format!("in `{}`: {e}", func.name)))?;
         }
 
-        let entry_id = self
-            .program
-            .find(entry)
-            .ok_or_else(|| CodegenError(format!("no function named `{entry}` to use as entry")))?;
+        let entry_id = self.program.find(entry).ok_or_else(|| {
+            CodegenError::plain(format!("no function named `{entry}` to use as entry"))
+        })?;
         self.emit_c_main(entry_id, &declared, &mut ctx, &mut fb_ctx)
     }
 
@@ -531,7 +574,7 @@ impl<'a> Emitter<'a> {
         let main = self
             .module
             .declare_function("main", Linkage::Export, &sig)
-            .map_err(|e| CodegenError(e.to_string()))?;
+            .map_err(|e| CodegenError::plain(e.to_string()))?;
 
         // Defined here rather than on first use, because `main` is the one
         // function guaranteed to exist and the only one that can fill them.
@@ -539,10 +582,12 @@ impl<'a> Emitter<'a> {
             let id = self
                 .module
                 .declare_data(name, Linkage::Local, true, false)
-                .map_err(|e| CodegenError(e.to_string()))?;
+                .map_err(|e| CodegenError::plain(e.to_string()))?;
             let mut description = DataDescription::new();
             description.define_zeroinit(RETURN_SLOT_STRIDE as usize);
-            self.module.define_data(id, &description).map_err(|e| CodegenError(e.to_string()))?;
+            self.module
+                .define_data(id, &description)
+                .map_err(|e| CodegenError::plain(e.to_string()))?;
         }
 
         ctx.clear();
@@ -561,7 +606,7 @@ impl<'a> Emitter<'a> {
                 let id = self
                     .module
                     .declare_data(name, Linkage::Local, true, false)
-                    .map_err(|e| CodegenError(e.to_string()))?;
+                    .map_err(|e| CodegenError::plain(e.to_string()))?;
                 let global = self.module.declare_data_in_func(id, builder.func);
                 let address = builder.ins().global_value(pointer, global);
                 builder.ins().store(MemFlags::trusted(), value, address, 0);
@@ -574,7 +619,7 @@ impl<'a> Emitter<'a> {
             builder.ins().return_(&[status]);
             builder.finalize();
         }
-        self.module.define_function(main, ctx).map_err(|e| CodegenError(e.to_string()))?;
+        self.module.define_function(main, ctx).map_err(|e| CodegenError::plain(e.to_string()))?;
         Ok(())
     }
 }
@@ -2477,6 +2522,60 @@ mod tests {
     use lex_sys_ir::lower;
     use lex_sys_syntax::parse;
     use object::{Object, ObjectSymbol, SymbolKind};
+
+    /// `docs/internal-errors.md` §5: a checked program, with one
+    /// function's IR broken in a way the front end never produces.
+    fn broken(break_it: impl FnOnce(&mut lex_sys_ir::Func)) -> (Program, usize) {
+        let source = "fn seven() -> [] int { return 7; } \
+                      fn main(world: World) -> [] int { release(world); return seven() - 7; }";
+        // Only `seven`'s *body* is broken, never its signature, so its
+        // caller is untouched: the failure is its own, and the error has
+        // to say so.
+        let mut program = lower(&parse(source).expect("should parse")).expect("should lower");
+        let index =
+            program.funcs.iter().position(|f| f.name == "seven").expect("`seven` reaches the IR");
+        break_it(&mut program.funcs[index]);
+        (program, index)
+    }
+
+    /// The verifier's refusal names the function it refused.
+    ///
+    /// #71's bug in its smallest form: a value of the wrong machine width
+    /// where the signature wants another -- here a `bool`, one byte,
+    /// returned from a function declared to return a 64-bit `int`.
+    #[test]
+    fn a_backend_failure_names_its_function() {
+        let (program, seven) = broken(|f| {
+            f.body = vec![lex_sys_ir::Stmt::Return(lex_sys_ir::Expr::Bool(true))];
+        });
+        let error = compile_object(&program, "main").expect_err("the verifier should refuse it");
+        assert_eq!(error.function, Some(seven), "{error}");
+        assert!(error.message.contains("Verifier"), "{error}");
+    }
+
+    /// A panic in the backend is caught at the function and becomes the
+    /// same error, carrying the panic's message rather than unwinding out
+    /// of the compiler.
+    ///
+    /// `len` is lowered as its own node, so a call to the `len` builtin
+    /// reaching the backend is exactly one of the "the checker should have
+    /// refused it" invariants.
+    #[test]
+    fn a_backend_panic_names_its_function() {
+        let (program, seven) = broken(|f| {
+            f.body = vec![lex_sys_ir::Stmt::Return(lex_sys_ir::Expr::Call {
+                callee: lex_sys_ir::Callee::Builtin(lex_sys_ir::Builtin::Len),
+                args: vec![lex_sys_ir::Expr::Int(0)],
+            })];
+        });
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let result = compile_object(&program, "main");
+        std::panic::set_hook(hook);
+        let error = result.expect_err("the backend should refuse it");
+        assert_eq!(error.function, Some(seven), "{error}");
+        assert!(error.message.contains("`len` is lowered as `Expr::Len`"), "{error}");
+    }
 
     const SOURCE: &str = "fn shout[&i](io: &!i Io) -> [io_write] int { return putchar(io, 33); } \
                           fn main(world: World) -> [] int { \
