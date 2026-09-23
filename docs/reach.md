@@ -379,7 +379,7 @@ checked.
 | Sockets as builtins under `Net(host)` | §5.1. The right shape and a large one: it means taking a domain out of libc and mediating it here, the way `filesystem.md` §2 did for files. The argument turns on whether a host is worth narrowing to, not on the row being finer |
 | A checked foreign signature | §3.2. A declaration is trusted against the C header. A generator reading real headers would check it; writing one by hand would not |
 | `float` | §2's last row. No design question that is known — it is arithmetic, a Cranelift type and a literal syntax — and it would let `std.math` mean what the name suggests |
-| Function values | §3.3. Named as M1 scope rather than refused, and the thing it unlocks first is threads, which wants more than a pointer |
+| Function values | §3.3. Named as M1 scope rather than refused, and the thing it unlocks first is threads, which wants more than a pointer. [`function-values.md`](function-values.md) §5 lists what more: a callback C can call has row `[]` and scalar parameters, and `pthread_create` passes a `void *` |
 
 ---
 
