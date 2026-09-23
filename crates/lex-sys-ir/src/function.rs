@@ -710,16 +710,16 @@ pub(crate) fn resolve_type_at(
     }
 
     // `(A, B)`: structural, so there is nothing to look up here either
-    // (`docs/tuples.md` §2.2). The arity check is the parser's -- it cannot
-    // build a one-tuple, because `(e)` is grouping -- but an empty one is
-    // reachable by writing `()`, and that is refused here rather than
-    // silently becoming a unit type nobody asked for (§2.1).
+    // (`docs/tuples.md` §2.2). The arity check is here, not in the parser:
+    // `()` and a trailing comma, `(T,)`, both parse as tuples, and both are
+    // refused here rather than silently becoming a unit type or a one-tuple
+    // nobody asked for (§2.1).
     if let TypeExpr::Tuple(parts) = ast.ty(id) {
         let parts = parts.clone();
         if parts.len() < 2 {
             return Err(Diagnostic::new(
                 Rule::PatternShape,
-                "a tuple has two components or more; `(T)` is grouping, and there is no `()`",
+                "a tuple has two components or more; `(T)` is grouping, and neither `(T,)` nor `()` is a tuple",
                 span,
             ));
         }

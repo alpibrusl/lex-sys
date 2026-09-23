@@ -1280,9 +1280,10 @@ impl<'a> Parser<'a> {
             TokenKind::LParen => {
                 // Grouping leaves no node behind: parentheses are formatting.
                 // A comma after the first expression makes it a tuple
-                // instead (`docs/tuples.md` §2.1) -- one token of lookahead,
-                // and the reason there is no one-tuple: `(e)` is already
-                // spoken for.
+                // instead (`docs/tuples.md` §2.1) -- one token of lookahead.
+                // `(e)` is already spoken for, which is why there is no
+                // one-tuple; `(e,)` still parses, as a one-part tuple the
+                // checker refuses, so that the refusal names the rule.
                 self.bump();
                 let first = self.bracketed(|p| p.expr())?;
                 if !self.eat(TokenKind::Comma) {

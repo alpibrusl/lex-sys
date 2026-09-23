@@ -158,8 +158,8 @@ form, written straight into the IR:
 ## 6. What this does not do
 
 - **It does not find the bugs.** That is C2(a), fuzzing the parser and
-  the checker. This makes what fuzzing finds reportable, and it gives a
-  fuzzer a tag to count.
+  the checker, now [`fuzzing.md`](fuzzing.md). This makes what fuzzing
+  finds reportable, and it gives a fuzzer a tag to count.
 - **It does not change a single existing refusal.** The 52 rules, their
   messages and their fixtures are byte for byte what they were
   (`the_prose_is_unchanged_by_the_json`).

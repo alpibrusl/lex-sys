@@ -92,7 +92,8 @@ When a file gets close, split it **by concern**, not by size:
   an invariant between the checker and the backend, with its reason in
   the message. If one ever fires, it is reported as an `internal`
   refusal at the function it fired in, not as a crash
-  (`docs/internal-errors.md`).
+  (`docs/internal-errors.md`). `tests/fuzz.rs` goes looking for one in
+  every `cargo test` run (`docs/fuzzing.md`).
 - **Comments say why, not what.** Each one cites the document or section
   its decision comes from.
 

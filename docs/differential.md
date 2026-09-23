@@ -301,7 +301,9 @@ The corrected claim in `compile-time.md` §6 now says this.
   and nothing has needed one yet.
 - **C2's other two items.** (a) was fuzzing the parser and the checker,
   and (c) was reporting a Cranelift verifier failure as an `internal`
-  rule with a span. Neither is done here.
+  rule with a span. Neither is done here: (c) is
+  [`internal-errors.md`](internal-errors.md), and (a) is
+  [`fuzzing.md`](fuzzing.md).
 
 ---
 

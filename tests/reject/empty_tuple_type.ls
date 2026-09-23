@@ -10,8 +10,9 @@
 // zero-component tuple, is how a language ends up with two ways to say
 // nothing.
 //
-// There is no companion fixture for a one-tuple, because there is no way
-// to write one: `(e)` is grouping and was grouping first.
+// The companion is `one_tuple.ls`: `(e)` is grouping and was grouping
+// first, so a one-tuple could only be spelled `(e,)`, and that is refused
+// the same way.
 
 fn nothing() -> [] () {
     return 0;
