@@ -7,6 +7,11 @@
 > **1.17× to 2.58×** — and that it tracks something legible rather than
 > being a constant with noise on it (§4).
 >
+> Two more Game programs, fasta and reverse-complement, widen that range
+> in a direction the others do not: fasta measures **0.54×** — *faster*
+> than C — because past a certain point the comparison stops being about
+> the backend and starts being about the I/O call underneath it (§7).
+>
 > This document is also the answer to *"are there official benchmarks?"*:
 > **no.** §2 is what exists, what it is worth, and which rules were
 > borrowed from where.
@@ -66,7 +71,7 @@ checked against a value the Game publishes, on every run.
 | **binary-trees** | Ported. `box`/`unbox` over a `Heap` |
 | Mandelbrot | Already in `benches/three/` |
 | n-body | Reachable now that §3's `sqrt` exists; not done |
-| fasta, reverse-complement | Reachable, and IO-bound: `io.write_all` is one `putchar` per byte, so they would mostly measure a libc call per character. That is a real finding and a separate slice, not a benchmark result. **Since built** — [`bulk-io.md`](bulk-io.md) is the slice, the finding was about authority rather than speed, and these two are now ordinary work. Its §4.1 withdraws the guess that they would gain a lot from it: `fasta` computes a congruential step and a table lookup per byte, so it sits nearer `base64` (1.59×) than the do-nothing-but-write loop (12.8×). That is now a thing to measure here rather than a prediction |
+| **fasta, reverse-complement** | **Ported** — §7. `bulk-io.md` §4.1 withdrew the guess that they would gain a lot from bulk output, and the measurement says the guess was wrong in both directions: `fasta` is not nearer `base64`'s 1.59×, it comes out **faster than C**, at 0.54×; `reverse-complement`, which cannot avoid `getchar` on its read side, lands at 1.19×, inside the ordinary range |
 | k-nucleotide | Needs a hash table. Writable, not written |
 | pidigits | Needs **bignum division**, which `std.bignum` deliberately does not have (`float-printing.md` §3.2: the one quotient a printer needs is a single digit) |
 | regex-redux | Needs a regex engine. Out of reach |
@@ -165,7 +170,7 @@ build here, and a best-of-N report would have shown none of that.
 | Question | Why it waits |
 |---|---|
 | n-body | §2.1. Reachable now that `sqrt` exists, and it would add a second float-heavy point beside spectral-norm's 2.58× |
-| fasta and reverse-complement | §2.1. They would measure `putchar` per byte, so the honest next step is a buffered writer first — then they say something about the language rather than about libc |
+| ~~fasta and reverse-complement~~ | **Answered, by measuring** — §7. `fasta` is faster than C; `reverse-complement` is not |
 | `std.math` over floats | §3. Two programs have now written their own `sqrt`. `floating-point.md` §7's capability question is still the blocker, and the queue behind it is growing |
 | A stated precision in `std.fmt` | §3. `float-printing.md` §7's row, with a second caller now |
 | Confidence intervals rather than a range | §4.1. The spread is honest and it is not a statistical model. Georges et al. (OOPSLA 2007) is the standard method; nothing here needs that rigour until a change is claimed on a difference smaller than the spread |
@@ -176,11 +181,67 @@ build here, and a best-of-N report would have shown none of that.
 
 | Test | Rule | § |
 |---|---|---|
-| `benchmark_game_programs_print_the_published_answer` | All three, at the N the Game publishes a value for | 2 |
+| `benchmark_game_programs_print_the_published_answer` | fannkuch, spectral, binarytrees, at the N the Game publishes a value for | 2 |
+| `fasta_and_reverse_complement_print_the_published_answer` | fasta at N=1000; reverse-complement fed that output, both against the Game's own reference files | 7 |
 
 | Fixture | Rule | § |
 |---|---|---|
 | `sibling_regions.ls` | Two `region` blocks side by side, which crashed the compiler until this slice | 3.1 |
+| `fasta-1000.txt`, `revcomp-1000.txt` | The Benchmarks Game's own N=1000 reference output for `fasta`, and for `reverse-complement` fed that file as input — fetched from benchmarksgame-team.pages.debian.net and reproduced as fixtures rather than downloaded at test time | 7 |
+
+---
+
+## 7. fasta and reverse-complement, measured
+
+§2.1's last row, and §5's answer: the Game's own spec was reachable this
+session (`benchmarksgame-team.pages.debian.net` was not blocked), so both
+programs are ported and checked byte for byte against the Game's own
+N=1000 reference output — not a value this repository derived, one
+downloaded from the Game's own site and committed as
+`benches/game/fasta-1000.txt` and `benches/game/revcomp-1000.txt`.
+
+`fasta.ls` draws one linear-congruential step and does one linear search
+over a cumulative-probability table per byte — the two things the
+benchmark's own description forbids optimising away — into a 60-byte
+line buffer, flushed with one `io.write_all` per line
+(`bulk-io.md`'s primitive). `revcomp.ls` reads with `getchar`, one byte
+at a time: `bulk-io.md` §3.3 is why there is no bulk read to reach for,
+so the whole read side stays exactly as expensive as `standard-input.md`
+already priced it. Both write sides are the same prepared-line buffer.
+
+```
+program            N             lex-sys               C -O2   ratio
+                        median  (spread)    median  (spread)
+fasta         1000000       121.8ms ( 4.6%)       224.9ms ( 7.4%)   0.54x
+revcomp       1000000       208.3ms (16.6%)       174.5ms (15.8%)   1.19x
+```
+
+**`fasta` is faster than C, and it says nothing new about the backend.**
+`fasta.c` writes with `putchar`, one libc call per byte, because that is
+what an ordinary C program computing this algorithm writes and
+`benchmarks-game.md` §2's rule is the same algorithm, not a hand-tuned
+one. `fasta.ls` cannot write that way at all — there is no per-byte
+`Io` primitive cheap enough to reach for, only `io.write_all`, so the
+ordinary lex-sys program is the bulk one. The 0.54× is not Cranelift
+outrunning `cc -O2`; it is one `fwrite`-shaped call every 60 bytes
+outrunning one `putchar`-shaped call every byte, which `bulk-io.md` §1
+already measured in isolation (11× in C's own numbers) and which shows
+up here because the language leaves no slower way to write.
+
+**`reverse-complement` is the control.** Its read side is `getchar`
+either way it could be written — lex-sys has no bulk read
+(`bulk-io.md` §3.3) — so nothing shields it from the ordinary backend
+gap, and 1.19× lands inside the range the other five programs already
+described. The 16.6%/15.8% spread is the widest in the suite, which
+`benches/three` reserved for float compute (`spectral-norm`'s 11.1%);
+here it is a five-record loop dominated by `malloc`-sized buffer growth
+rather than a steady inner loop, and neither language is quiet about it.
+
+So the range this document opened with is no longer 1.17×–2.58×; it is
+**0.54×–2.58×**, and the new low end is not evidence the backend closed
+any gap. It is evidence that "the same algorithm" can leave two
+languages with genuinely different *cheapest* ways to do the same I/O,
+and when it does, the ratio measures that instead.
 
 | Bench | |
 |---|---|
