@@ -122,6 +122,11 @@ each is a routine with an argument reduction and a polynomial, and each
 would be library code with a stated accuracy. **No program here has
 asked for one**, and §1's rule is the rule.
 
+> **Corrected (§7 below).** `exp`, `log` and `pow` are now built, once
+> three programs asked for them by name. `sin` stays open — nothing has
+> asked, and it needs its own range reduction, not the one the other
+> three share.
+
 **Not float `abs`, `min` or `max`.** One asker between them —
 `newton.ls`'s `magnitude` — and it has an alternative that works:
 `if x < 0.0 { return -x; }` is three lines and correct.
@@ -135,6 +140,10 @@ one, so it stays in the program that needs it.
 **Not a `std.math` module for floats at all.** `sqrt` is a builtin, so
 there is nothing to import and nothing to put in one. `std.math` stays
 integer-only until something earns a place beside it.
+
+> **Corrected (§7).** `exp`, `log` and `pow` earned that place, and
+> `std.math` is where they went — the same module `sqrt` itself never
+> needed to join.
 
 ---
 
@@ -155,7 +164,81 @@ where `sqrt_of` was off by 10⁴³ and more.
 
 | Question | Why it waits |
 |---|---|
-| `sin`, `exp`, `log`, `pow` | §4. Library code with a stated accuracy, and nothing has asked. When something does, the shape is `std.fmt`'s: written in lex-sys, checked against an oracle |
+| ~~`exp`, `log`, `pow`~~ | **Built** — §7 |
+| `sin` (and `cos`) | Still nothing has asked, and unlike `exp`/`log`/`pow` it needs its own range reduction (mod 2π, which loses precision by subtraction for large arguments in a way none of the other three does) rather than sharing theirs |
 | Float `abs`, `min`, `max` | §4. One asker with a working alternative |
 | A total order | `floating-point.md` §7's other row, untouched here |
 | `sqrt` of a negative | Answers NaN, which is what the instruction does and what IEEE-754 says. Not a trap: `floating-point.md` §2.1 already settled that NaN announces the absence of a value rather than lying about one, and a square root of −1 is exactly that case |
+
+---
+
+## 7. `exp`, `log` and `pow`, closed the way §6 said they would be
+
+Three askers, the two-per-half bar §1 already used, each wanting more
+than one of the three: `examples/growth.ls` (continuous and discrete
+compound growth, plus a doubling time — `exp`, `pow` and `log` in one
+program), `examples/decay.ls` (a half-life table, computed the
+differential-equation way and the definitional way side by side — `exp`
+and `pow` again, cross-checked against each other), `examples/entropy.ls`
+(Shannon entropy of standard input's byte distribution — `log`, the
+third caller). Between them: `log` three askers, `exp` and `pow` two
+each.
+
+**Library code with a stated accuracy**, exactly as §4 said it would be,
+in `std/math.ls`:
+
+* `exp(x)`: range reduction to `x = k*ln2 + r` with `|r| <= ln2/2` (`ln2`
+  split into a high part and a low residual, the standard technique, so
+  `k*ln2_hi` loses no precision for the `k` this produces), a 14-term
+  Taylor series for `e^r`, and `pow2(k)` — 2^k by exponentiation by
+  squaring on ordinary multiplication — to rescale.
+* `log(x)`: pull the unbiased binary exponent `e` out of `x`'s own bits
+  with `bits_of` so `x / pow2(e)` is a mantissa `m` in `[1, 2)`, then a
+  14-term series in `y = (m-1)/(m+1)`.
+* `pow(x, y)`: `exp(y * log(x))` for `x > 0`, which is most of what a
+  caller wants it for; `x <= 0` gets its own cases, matching the two
+  conventions C's `pow` already settled rather than reinventing them.
+
+None of the three needs `bits_of`'s missing other half — a builtin that
+builds a `float` back up from bits, which does not exist. Scaling by an
+integer power of two is exact under ordinary multiplication as long as
+it does not overflow, so `pow2` gets there by squaring rather than by
+bit construction. The one place that bit missing, if it existed, would
+have simplified something: `exp`'s own scaling still had to split its
+exponent in half before multiplying (below), where a direct `ldexp`
+would not have.
+
+**Measured, not asserted**: `crates/lex-sys/tests/conformance/floats.rs`
+checks all three against Rust's own `f64::exp`/`f64::ln`/`f64::powf`
+over roughly 4,500 generated values, plus specials, within **1e-9
+relative error** — two orders of magnitude looser than what was actually
+measured while writing this (2.4e-14 worst case for `exp`, 6e-14 for
+`log`, away from where relative error stops meaning anything, the same
+caveat §2 already states for `sqrt`'s own tails). **Not correctly
+rounded, and not claimed to be** — §2 already found that unreachable for
+a hand-rolled `sqrt`, and nothing about `exp`/`log`/`pow` makes it more
+reachable.
+
+### 7.1 The bug the differential test found
+
+The first version of `exp` answered **infinity for `exp(709.5)`**, which
+is finite (≈1.3549863 × 10³⁰⁸, comfortably under `f64::MAX`). The cause
+was `pow2(k)` computed as one call: at `x = 709.5`, `k = 1024`, and
+`2^1024` alone overflows a `float` even though `sum * 2^1024` (`sum`
+always sitting in `[0.5, 2)`) would not have. Splitting the exponent —
+`sum * pow2(k - k/2) * pow2(k/2)` — keeps every intermediate value in
+range up to the true overflow point (≈709.7827) and reaches infinity
+correctly exactly there, through ordinary IEEE overflow rather than a
+guard. `log`'s own `pow2(e)` call never hits this: a normal `float`'s
+unbiased exponent never reaches 1024, only an infinite input's raw bits
+do, and that is caught earlier by an explicit check.
+
+The other two guards each answer a different hazard than the arithmetic
+does: `is_nan(x)` in both `exp` and `log`, because `truncate` — which
+both use internally, to round to the nearest integer `k` or to check
+whether `y` is a whole number in `pow` — traps on NaN
+(`docs/floating-point.md` §4), and a library function should not trap on
+an input its own domain does not exclude. `exp`'s `|x| > 750` guard and
+`log`'s `x > f64::MAX` guard exist for the same reason, one step further
+out: an infinite `x` would also send `x / ln2` or `x / pow2(e)` somewhere
+`truncate` traps on.
