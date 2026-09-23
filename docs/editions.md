@@ -1,8 +1,11 @@
 # Editions: what one can absorb, measured on this repository's past
 
-> **Status: design, measured, and nothing built yet.** The marker lands
-> with `Net`, which is its first user. `parser.rs` is 1,998 lines, so
-> adding it needs a split first ([`CONTRIBUTING.md`](../CONTRIBUTING.md)).
+> **Status: design, measured, and the marker built.** *(Corrected:
+> the marker shipped ahead of `Net`, not with it — #87, after the
+> `parser.rs` split ([`CONTRIBUTING.md`](../CONTRIBUTING.md)) this
+> paragraph originally said it needed.)* Only edition 1 is known so
+> far; `Net` is the first feature to ask for edition 2, which is what
+> the rest of this section is about.
 >
 > The audit's L2 asked for **an edition marker, a label-alias path so a
 > rename is a warning for one edition, and a vocabulary freeze once
