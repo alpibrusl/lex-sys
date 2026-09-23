@@ -369,6 +369,25 @@ found two of its own bugs rather than any new design question: a
 64 KiB arena, and the fix for that still left the header buffer five
 bytes short. Both are `docs/connect.md` §8.
 
+### `collect/` — the second inbound program
+
+```sh
+cargo run -p lex-sys -- build --std examples/collect/collect.ls -o collect
+./collect 8080 3
+```
+
+`report/`'s inbound counterpart, and `docs/listen.md` is its report.
+`serve/` accepts one connection and never reads a body; `collect`
+accepts a count of connections in a loop and reads each `POST`'s body
+in full, by `Content-Length`, streamed to standard output the same way
+`fetch/` and `report/` stream a response rather than materialising it
+— the reason `docs/connect.md` §8's arena bug does not repeat here.
+Found nothing new in the program itself, but found a real deadlock in
+its own test: a 100,000-byte body overflows a pipe's kernel buffer,
+and a test that only reads the child's stdout after the exchange
+finishes blocks forever the moment that pipe fills. Draining it
+concurrently, on its own thread, is the fix.
+
 ### `buffer/` — growing, written out
 
 ```sh

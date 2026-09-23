@@ -156,9 +156,9 @@ fn the_authority_report_names_the_syscalls_the_row_cannot() {
 /// adds the next network program should have to change a number here and
 /// the sentence in §5 that rests on it.
 ///
-/// `examples/report/` is that next program: `docs/connect.md` §6
-/// recounted outbound to 2, clearing that half's bar. Inbound is still
-/// at 1, so it is the half without an asker now.
+/// `examples/report/` recounted outbound to 2 (`docs/connect.md` §6).
+/// `examples/collect/` does the same for inbound (`docs/listen.md`
+/// §4): both halves have now cleared the bar.
 #[test]
 fn the_network_programs_are_counted() {
     let root = repo_root();
@@ -202,10 +202,10 @@ fn the_network_programs_are_counted() {
             outbound.iter().map(String::as_str).collect::<Vec<_>>()
         ),
         (
-            vec!["examples/serve/serve.ls"],
+            vec!["examples/collect/collect.ls", "examples/serve/serve.ls"],
             vec!["examples/fetch/fetch.ls", "examples/report/report.ls"]
         ),
-        "the network programs changed: `net.md` §5 counts inbound 1, outbound 2, and \
+        "the network programs changed: `net.md` §5 counts inbound 2, outbound 2, and \
          two is the bar for building `Net`. Rewrite §5, then this."
     );
 }
@@ -562,4 +562,123 @@ fn header_of<'a>(head: &'a [u8], name: &str) -> Option<&'a str> {
         }
     }
     None
+}
+
+// ---------------------------------------------------------------------
+// `examples/collect/` -- the second inbound program (`docs/listen.md`, #176)
+// ---------------------------------------------------------------------
+
+/// Connect, retrying only the connect itself -- while `collect` has not
+/// called `listen` yet, refused -- and reuse that same connection for
+/// the request, rather than a throwaway probe connection and a second
+/// real one. `collect` accepts exactly as many connections as its
+/// `count`, so a probe that connects and drops would be accepted and
+/// counted as a request that never sent one, the same "listening is
+/// not an event" problem `examples/serve/`'s own test has, just costed
+/// wrong if solved with a separate connection.
+fn post_when_ready(port: u16, deadline: std::time::Instant, path: &str, body: &[u8]) -> Vec<u8> {
+    use std::io::{Read, Write as _};
+    use std::time::Duration;
+    let mut stream = loop {
+        match std::net::TcpStream::connect(("127.0.0.1", port)) {
+            Ok(s) => break s,
+            Err(_) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(e) => panic!("the server never started listening on {port}: {e}"),
+        }
+    };
+    stream.set_read_timeout(Some(Duration::from_secs(10))).expect("a readable socket");
+    write!(
+        stream,
+        "POST {path} HTTP/1.0\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    )
+    .expect("the header sends");
+    stream.write_all(body).expect("the body sends");
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).expect("the server answers");
+    response
+}
+
+/// `collect` accepts more than one connection without restarting, and
+/// reads each request's body in full -- the two things `examples/serve/`
+/// never had to do (`docs/listen.md` §1).
+#[test]
+fn an_inbound_agent_reads_several_requests_in_a_row() {
+    use std::time::{Duration, Instant};
+    let (dir, exe) = build_example("collect-several", "examples/collect/collect.ls", "collect");
+    let port = free_port();
+    let child = Command::new(&exe)
+        .args([port.to_string(), "3".to_owned()])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the server runs");
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    for (path, body) in [("/a", &b"one"[..]), ("/b", b"two-longer-message"), ("/c", b"three")] {
+        let response = post_when_ready(port, deadline, path, body);
+        assert!(
+            response.starts_with(b"HTTP/1.1 200 OK"),
+            "`collect {path}` should answer 200:\n{}",
+            String::from_utf8_lossy(&response)
+        );
+    }
+
+    let run = child.wait_with_output().expect("the server exits");
+    assert_eq!(run.status.code(), Some(0), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(
+        run.stdout, b"onetwo-longer-messagethree",
+        "the three bodies should print in order with nothing between them"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A body larger than `collect`'s own 4 KiB read buffer, which every
+/// body over that size takes more than one `read` to receive no matter
+/// how the client wrote it -- `docs/listen.md` §2, and the inbound
+/// mirror of `report_sends_a_body_the_server_can_read_in_full`.
+///
+/// `collect` writes the body to its own standard output as it reads it
+/// (`docs/listen.md` §2 -- streamed, not materialised, the same reason
+/// `examples/report/`'s bug in `docs/connect.md` §8 does not repeat
+/// here). A pipe's kernel buffer is smaller than 100,000 bytes, so a
+/// child whose stdout nothing drains blocks the moment it fills --
+/// which is a deadlock in a test that waits for the HTTP exchange to
+/// finish before reading that pipe, not a bug in `collect` itself: a
+/// version of this test that read `child`'s stdout only after `post`
+/// returned hung on exactly this. Draining it on its own thread, at
+/// the same time as the exchange, is what a real reader of a large
+/// response already does.
+#[test]
+fn collect_reads_a_body_larger_than_one_read() {
+    use std::io::Read as _;
+    use std::time::{Duration, Instant};
+    let (dir, exe) = build_example("collect-large", "examples/collect/collect.ls", "collect");
+    let port = free_port();
+    let mut child = Command::new(&exe)
+        .args([port.to_string(), "1".to_owned()])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the server runs");
+
+    let mut stdout_pipe = child.stdout.take().expect("a piped stdout");
+    let drain = std::thread::spawn(move || {
+        let mut collected = Vec::new();
+        stdout_pipe.read_to_end(&mut collected).expect("the pipe reads");
+        collected
+    });
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let body: Vec<u8> = (0..100_000u32).map(|i| b'a' + (i % 26) as u8).collect();
+    let response = post_when_ready(port, deadline, "/big", &body);
+    assert!(response.starts_with(b"HTTP/1.1 200 OK"), "{}", String::from_utf8_lossy(&response));
+
+    let collected = drain.join().expect("the drain thread finishes");
+    let run = child.wait().expect("the server exits");
+    assert_eq!(run.code(), Some(0));
+    assert_eq!(collected, body, "the body should arrive whole and in order");
+    let _ = std::fs::remove_dir_all(&dir);
 }

@@ -18,6 +18,15 @@
 > test that fails without the fix. The first corrected a claim in
 > [`tuples.md`](tuples.md), and the last could only be seen by comparing
 > trees, not text.
+>
+> **Corrected (#176).** A fifth bug, found later and not in the printer:
+> the compile-time evaluator's recursion-depth guard was sized without
+> measuring what it exists to prevent, and a mutant deep enough overflows
+> the compiler's own stack before the guard has a chance to refuse
+> (§4.5). It surfaced only because adding a corpus file shifted, for the
+> fixed seed this suite runs with, which mutant a fixed iteration budget
+> reaches — the fuzzer's own coverage was never guaranteed complete, and
+> this is what that looks like in practice.
 
 ---
 
@@ -121,8 +130,8 @@ mutants hitting the same panic are one bug.
 
 ## 4. What it found
 
-All four were in the printer. None needed the checker, and none was a
-panic. The printer is where the canonical form is written, and
+The first four were in the printer. None needed the checker, and none
+was a panic. The printer is where the canonical form is written, and
 [`canonical-ast.md`](canonical-ast.md) needs it to be exact. Hashes are
 computed from the tree, not the text, so no hash was ever wrong. But
 `lex-sys print` output that reparses to a different program is a
@@ -194,6 +203,44 @@ grammar. Only a digit after the dot triggers it: `1.x`, `1.e5` and
 rather than assumed. Even so, every numeric literal before `.` is now
 printed in parentheses, `(1).2`. One rule with no exceptions is easier
 to keep true than a rule about which characters come next.
+
+### 4.5 The compile-time evaluator's own recursion guard
+
+Found not by a mutation count but by a corpus change: adding
+`examples/report/` and `examples/collect/` (#171, #176) shifted, for
+this suite's fixed seed, which mutant the fixed iteration budget
+reaches. At iteration 2,896 it lands on a fixture recursive `fib`
+mutated to `fib(1_000_000)`. Minimized: that call alone, folded at
+compile time.
+
+[`compile-time.md`](compile-time.md) §5 already gives the folder a
+step budget so a non-terminating computation cannot hang the compiler,
+and a separate recursion-depth cap (`fold.rs`'s `DEPTH`, 128) so a deep
+recursion spends that budget on steps rather than the compiler's own
+native stack. The cap was never measured against what it exists to
+prevent. `cargo test` runs each test on its own thread at Rust's
+default 2 MiB stack, well under a `main` thread's 8 MiB, and in a
+debug build -- uninlined, with every intermediate a stack slot -- 128
+levels of the evaluator's own recursion overflows a 2 MiB stack before
+the depth check ever gets to refuse. `fib(1_000_000)` never needed the
+million: crossing roughly seventy nested calls was already enough,
+which the checker reached before the fuel budget did.
+
+The property this breaks is the fuzzer's first one, "nothing panics,"
+read too narrowly. A stack overflow is not a panic Rust's `catch_unwind`
+can intercept -- it aborts the process outright, which is why this
+finding could not be caught, reported and deduplicated the way the
+four in the printer were, and had to be bisected by hand instead
+(§5's `LEX_SYS_FUZZ_ITERATIONS`, narrowed until one iteration count
+crashed and the one below it did not).
+
+The fix lowers `DEPTH` to 32: measured empirically as under half of 68,
+the largest value that survives a debug build on a 2 MiB stack (72 is
+the smallest that does not), and still comfortably above every
+recursion depth a fixture here actually asks the evaluator to fold --
+`fib(23)` needs 23 (`running_out_of_fuel_leaves_a_working_program`).
+`DEPTH`'s own doc comment now carries this measurement, the same
+discipline `FUEL` already had.
 
 ---
 

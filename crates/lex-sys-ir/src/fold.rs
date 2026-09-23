@@ -215,7 +215,22 @@ const FUEL: u32 = 1_000_000;
 /// and a recursion that does not terminate would otherwise spend its
 /// fuel on stack rather than on steps — and take the compiler's own
 /// stack with it.
-const DEPTH: u32 = 128;
+///
+/// 128 was never measured against what it exists to prevent
+/// (`docs/fuzzing.md`): a `main` thread gets the OS default, 8 MiB on
+/// Linux, but `cargo test` runs each test on its own thread at Rust's
+/// smaller default, 2 MiB, and a debug build's uninlined frames are
+/// large enough that `Machine::call` recursing 128 deep overflows that
+/// stack before the depth check ever has a chance to refuse. Found by
+/// the corpus fuzzer's own mutation (`mutants_never_crash_the_compiler`)
+/// when adding a corpus file (#176) shifted, for the fixed seed, which
+/// mutant landed in the fixed iteration budget — onto `fib(1_000_000)`,
+/// nesting 128 real stack frames deep before giving up. Bisected on a
+/// debug build at a 2 MiB stack: 68 survives, 72 does not. This is
+/// under half that measured floor, and well above every recursion depth
+/// a fixture here actually asks the evaluator to fold — `fib(23)`
+/// (`crates/lex-sys/tests/conformance/compile_time.rs`) needs 23.
+const DEPTH: u32 = 32;
 
 /// A value while a `static` is being evaluated
 /// (`docs/compile-time-data.md` §4).
