@@ -81,6 +81,131 @@ fn the_prose_is_unchanged_by_the_json() {
     }
 }
 
+/// `docs/agent-errors.md` §5, read by a JSON parser rather than by eye:
+/// every reject fixture's answer is valid JSON, and every refusal has a
+/// position except §1.1's three about the program as a whole.
+///
+/// `the_prose_is_unchanged_by_the_json` compared one line of each message
+/// and so passed while every parse error answered invalid JSON: the
+/// message carried the rendered excerpt with its newlines, and its
+/// position was `null`.
+#[test]
+fn every_refusal_is_valid_json_with_a_position() {
+    let program_level = ["main_must_return_int", "main_takes_the_world", "no_main"];
+    for path in fixtures("reject") {
+        let name = path.file_stem().unwrap().to_string_lossy().into_owned();
+        let out = Command::new(BIN)
+            .arg("check")
+            .arg(&path)
+            .args(["--output", "json"])
+            .output()
+            .expect("the compiler runs");
+        let body = String::from_utf8_lossy(&out.stdout);
+        if let Err(at) = strict_json(&body) {
+            panic!("`{name}` answered invalid JSON at byte {at}:\n{body}");
+        }
+        let unplaced = body.matches("\"position\": null").count();
+        if program_level.contains(&name.as_str()) {
+            assert_eq!(unplaced, 1, "`{name}` is about the program, not a span:\n{body}");
+        } else {
+            assert_eq!(unplaced, 0, "`{name}` has a refusal with no position:\n{body}");
+        }
+    }
+}
+
+/// Enough of RFC 8259 to refuse what a JSON parser refuses, and in
+/// particular a raw control character inside a string. The error is the
+/// byte offset where reading failed.
+fn strict_json(text: &str) -> Result<(), usize> {
+    fn ws(b: &[u8], mut i: usize) -> usize {
+        while i < b.len() && matches!(b[i], b' ' | b'\n' | b'\r' | b'\t') {
+            i += 1;
+        }
+        i
+    }
+    fn value(b: &[u8], i: usize) -> Result<usize, usize> {
+        let i = ws(b, i);
+        match b.get(i) {
+            Some(b'{') => {
+                let mut i = ws(b, i + 1);
+                if b.get(i) == Some(&b'}') {
+                    return Ok(i + 1);
+                }
+                loop {
+                    i = string(b, ws(b, i))?;
+                    i = ws(b, i);
+                    if b.get(i) != Some(&b':') {
+                        return Err(i);
+                    }
+                    i = ws(b, value(b, i + 1)?);
+                    match b.get(i) {
+                        Some(b',') => i += 1,
+                        Some(b'}') => return Ok(i + 1),
+                        _ => return Err(i),
+                    }
+                }
+            }
+            Some(b'[') => {
+                let mut i = ws(b, i + 1);
+                if b.get(i) == Some(&b']') {
+                    return Ok(i + 1);
+                }
+                loop {
+                    i = ws(b, value(b, i)?);
+                    match b.get(i) {
+                        Some(b',') => i += 1,
+                        Some(b']') => return Ok(i + 1),
+                        _ => return Err(i),
+                    }
+                }
+            }
+            Some(b'"') => string(b, i),
+            Some(c) if c.is_ascii_digit() || *c == b'-' => {
+                let mut j = i + 1;
+                while j < b.len() && (b[j].is_ascii_digit() || b".eE+-".contains(&b[j])) {
+                    j += 1;
+                }
+                Ok(j)
+            }
+            _ => {
+                for word in [&b"null"[..], b"true", b"false"] {
+                    if b[i..].starts_with(word) {
+                        return Ok(i + word.len());
+                    }
+                }
+                Err(i)
+            }
+        }
+    }
+    fn string(b: &[u8], i: usize) -> Result<usize, usize> {
+        if b.get(i) != Some(&b'"') {
+            return Err(i);
+        }
+        let mut i = i + 1;
+        while let Some(&c) = b.get(i) {
+            match c {
+                b'"' => return Ok(i + 1),
+                b'\\' => match b.get(i + 1) {
+                    Some(b'"' | b'\\' | b'/' | b'b' | b'f' | b'n' | b'r' | b't') => i += 2,
+                    Some(b'u')
+                        if b.len() >= i + 6
+                            && b[i + 2..i + 6].iter().all(u8::is_ascii_hexdigit) =>
+                    {
+                        i += 6
+                    }
+                    _ => return Err(i),
+                },
+                c if c < 0x20 => return Err(i),
+                _ => i += 1,
+            }
+        }
+        Err(i)
+    }
+    let b = text.as_bytes();
+    let end = ws(b, value(b, 0)?);
+    if end == b.len() { Ok(()) } else { Err(end) }
+}
+
 /// A program with nothing wrong answers an empty list and exits 0.
 ///
 /// The shape a consumer checks the length of, rather than an absence it
