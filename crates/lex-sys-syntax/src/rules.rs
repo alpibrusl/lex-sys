@@ -409,7 +409,8 @@ impl Rule {
             }
             Rule::UnknownEdition => {
                 "A file's `edition N;` marker names one of the editions this compiler knows; a \
-                 file with no marker is edition 1, and there is nothing later to name yet."
+                 file with no marker is edition 1, and there is nothing later than edition 2 to \
+                 name yet."
             }
             Rule::UnknownEscape => {
                 "A string literal takes the six escapes `\\n`, `\\r`, `\\t`, `\\\\`, `\\\"` and \

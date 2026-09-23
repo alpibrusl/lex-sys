@@ -891,6 +891,9 @@ fn print_authority(inputs: &[PathBuf], with_std: bool, json: bool) -> Result<(),
             // `docs/standard-error.md` §4 is the lie this row prevents.
             ("the console", ["io_read", "io_write", "err_write"].as_slice()),
             ("the filesystem", ["fs_read", "fs_write"].as_slice()),
+            // `docs/net.md` §4.1: slice 1 only, so `net_in` joins this row
+            // once inbound lands (`docs/connect.md` §9).
+            ("the network", ["net_out"].as_slice()),
             ("the heap", ["heap"].as_slice()),
             ("the command line", ["args"].as_slice()),
             ("foreign code", ["ffi"].as_slice()),

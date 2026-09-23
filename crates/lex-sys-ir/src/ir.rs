@@ -31,11 +31,21 @@ pub const PRELUDE_SPLIT: usize = 7;
 pub const PRELUDE_FILE: usize = 8;
 pub const PRELUDE_OPENED: usize = 9;
 pub const PRELUDE_READ: usize = 10;
+/// `docs/net.md`: the outbound capability, and `docs/editions.md` §7's
+/// edition-2 `Split` that carries it. Two distinct declarations rather
+/// than a sixth field added to [`PRELUDE_SPLIT`], because `Split` is
+/// `res` by inference and a field nothing edition-gated could unname
+/// would have to be consumed by every caller -- exactly the break
+/// editions.md §7 says a program written before edition 2 must not
+/// take. An edition-1 file's `Split` is still the five-field one; an
+/// edition-2 file's `split()` answers this one instead.
+pub const PRELUDE_NET: usize = 11;
+pub const PRELUDE_SPLIT_NET: usize = 12;
 
 /// How many types the prelude declares. Written once, because a builtin's
 /// signature indexes this table and a stale slice is a panic rather than a
 /// diagnostic.
-pub const PRELUDE_COUNT: usize = 11;
+pub const PRELUDE_COUNT: usize = 13;
 
 /// The library an unnarrowed `Ffi` names: none of them yet.
 ///
@@ -318,6 +328,19 @@ pub enum Expr {
     /// is gone by then. What comes back is an `Opened`, tagged.
     OpenFile {
         prefix: String,
+        args: Vec<Expr>,
+    },
+    /// `connect(net, a, b, c, d, port)` — `docs/net.md` §4.1, slice 1
+    /// (`docs/connect.md` §1): the address is four octets a caller already
+    /// has, with no name to resolve yet.
+    ///
+    /// The bound the capability was narrowed to travels with the node for
+    /// the same reason [`Expr::FileOp`]'s prefix does: the row it performs
+    /// is this bound, and the type it came from is gone by lowering time.
+    /// `args` is the capability (zero-sized, stopping at the backend) and
+    /// the four octets and the port, each an `int`.
+    Connect {
+        bound: String,
         args: Vec<Expr>,
     },
     /// A string literal's bytes (`docs/strings.md` §4). Lowered to a

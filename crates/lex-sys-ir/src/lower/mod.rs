@@ -7,6 +7,7 @@ use crate::*;
 
 mod expr;
 mod memory;
+mod net;
 mod stmt;
 
 /// A `static` as the checker knows it, before evaluation
@@ -103,6 +104,10 @@ pub(crate) struct FnLowering<'a> {
     /// The module this function is in, which is where an unqualified name
     /// resolves (`docs/modules.md` §4).
     pub(crate) module: u32,
+    /// The edition of the file this function is declared in
+    /// (`docs/editions.md` §6.1) -- what a written type name in this body
+    /// may resolve to.
+    pub(crate) edition: u32,
     /// This declaration's `val` bounds, for `mode_of` on a `Type::Param`
     /// (`docs/mode-polymorphism.md` §3.1). Empty for a monomorphised
     /// copy, which has no `Param` left to ask about.
@@ -284,6 +289,7 @@ impl<'a> FnLowering<'a> {
                 defs: self.defs,
                 unifier: self.unifier,
                 module: self.module,
+                edition: self.edition,
             },
             Params { names: &self.generic_names, bounds: &self.bounds },
             &regions,
@@ -382,11 +388,11 @@ impl<'a> FnLowering<'a> {
             ));
         };
         let which = def.0 as usize;
-        if which != PRELUDE_FFI && which != PRELUDE_FS {
+        if which != PRELUDE_FFI && which != PRELUDE_FS && which != PRELUDE_NET {
             return Err(Diagnostic::new(
                 Rule::CapabilityNotNarrowable,
                 format!(
-                    "`{}` carries no value to narrow; `Ffi` and `Fs` are the capabilities that name one",
+                    "`{}` carries no value to narrow; `Ffi`, `Fs` and `Net` are the capabilities that name one",
                     self.unifier.display(&resolved)
                 ),
                 span,
@@ -411,7 +417,10 @@ impl<'a> FnLowering<'a> {
         // A path prefix extends at a separator or not at all. `/tmp` is not
         // a prefix of `/tmpevil` in any sense a filesystem would recognise,
         // and a textual check that said otherwise would hand a program the
-        // directory next door. `Ffi` has no separator and no such case.
+        // directory next door. `Ffi` has no separator and no such case, and
+        // neither does `Net`: `docs/net.md` §4 bounds a `net_out` label by
+        // plain textual prefix on `"host:port"`, the same way an `egress`
+        // entry does, with no boundary character of its own.
         if which == PRELUDE_FS && !extends_path(current, &target) {
             return Err(Diagnostic::new(
                 Rule::CapabilityNotNarrowable,
@@ -685,7 +694,11 @@ impl Resolved {
     /// A builtin is not module-scoped because it is the language rather
     /// than a declaration, exactly as the prelude's types are.
     pub(crate) fn find(f: &FnLowering<'_>, text: &str, callee: Symbol, target: u32) -> Self {
-        if let Some(builtin) = Builtin::from_name(text) {
+        // `docs/editions.md` §7: a builtin this file's edition cannot name
+        // is not a builtin to it, so an earlier file's own `extern fn` or
+        // `fn` of the same name (`connect`, today) is what this resolves
+        // to instead.
+        if let Some(builtin) = Builtin::from_name(text).filter(|b| b.since() <= f.edition) {
             return Resolved::Builtin(builtin);
         }
         if let Some(index) = f.externs.iter().position(|e| e.name == text && e.module == target) {

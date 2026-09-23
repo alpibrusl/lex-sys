@@ -1,20 +1,29 @@
 # The network
 
-> **Status: settled, cleared to build.** The program §5 asked for
-> exists now, [`examples/fetch/`](../examples/fetch/fetch.ls), and
-> [`connect.md`](connect.md) is what it found: two corrections to this
-> design, marked below where they apply. The question it opened, who
-> turns a host into an address, is decided in §4.1: **the builtin, after
-> checking the name against its capability's bound**. §5's two-asker
-> bar, per half, is now cleared on both sides
-> ([`connect.md`](connect.md) §6, [`listen.md`](listen.md) §4).
+> **Status: outbound slice 1 built.** `Net`, `net_out` and a `connect`
+> builtin exist now, behind `edition 2;` ([`editions.md`](editions.md)
+> §7). The builtin's shape is split into three slices, agreed when the
+> scope came into view mid-implementation: (1) the edition-2 plumbing,
+> the capability, and a `connect` that takes an address a caller already
+> has, no name to resolve — this slice; (2) `getaddrinfo`-based name
+> resolution, closing §4.1's "the builtin resolves" the rest of the way;
+> (3) inbound — `bind`, `listen`, `accept` and `net_in`. `examples/fetch/`
+> and `examples/report/` are **not** ported onto it yet: both still need
+> `read`, `write` and `close` on the socket `connect` opens, and those
+> stay `extern fn` against libc until a later slice, so porting now would
+> add `Net` to their capability list without removing `Ffi("libc")` from
+> it — the report would read wider, not narrower, which is not what this
+> was for (§3 already names the day that gap closes). §5.1's framing
+> describes neither side, which §1 below found; the question §4.1 opened,
+> who turns a host into an address, is decided there: **the builtin,
+> after checking the name against its capability's bound** — resolution
+> itself is slice 2. §5's two-asker bar, per half, is cleared on both
+> sides ([`connect.md`](connect.md) §6, [`listen.md`](listen.md) §4).
 >
 > [`under-a-grant.md`](under-a-grant.md) §5 promoted
 > [`reach.md`](reach.md) §6's `Net(host)` row from a question of taste to
 > the prerequisite for lex-sys code running under a `lex-os` grant. This
-> is the design, written before the code the way `filesystem.md` was —
-> and the first thing the probe found is that **§5.1's framing describes
-> neither side**.
+> is the design, written before the code the way `filesystem.md` was.
 
 ---
 
@@ -233,12 +242,18 @@ half with an asker is the one the grant does not ask about.
 > things `serve/` never had to do. **Both halves have now cleared the
 > bar.**
 
-That is the honest state up to here, and it is why this document still
-ends at *settled, not built*. Both halves of the two-asker bar §5 set
-are cleared. What is left is §3's own reason to build now rather than
-before: sockets have to come out of libc entirely, since `Ffi("libc")`
-still lets a program declare `extern fn socket` on its own and `Net`
-would contribute nothing alongside it.
+That is the honest state up to here. Both halves of the two-asker bar
+§5 set are cleared, and §3's own reason to build now rather than before
+still applies in full: `Ffi("libc")` lets a program declare
+`extern fn socket` and `extern fn connect` on its own, so `connect`
+becoming a builtin does not by itself take sockets out of libc — a
+program that also holds `Ffi("libc")` (as `examples/fetch/` and
+`examples/report/` still do, for `read`/`write`/`close`) contributes
+nothing new by adding `Net` beside it, which is exactly why those two
+programs are not yet ported onto it (top of this document). `Net` is a
+real, narrower way to open a connection, and it is honest only once
+holding it — and not `Ffi("libc")` — is enough to speak the network,
+which needs the remaining socket operations to become builtins too.
 
 ---
 
@@ -246,15 +261,19 @@ would contribute nothing alongside it.
 
 * **No TLS.** `reach.md` §3.1's rule stands: a foreign result is a
   scalar, so OpenSSL's opaque handles are out regardless of `Net`.
-* **No hostname resolution.** `getaddrinfo` returns a pointer. A host in
-  a label is a *name to be checked*, and turning it into an address is
-  either a builtin of its own or the perimeter's job — §5's program will
-  say which. *It did not choose one (#77).* It showed that a lex-sys
-  program can only ever connect to an address, while a grant only ever
-  names hosts, so whoever resolves also owns the check
+* **No hostname resolution, still.** `getaddrinfo` returns a pointer. A
+  host in a label is a *name to be checked*, and turning it into an
+  address is either a builtin of its own or the perimeter's job — §5's
+  program will say which. *It did not choose one (#77).* It showed that
+  a lex-sys program can only ever connect to an address, while a grant
+  only ever names hosts, so whoever resolves also owns the check
   ([`connect.md`](connect.md) §1). *Decided (#83): a `connect`
   builtin resolves, after checking the name against its capability's
   bound, and the perimeter stays the outer wall under `lex-os` (§4.1).*
+  Slice 1 built `connect` for an address a caller already has, the
+  `octets_of` half of `examples/fetch/` moved into the backend
+  (`docs/connect.md` §1). Resolving a *name* is slice 2's, not yet
+  built.
 * **No socket type.** A descriptor is an `int`, as `File` was before
   `file-handles.md` gave it a linear type. Whether a socket wants the
   same treatment is a question that program answers too. *It answered

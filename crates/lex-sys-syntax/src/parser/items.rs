@@ -29,12 +29,12 @@ impl<'a> Parser<'a> {
             self.bump();
             let value = self.int_value(tok, false)?;
             self.expect(TokenKind::Semi)?;
-            // Edition one is the language as it is today; there is nothing
-            // later than it yet to opt into (`docs/editions.md` §6.1).
-            if value != 1 {
+            // Edition 2 is edition 1 plus `Net` (`docs/editions.md` §7);
+            // nothing later than that exists to opt into yet.
+            if value != 1 && value != 2 {
                 return Err(Diagnostic::new(
                     Rule::UnknownEdition,
-                    format!("unknown edition {value}; the only edition today is 1"),
+                    format!("unknown edition {value}; the only editions today are 1 and 2"),
                     keyword.span.to(tok.span),
                 ));
             }

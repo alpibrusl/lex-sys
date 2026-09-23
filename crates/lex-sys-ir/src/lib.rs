@@ -103,7 +103,11 @@ fn lower_inner(ast: &Ast, rest: &mut Vec<Diagnostic>) -> Result<Program, Diagnos
         // is only for resolving the name.
         let module = ast.module_of(item_id);
         let span = ast.item_span(item_id);
-        if Builtin::from_name(name).is_some() {
+        let edition = ast.edition_of(item_id);
+        // `docs/editions.md` §7: a builtin that did not exist before some
+        // edition is invisible to an earlier one, so a name it later takes
+        // (`connect`, here) is still this file's to declare foreign.
+        if Builtin::from_name(name).is_some_and(|b| b.since() <= edition) {
             return Err(Diagnostic::new(
                 Rule::ForeignDeclaration,
                 format!("`{name}` is a builtin and cannot be declared foreign"),
@@ -137,7 +141,7 @@ fn lower_inner(ast: &Ast, rest: &mut Vec<Diagnostic>) -> Result<Program, Diagnos
             .iter()
             .map(|p| {
                 resolve_type(
-                    Resolving { ast, defs: &defs, unifier: &unifier, module },
+                    Resolving { ast, defs: &defs, unifier: &unifier, module, edition },
                     Params::unbounded(&[]),
                     &region_scope,
                     p.ty,
@@ -145,7 +149,7 @@ fn lower_inner(ast: &Ast, rest: &mut Vec<Diagnostic>) -> Result<Program, Diagnos
             })
             .collect::<Result<Vec<_>, _>>()?;
         let ret = resolve_type(
-            Resolving { ast, defs: &defs, unifier: &unifier, module },
+            Resolving { ast, defs: &defs, unifier: &unifier, module, edition },
             Params::unbounded(&[]),
             &region_scope,
             decl.ret,
@@ -291,7 +295,13 @@ fn lower_inner(ast: &Ast, rest: &mut Vec<Diagnostic>) -> Result<Program, Diagnos
         // it is what every reader gets rather than what the author types
         // (`docs/compile-time-data.md` §2).
         let referent = resolve_type_at(
-            Resolving { ast, defs: &defs, unifier: &unifier, module },
+            Resolving {
+                ast,
+                defs: &defs,
+                unifier: &unifier,
+                module,
+                edition: ast.edition_of(item_id),
+            },
             Params { names: &[], bounds: &[] },
             &[],
             decl.ty,
@@ -331,8 +341,12 @@ fn lower_inner(ast: &Ast, rest: &mut Vec<Diagnostic>) -> Result<Program, Diagnos
         let item_id = ast::ItemId(index as u32);
         let module = ast.module_of(item_id);
         let span = ast.item_span(item_id);
+        let edition = ast.edition_of(item_id);
 
-        if Builtin::from_name(name).is_some() {
+        // `docs/editions.md` §7: same reasoning as the `extern` loop above
+        // -- a builtin this file's edition cannot see is not a builtin to
+        // it, so a user `fn` of that name is an ordinary declaration.
+        if Builtin::from_name(name).is_some_and(|b| b.since() <= edition) {
             return Err(Diagnostic::new(
                 Rule::BuiltinRedeclared,
                 format!("`{name}` is a builtin and cannot be redefined"),
@@ -396,7 +410,7 @@ fn lower_inner(ast: &Ast, rest: &mut Vec<Diagnostic>) -> Result<Program, Diagnos
             }
             seen.push(param.name);
             params.push(resolve_type(
-                Resolving { ast, defs: &defs, unifier: &unifier, module },
+                Resolving { ast, defs: &defs, unifier: &unifier, module, edition },
                 Params { names: &decl.generics, bounds: &decl.bounds },
                 &region_scope,
                 param.ty,
@@ -404,7 +418,7 @@ fn lower_inner(ast: &Ast, rest: &mut Vec<Diagnostic>) -> Result<Program, Diagnos
         }
 
         let ret = resolve_type(
-            Resolving { ast, defs: &defs, unifier: &unifier, module },
+            Resolving { ast, defs: &defs, unifier: &unifier, module, edition },
             Params { names: &decl.generics, bounds: &decl.bounds },
             &region_scope,
             decl.ret,

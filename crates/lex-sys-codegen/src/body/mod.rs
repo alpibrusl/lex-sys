@@ -7,6 +7,7 @@ use crate::*;
 mod control;
 mod expr;
 mod memory;
+mod net;
 
 pub(crate) struct BodyEmitter<'a, 'f> {
     pub(crate) builder: FunctionBuilder<'f>,

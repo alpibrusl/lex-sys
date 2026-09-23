@@ -140,6 +140,10 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
                 let (prefix, args) = (prefix.clone(), args.clone());
                 self.open_file(&prefix, &args)
             }
+            Expr::Connect { args, .. } => {
+                let args = args.clone();
+                self.connect(&args)
+            }
             Expr::FieldRef { base, def, args, index } => {
                 let address = self.scalar(base);
                 let TypeInfo::Struct { fields, .. } = self.program.type_info(*def) else {
@@ -441,6 +445,11 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
                     // so it travels in its own node.
                     Callee::Builtin(Builtin::OpenRead) => {
                         unreachable!("`open_read` is lowered as `Expr::OpenFile`")
+                    }
+                    // Like the two above: the bound travels with its own
+                    // node (`docs/net.md` §4.1).
+                    Callee::Builtin(Builtin::Connect) => {
+                        unreachable!("`connect` is lowered as `Expr::Connect`")
                     }
                     // `docs/file-handles.md` §3. `read(2)` answers a count,
                     // zero at the end, and `-1` with the reason in `errno` --

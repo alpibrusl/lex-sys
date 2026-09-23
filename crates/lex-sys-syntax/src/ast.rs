@@ -689,6 +689,10 @@ pub const PRELUDE: &[&str] = &[
     // The constructors are interned too, because a `match` arm names one
     // and the prelude is what makes those names exist without a library.
     "File", "Opened", "Ok", "Failed", "Read", "Got", "End",
+    // `docs/net.md`: the outbound capability, edition 2 only
+    // (`docs/editions.md` §7), and the field name `Split` grows in
+    // that edition.
+    "Net", "net",
 ];
 
 impl Ast {
