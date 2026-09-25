@@ -1,21 +1,25 @@
 # A second backend, and how it would actually get built
 
-> **Status: first three slices built** (§5, `lex-sys-codegen-llvm`,
-> `--backend llvm`). §5 originally named `examples/hello.ls` as the first
-> slice's target; building it found that claim false, corrected in place
-> below — `hello.ls` needs checked arithmetic, bounds-checked indexing and
-> string-literal data, and only the first of those three is built yet
-> (control flow, the third slice, turned out to be a fourth thing
-> `hello.ls` needed too, resolved along the way — `run --backend llvm` on
-> it now fails on the string literal, not on the `while` loop).
-> `tests/accept/llvm_smoke.ls`, `llvm_arith.ls` and `llvm_control.ls` are
-> what the three slices' own bullet lists actually describe. The second
-> slice found LLVM's `sdiv`/`srem` are **undefined**, not trapping, on the
-> two inputs Cranelift traps — a correction below, not assumed going in.
-> The third needed no `phi`: every local here is already memory, so an
-> `if`'s two arms and a `while`'s back edge just read whatever was last
-> written, the same fact the first slice's `alloca`-per-leaf design was
-> for.
+> **Status: first four slices built, and `examples/hello.ls` builds**
+> (§5, `lex-sys-codegen-llvm`, `--backend llvm`). §5 originally named
+> `hello.ls` as the *first* slice's target; building that slice found the
+> claim false — `hello.ls` needed checked arithmetic, bounds-checked
+> indexing, string-literal data, and (found along the way) control flow,
+> four things across four slices rather than one. The fourth, slices and
+> strings, is what closes the loop: `hello.ls` — `ci.yml`'s own smoke
+> test — now builds and runs through this backend, byte for byte the
+> same as through Cranelift. `tests/accept/llvm_smoke.ls`, `llvm_arith.ls`
+> and `llvm_control.ls` are what the first three slices' own bullet lists
+> actually describe; the fourth needed no new fixture of its own, because
+> `hello.ls` already was one. The second slice found LLVM's `sdiv`/`srem`
+> are **undefined**, not trapping, on the two inputs Cranelift traps — a
+> correction below, not assumed going in. The third needed no `phi`:
+> every local here is already memory, so an `if`'s two arms and a
+> `while`'s back edge just read whatever was last written, the same fact
+> the first slice's `alloca`-per-leaf design was for. The fourth reused
+> that fact a third time: a string literal's global symbol is already a
+> usable pointer constant in LLVM IR, so `Expr::Bytes` needed no
+> instruction at all, only a declaration.
 >
 > `backend-limits.md` made the case: three separate performance
 > arguments — `aliasing.md`'s unspent uniqueness fact, `purity.md`'s
@@ -374,12 +378,13 @@ shape, one side of the diamond always `unreachable`.
 slice, are now exercised end to end — `llvm_control.ls` prints a
 different byte depending on each of the six, which is the first time
 any of them influenced this backend's output rather than merely
-compiling. **What it does not close**: `hello.ls` still refuses, now on
-its string literal (`Bytes`) rather than on its `while` loop — a
-`--backend llvm` run against it before this slice failed at the control
-flow; after, it reaches the greeting itself and fails there instead,
-which is this slice's own evidence that the boundary moved rather than
-merely that a claim changed.
+compiling. **What it does not close**: `hello.ls` still refuses at this
+point, now on its string literal (`Bytes`) rather than on its `while`
+loop — a `--backend llvm` run against it before this slice failed at
+the control flow; after, it reaches the greeting itself and fails there
+instead, which is this slice's own evidence that the boundary moved
+rather than merely that a claim changed. (The fourth slice, next, is
+what actually closes it.)
 
 **`Stmt::Match` stays refused**, deliberately not scoped into this
 slice: an enum's tag-and-payload layout is a structs-and-enums question
@@ -389,12 +394,45 @@ refused too, for the arenas-and-regions reason already listed below —
 neither needed the branching this slice actually built to also need
 scoping into it.
 
-**Later slices, each its own PR, not scoped further here:** slices and
-strings (`Expr::Bytes`, `Expr::Len`, `Expr::Index` — what `hello.ls`
-needs now that arithmetic and control flow are both built; bounds-
-checked indexing is one more `trap_if`-shaped check, but a string
-literal is this backend's first global data object, which nothing so
-far has needed), structs and enums (LLVM's own aggregate types, a more
+**Fourth slice: slices and strings — built, and `hello.ls` builds.**
+`Expr::Bytes`, `Expr::Len` and `Expr::Index` all lower, plus
+`Builtin::IntOf` (`hello.ls`'s own `int_of(s[n])`, a plain `zext i8` —
+necessary plumbing to reach the target, the same reason the first slice
+needed `putchar` beyond what its own bullet list first named). Two
+things came out cheaper than expected and one came out exactly as
+planned:
+
+- **A string literal needed no instruction, only a declaration.**
+  `lex-sys-codegen`'s Cranelift path reads a literal's address with
+  `global_value`, an instruction Cranelift's SSA builder needs to
+  materialise a global into a value. LLVM has no equivalent step: `@sym`
+  is already a `ptr` constant wherever one is expected, so
+  `bytes_lit` writes the `private unnamed_addr constant` declaration
+  into a module-level buffer and hands back the bare symbol name as the
+  pointer leaf — nothing is emitted into the function body at all for
+  the address half of a literal.
+- **Bounds checking is exactly one more `trap_if`.** `s[i]`'s check —
+  `icmp uge i64 <index>, <len>` — is textually the same shape
+  `checked_shift`'s range check already is, reusing `trap_if` rather
+  than adding a new branching primitive. The one design decision this
+  slice made was plain integer-array syntax (`[i8 72, i8 105, ...]`)
+  over LLVM's `c"..."` string-constant shorthand, to avoid writing (and
+  getting wrong) a second escaping rule for characters the shorthand
+  does not accept directly.
+- **`docs/compile-time.md`'s constant folder does not reach `Index` at
+  all**, unlike the second slice's own finding about `BinOp`. A literal
+  out-of-range index (`"abc"[5]`) passes `lex-sys check` and only traps
+  at run time, which is what let this slice's own bounds-check tests
+  (`indexing_past_a_slice_traps_with_sigill`,
+  `indexing_before_a_slice_traps_with_sigill`) use a literal index
+  directly, with none of the second slice's `probe`-routed workaround.
+
+`Place::Element` (`s[i] = e`) lowers too, by the same `element_address`
+the read side uses, so indexed writes are not a silent asymmetric gap
+next to indexed reads. `Place::Field`/`Place::Deref` stay refused —
+both need struct/box layout, structs-and-enums' question below.
+
+**Later slices, each its own PR, not scoped further here:** structs and enums (LLVM's own aggregate types, a more
 direct mapping than Cranelift's flattened layout — worth its own
 measurement rather than an assumption; `Stmt::Match` waits on this),
 arenas and regions (a `Heap`-free allocation scheme LLVM has no special

@@ -84,18 +84,28 @@ fn the_two_backends_agree_on_the_llvm_control_fixture() {
     );
 }
 
-/// The boundary this slice draws is a located refusal, not a crash or a
-/// silent wrong answer: `examples/hello.ls` needs checked arithmetic,
-/// bounds-checked indexing and string-literal data, none of which this
-/// slice lowers (`docs/llvm-backend.md` §5).
+/// §5's fourth slice: slices and strings. `examples/hello.ls` -- the
+/// program §5 originally (and wrongly) named as the first slice's own
+/// target -- is what closes the loop: `ci.yml`'s own smoke test, built
+/// and run through the second backend, byte for byte the same as the
+/// first.
 #[test]
-fn a_program_outside_the_first_slice_is_refused_through_the_cli() {
-    let dir = scratch("backends-llvm-hello");
+fn the_two_backends_agree_on_hello_ls() {
+    assert_backends_agree("backends-hello", "examples/hello.ls", "Hello, world!\n");
+}
+
+/// The boundary this slice draws is a located refusal, not a crash or a
+/// silent wrong answer: a `struct`/`enum`/`match` program needs the
+/// aggregate layout and enum dispatch this backend does not lower yet
+/// (`docs/llvm-backend.md` §5).
+#[test]
+fn a_program_outside_this_backend_is_refused_through_the_cli() {
+    let dir = scratch("backends-llvm-enums");
     let exe = dir.join("out");
     let build = Command::new(BIN)
         .args([
             "build".as_ref(),
-            repo_root().join("examples/hello.ls").as_os_str(),
+            repo_root().join("tests/accept/enums.ls").as_os_str(),
             "--std".as_ref(),
             "--backend".as_ref(),
             "llvm".as_ref(),
@@ -106,11 +116,11 @@ fn a_program_outside_the_first_slice_is_refused_through_the_cli() {
         .expect("the compiler runs");
     let _ = std::fs::remove_dir_all(&dir);
 
-    assert!(!build.status.success(), "`hello.ls` is outside the first slice and should refuse");
+    assert!(!build.status.success(), "`enums.ls` is outside this backend and should refuse");
     assert_eq!(build.status.code(), Some(1), "an unsupported program is rule `internal`, exit 1");
-    let message = String::from_utf8_lossy(&build.stderr);
+    let message = String::from_utf8_lossy(&build.stderr).to_lowercase();
     assert!(
-        message.contains("first slice"),
+        message.contains("enum") || message.contains("struct"),
         "the refusal should name the boundary it hit: {message}"
     );
 }

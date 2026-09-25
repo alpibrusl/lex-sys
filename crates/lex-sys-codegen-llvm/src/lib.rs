@@ -4,13 +4,20 @@
 //! used to pick Cranelift for M0, aimed at `clang` instead of
 //! `cranelift-codegen` (§2 there).
 //!
-//! **First slice** (§5, corrected in the PR that added this crate):
-//! function declarations and calls, `World`/capability erasure, `putchar`,
-//! and process exit. Checked arithmetic, bounds-checked indexing and
-//! string-literal data are **not** in this slice -- `examples/hello.ls`
-//! needs all three, so it is not this slice's target; see
-//! `tests/accept/llvm_smoke.ls` for the program this slice actually
-//! builds and runs.
+//! **Four slices in** (§5, each corrected or extended in the PR that
+//! built it): function declarations and calls, `World`/capability
+//! erasure, `putchar` and process exit (`tests/accept/llvm_smoke.ls`);
+//! checked arithmetic, every trapping `BinOp` plus the bitwise operators
+//! (`tests/accept/llvm_arith.ls`); control flow, `if`/`while` and the
+//! two short-circuit operators, needing no `phi` because every local
+//! here is already memory (`tests/accept/llvm_control.ls`); and slices
+//! and strings, `Expr::Bytes`/`Expr::Len`/`Expr::Index`. That fourth
+//! slice is what finally lowers `examples/hello.ls` -- the program §5
+//! originally (and wrongly) named as the first slice's own target.
+//!
+//! Still refused: `Stmt::Match` and `Stmt::Region` (enum layout and
+//! arena allocation, neither built yet), `Ffi`/`extern fn`, `Net`, and
+//! every `Builtin` beyond `PutChar`/`Split`/`Release`/`Narrow`/`IntOf`.
 //!
 //! This backend is intentionally partial. Everything it does not yet lower
 //! is refused with a [`CodegenError`], never a panic: unlike

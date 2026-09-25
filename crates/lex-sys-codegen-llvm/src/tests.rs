@@ -228,3 +228,58 @@ fn checked_shl_traps_on_an_out_of_range_amount() {
 fn checked_shr_traps_on_a_negative_amount() {
     assert_traps_with_sigill("1 >> (x - 1)", "shr-range");
 }
+
+/// `docs/llvm-backend.md` §5's fourth slice: `examples/hello.ls` -- the
+/// program §5 originally (and wrongly) named as the first slice's own
+/// target -- builds and runs, closing the loop `ci.yml`'s smoke test
+/// opened.
+#[test]
+fn hello_ls_builds_and_runs_end_to_end() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("examples")
+        .join("hello.ls");
+    let source = std::fs::read_to_string(&path).expect("the example exists");
+    let object = compiled(&source, "main");
+    let output = run(&object, "hello");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "Hello, world!\n",
+        "the LLVM backend printed the wrong thing"
+    );
+    assert_eq!(output.status.code(), Some(0), "the LLVM backend exited wrongly");
+}
+
+/// `s[i]` is bounds-checked (`docs/defined-behaviour.md` §1); `uge`
+/// catches both ends with one comparison, so a negative index and one
+/// past the end are the same check on real hardware, not only on paper.
+fn assert_indexing_traps(index: &str, tag: &str) {
+    let source = format!(
+        "fn main(world: World) -> [] int {{\n\
+             let Split {{ io, ffi, fs, heap, args }} = split(world);\n\
+             release(args); release(heap); release(fs); release(ffi); release(io);\n\
+             let s = \"abc\";\n\
+             return int_of(s[{index}]);\n\
+         }}\n"
+    );
+    let object = compiled(&source, "main");
+    let output = run(&object, tag);
+    assert_eq!(output.status.code(), None, "`s[{index}]` should be killed by a signal, not exit");
+    assert_eq!(
+        output.status.signal(),
+        Some(4),
+        "`s[{index}]` should trap with SIGILL, matching Cranelift's own signal for a bounds \
+         check (docs/llvm-backend.md §3.2)"
+    );
+}
+
+#[test]
+fn indexing_past_a_slice_traps_with_sigill() {
+    assert_indexing_traps("5", "index-past");
+}
+
+#[test]
+fn indexing_before_a_slice_traps_with_sigill() {
+    assert_indexing_traps("0 - 1", "index-before");
+}
