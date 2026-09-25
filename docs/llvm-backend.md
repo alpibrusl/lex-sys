@@ -630,6 +630,25 @@ runs), while `--backend cranelift` reproduces the original 1.6×–1.8×
 almost exactly. `docs/against-c-and-rust.md` §2 now carries this
 correction in place, next to the claim it falsifies.
 
+**Not vectorisation — checked, not assumed.** `gpu.md`'s own methodology
+warns against reading SIMD off the clock; `objdump -d` on both
+`sum_checked_llvm` and `mandelbrot_llvm`'s `.text` finds **zero**
+`%xmm`/`%ymm`/`%zmm` instructions, at `-O2`, on either. What actually
+changed against the pre-fix disassembly: every leaf that was a real
+`-0x10(%rsp)` load/store is now a register (`mem2reg`, finally running),
+and `sum_checked`'s loop is partially unrolled ×2 with the same
+`add`/`jo`/`sub`/`jo` sequence Cranelift already emits, just scheduled
+better and with no memory traffic between iterations. So `overflow-
+cost.md`/`check-cost.md`'s established finding — an observable trap is
+not reassociable, so a checked loop does not vectorise — **holds here
+too**, confirmed on a real backend rather than only inferred from
+Cranelift's absence of one: this is `docs/ROADMAP.md`'s "What is next"
+row's own open question, and the answer is **no, still scalar**, not
+"a vectoriser fixed it." The whole measured gain in §7.2 is register
+allocation and instruction selection catching this backend up to what a
+competent scalar compiler already does — real, and worth having, and a
+different, smaller claim than "LLVM vectorises checked arithmetic."
+
 ### 7.3 What still blocks the rest of `benches/` from being comparable
 
 Not a request for the LLVM backend to reach Cranelift's *feature* set in
