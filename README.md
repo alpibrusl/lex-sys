@@ -511,7 +511,22 @@ fixed by declaring them only when a program's own `extern fn` doesn't
 already claim the symbol; and every comparison had been hardcoded to
 `i64` since this backend's first slice, silently wrong for `byte`,
 caught only once `cut`/`seek` exercised one for the first time in
-eighteen slices. `Expr::Static` is what's refused now.
+eighteen slices. `Expr::Static` closed next — laid out as one read-only
+global per `static`, packed at the same stride every other slice in
+this backend uses, with a reference to it costing nothing but the
+symbol name. Checking whether that really was the last gap found one
+more anyway: `Expr::BitNot` (`~x`) had no arm at all, invisible until
+now because `bitwise.ls`'s own `~0` is a literal the checker folds
+away before codegen runs. Fixed as `Not`'s own `xor`, just at `i64`
+and `-1` instead of `i8` and `1`. With both closed, the backend's own
+`Expr` match has no variant left unhandled, so its "not built yet"
+fallback came out entirely — the compiler itself now refuses to build
+this crate if a future `Expr` variant goes unmatched, and the same
+check over every `Builtin` found nothing missing either. Every fixture
+in `tests/accept/` and every program in `examples/` now builds on
+`--backend llvm`, checked directly rather than assumed; what's still
+refused is one already-accepted symbol collision
+([`ROADMAP.md`](docs/ROADMAP.md) #92), not a missing feature.
 [`ROADMAP.md`](docs/ROADMAP.md) says what's next.
 
 ---

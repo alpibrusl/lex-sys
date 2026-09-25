@@ -350,6 +350,41 @@ pub(crate) fn emit_module(
         text.push('\n');
     }
 
+    // Every `static`'s already-evaluated values (§7.25,
+    // `docs/compile-time-data.md` §2) become one read-only global,
+    // defined once for the whole program rather than once per reader --
+    // `lex-sys-codegen`'s own `emit.rs` does the same, and for the same
+    // reason a table is not a greeting. Stride matches `stride_of`
+    // exactly (`body/memory.rs`): a `byte` packs one per byte, and
+    // `int`/`bool`/`float` -- the only other element types a `static` may
+    // hold (`compile-time-data.md` §4) -- pack at eight, the same
+    // leaf-stride every other slice in this backend uses. An empty
+    // `static` still gets a one-byte `zeroinitializer`-shaped constant,
+    // for the reason an empty string literal does: a slice is a pointer
+    // and a length, and the pointer has to be *some*thing.
+    for data in &program.statics {
+        let stride = if matches!(data.element, Type::Byte) {
+            1usize
+        } else {
+            leaves_of(&data.element, program).map_err(|m| (None, m))?.len() * 8
+        };
+        let mut bytes = vec![0u8; (data.values.len() * stride).max(1)];
+        for (i, value) in data.values.iter().enumerate() {
+            let at = i * stride;
+            bytes[at..at + stride].copy_from_slice(&value.to_le_bytes()[..stride]);
+        }
+        let items: Vec<String> = bytes.iter().map(|b| format!("i8 {b}")).collect();
+        text.push_str(&format!(
+            "@lexs_static_{} = private unnamed_addr constant [{} x i8] [{}]\n",
+            data.name,
+            bytes.len(),
+            items.join(", ")
+        ));
+    }
+    if !program.statics.is_empty() {
+        text.push('\n');
+    }
+
     // `arg_count`/`arg` (§7.13, `docs/arguments.md` §3): `argc`/`argv` as
     // `main` was handed them, stashed once into module-local storage and
     // never written again -- `lex-sys-codegen`'s own `ARGC_GLOBAL`/

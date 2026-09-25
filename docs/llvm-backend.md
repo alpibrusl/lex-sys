@@ -1691,3 +1691,121 @@ this document had tracked was closed. `docs/compile-time-data.md`'s
 whole feature — a `static` block evaluated at compile time, its result
 read as ordinary data — has no `--backend llvm` support yet, and no
 slice before this one had tried a program that used one.
+
+### 7.25 `Expr::Static` and `Expr::BitNot`, closed — and the boundary that ran out of fixtures to move to
+
+`Expr::Static`'s data does not need building twice: `lex-sys-ir`
+already evaluates every `static` at compile time, into
+`Program::statics: Vec<StaticValue>` — one entry per `static`, holding
+its element type and its values as `i64`s (a `float`'s bits, the same
+shape `Expr::Float` already holds one in). Both backends read the same
+`Vec`; only laying it out and referencing it is backend work.
+`emit_module` gained a loop mirroring `lex-sys-codegen`'s own
+`emit.rs`: one `private unnamed_addr constant [N x i8]` global per
+static, packed at `stride_of`'s own stride — one byte per element for
+`Type::Byte`, eight for `int`/`bool`/`float`, the same rule
+`alloc_slice`'s own byte-copy already follows, so a `[byte]` static
+comes out packed the same way a string literal or any other byte slice
+does. `Expr::Static` itself is then only a reference to an
+already-declared symbol: `@lexs_static_{name}` and the element count,
+the same `(pointer, length)` pair every slice in this backend is.
+Unlike a string literal, whose `bytes_lit` declares a fresh global at
+every occurrence (`docs/strings.md` §8 leaves interning open), a
+static's global is declared exactly once in `emit_module`, because a
+512 KB table is not a greeting: two readers of the same `static` get
+two references to the one symbol, never two copies of the table.
+
+**Checked against `tests/accept/static_data.ls`, the boundary fixture
+itself, unmodified.** It builds and runs on `--backend llvm`, matching
+Cranelift byte for byte: a table built by a `while` loop, a `[byte]`
+table shifted through `int_of`/`byte_of`, a second `[int]` table built
+by calling a pure function (`twice`) against the first — proving a
+`static` body may call an ordinary function, the same evaluator that
+folds `factorial(5)` running it — and a pure function (`square_of`)
+that reads a `static` directly, with no parameter threading it in.
+`backends.rs`'s new `the_two_backends_agree_on_static_data` checks the
+same claim through the CLI, and `crates/lex-sys-codegen-llvm/src/
+tests.rs`'s new `a_static_table_is_built_at_compile_time_and_reads_
+back_correctly` checks a loop-built table numerically (`0 + 1 + 4 + 9 −
+14 = 0`) rather than only "it printed the right thing", so a wrong
+symbol name or a wrong stride would fail loudly rather than by
+coincidentally printing something plausible.
+
+**`Expr::BitNot` was not part of this backend at all, found while
+checking whether it actually was.** Closing `Expr::Static` left this
+document ready to claim, again, that every named gap was closed — the
+same claim §7.20 through §7.22 made three times running before §7.23
+found it false. This time the check was direct: walk every variant
+`lex_sys_ir::ir::Expr` declares and confirm `body/expr.rs`'s `expr`
+match has an arm for each one, rather than trusting the running list of
+named gaps to be complete. `Expr::BitNot` had none. `tests/accept/
+bitwise.ls` already exercises `~0` and has since this backend's early
+slices, so a Cranelift-only reader would reasonably have assumed the
+operator worked everywhere `bitwise.ls` does — but `~0` is two
+literals, folded to `Expr::Int(-1)` by `docs/compile-time.md` §3 before
+codegen ever runs, so `bitwise.ls` alone was never capable of catching
+a missing `BitNot` arm on this backend. Confirmed directly: a
+self-contained program applying `~` to `putchar`'s own runtime echo (a
+value the checker cannot fold) hit `` `BitNot(Load(Slot(n)))` is not
+part of the LLVM backend yet ``, the same located refusal every other
+gap in this document produced, not a panic. `docs/bitwise.md` §1
+restricts the whole operator set to `int`, so `BitNot`'s fix is one
+line: the same `xor`, `%flipped`, `LValue::Reg` shape `Expr::Not`'s arm
+right above it already has, at `i64` and `-1` in place of `Not`'s `i8`
+and `1` — the two operators' entire difference, since `Not`'s operand
+is always exactly `0` or `1` and `BitNot`'s is not.
+
+**Checked against `tests/accept/bitwise.ls`, run against this backend
+for the first time.** `backends.rs`'s new `the_two_backends_agree_on_
+bitwise` matches Cranelift's output for every operator on that page —
+`&`, `|`, `^`, `<<`, `>>`, the arithmetic-shift and no-trap-on-value
+rules, and the precedence case — byte for byte; `bitwise.ls`'s own `~0`
+had run against Cranelift alone until now (`corpus.rs`, no `--backend`
+flag), never against this one. Because that fixture's only `~` use
+folds away, `bitnot_flips_every_bit_not_just_the_low_one`
+(`crates/lex-sys-codegen-llvm/src/tests.rs`) checks the operator on a
+value the checker cannot fold: `~5` computed as `-6` and checked against
+`-6` arithmetically, rather than against the `4` a mistaken "flip the
+low bit" implementation (`Not`'s own shape) would have produced.
+
+**With both closed, `body/expr.rs`'s `expr` match has no unhandled
+`Expr` variant — so its wildcard arm came out.** What had been a
+runtime string — `` `{other:?}` is not part of the LLVM backend yet ``
+— is now nothing: `rustc` refuses to build this crate at all if a
+future `Expr` variant goes unmatched, which is a strictly stronger
+guarantee than the removed arm's own test ever gave. The same
+enumeration run over `Callee::Builtin`'s variants found nothing left
+either — every one reaches an arm in this backend's `call()`, `FsRead`/
+`FsWrite`/`OpenRead` correctly absent from that list because they never
+reach `Callee::Builtin`, lowered as `Expr::FileOp`/`Expr::OpenFile`
+before codegen sees them, the same way `Connect`/`Bind` are.
+
+**The "outside this backend" boundary fixture does not move an eighth
+time, because this slice's own session found no real fixture left to
+move it to.** Every file in `tests/accept/` and every program in
+`examples/` was built against `--backend llvm`, checked directly rather
+than inferred from the two enums: all of them succeed. The one program
+that still refuses, `examples/collect/collect.ls` (and `fetch/`,
+`report/`, `serve/` alongside it), does so for the reason §7.23 already
+named and §7.24 already found a second instance of: each declares its
+own `extern fn socket`, crossing at `int`'s own `i64` width
+(`docs/reach.md` §3), which collides with the `i32`-parameter `@socket`
+this backend declares unconditionally for its own `Net` support —
+`clang` refuses to link the disagreement rather than silently picking
+one. Not a new exposure: `docs/ROADMAP.md`'s #92 entry already recorded
+the same shape on Cranelift for `close`, accepted there and left
+accepted here for the same reason — a program naming the real libc
+signature for itself needs no help from this backend's own internal
+declaration of the same symbol, and guarding every libc name this
+backend ever declares would be the cross-cutting fix #92 already
+declined to make. `a_program_outside_this_backend_is_refused_not_
+panicked` and `a_program_outside_this_backend_is_refused_through_the_
+cli` now check that collision directly — still a located refusal, still
+not a panic, just no longer a missing `Expr`.
+
+What this slice actually closes, honestly stated: not "every program
+this backend will ever refuse" — `docs/ROADMAP.md` #92's own collision
+is proof a refusal can still be correct and permanent — but every
+*missing* `Expr` or `Builtin` arm this backend's own match statements
+could have, which is now zero, and checked by the compiler rather than
+asserted in prose.

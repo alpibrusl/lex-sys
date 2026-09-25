@@ -207,6 +207,33 @@ impl<'a> FuncEmitter<'a> {
                 self.out.push_str(&format!("  {flipped} = xor i8 {}, 1\n", operand(&v)));
                 Ok(vec![LValue::Reg(flipped)])
             }
+            // `~x` (§7.25, `docs/bitwise.md` §1): every bit, which is the
+            // whole difference from `Not` above -- that one knows its
+            // operand is 0 or 1 and this one does not, and `bitwise.md`
+            // §1 restricts the operator to `int`, so the width is always
+            // `i64` and never the `i8` `Not`'s own xor uses.
+            Expr::BitNot(inner) => {
+                let v = self.scalar(inner)?;
+                let flipped = self.fresh();
+                self.out.push_str(&format!("  {flipped} = xor i64 {}, -1\n", operand(&v)));
+                Ok(vec![LValue::Reg(flipped)])
+            }
+            // `Expr::Static` (§7.25, `docs/compile-time-data.md` §2): the
+            // data was already evaluated and laid out as one read-only
+            // global per static in `emit_module` (`emit.rs`), named the
+            // same way there and here -- so a read is only a reference to
+            // an existing symbol, the same shape a string literal's
+            // *value* is after `bytes_lit` has declared its global, minus
+            // the declaration itself since a static's global already
+            // exists once for the whole program rather than once per
+            // occurrence.
+            Expr::Static(index) => {
+                let data = &self.program.statics[*index as usize];
+                Ok(vec![
+                    LValue::Reg(format!("@lexs_static_{}", data.name)),
+                    LValue::Const(data.values.len() as i64),
+                ])
+            }
             // `-x`: on `int`, `0 - x`, checked -- `-int::MIN` has no
             // positive counterpart, the one place negation overflows,
             // the same reasoning `lex-sys-codegen`'s own `Expr::Neg`
@@ -253,10 +280,15 @@ impl<'a> FuncEmitter<'a> {
                 let (prefix, args) = (prefix.clone(), args.clone());
                 self.open_file(&prefix, &args)
             }
-            other => Err(format!(
-                "`{other:?}` is not part of the LLVM backend yet (docs/llvm-backend.md §5)"
-            )),
         }
+        // §7.25 closed the last two -- `Expr::BitNot` and `Expr::Static`,
+        // both above, next to `Expr::Not` where the operator table
+        // already groups them. No wildcard arm precedes this comment on
+        // purpose: `rustc` refuses to compile an inexhaustive match with
+        // the fallback gone, so the next `Expr` variant this IR gains is
+        // a compile error here rather than a silent runtime refusal, the
+        // same guarantee an exhaustive match always gives and a wildcard
+        // was quietly throwing away.
     }
 
     /// A string literal's bytes (§5's fourth slice): one read-only global
