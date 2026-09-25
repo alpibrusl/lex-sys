@@ -71,6 +71,19 @@ fn the_two_backends_agree_on_the_llvm_arith_fixture() {
     assert_backends_agree("backends-arith", "tests/accept/llvm_arith.ls", "Hi! OK$iK\n");
 }
 
+/// §5's third slice: control flow. `tests/accept/llvm_control.ls`
+/// exercises `if`/`else`, `while`, every comparison and both
+/// short-circuit operators, and the two backends compute byte-for-byte
+/// the same answers.
+#[test]
+fn the_two_backends_agree_on_the_llvm_control_fixture() {
+    assert_backends_agree(
+        "backends-control",
+        "tests/accept/llvm_control.ls",
+        "01X34Z\n+-42\nF\n!T\nT\n!T\n",
+    );
+}
+
 /// The boundary this slice draws is a located refusal, not a crash or a
 /// silent wrong answer: `examples/hello.ls` needs checked arithmetic,
 /// bounds-checked indexing and string-literal data, none of which this
