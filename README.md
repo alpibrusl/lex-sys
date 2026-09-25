@@ -501,7 +501,17 @@ both backends. `Fs` is what's refused now, and a second, pre-existing
 finding surfaced with it: a program whose own `extern fn` names a
 symbol this backend already declares for `Net` makes `clang` correctly
 refuse to link rather than silently miscompile — the same exposure
-already on record against Cranelift for `close`, not a new one.
+already on record against Cranelift for `close`, not a new one. `Fs`
+closed next — the same prefix-checked-path machinery `Net`'s host check
+already built, plus a `..`-traversal refusal. Checking it against real
+programs found and fixed two more things: `read`/`write`'s own
+unconditional declares broke `bytes_to_c.ls`, a program that had
+**already been working**, unlike `socket`/`bind`'s accepted exposure —
+fixed by declaring them only when a program's own `extern fn` doesn't
+already claim the symbol; and every comparison had been hardcoded to
+`i64` since this backend's first slice, silently wrong for `byte`,
+caught only once `cut`/`seek` exercised one for the first time in
+eighteen slices. `Expr::Static` is what's refused now.
 [`ROADMAP.md`](docs/ROADMAP.md) says what's next.
 
 ---

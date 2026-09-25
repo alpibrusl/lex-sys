@@ -237,6 +237,22 @@ impl<'a> FuncEmitter<'a> {
                 let (bound, args) = (bound.clone(), args.clone());
                 self.connect(&bound, &args)
             }
+            // `fs_read`/`fs_write` (§7.24, `docs/filesystem.md` §3):
+            // dedicated nodes for the same reason `Connect`/`Bind` are
+            // -- the prefix the capability was narrowed to travels with
+            // the node, mirroring `lex-sys-codegen`'s own `Expr::FileOp`
+            // arm (`body/memory.rs`).
+            Expr::FileOp { write, prefix, args } => {
+                let (write, prefix, args) = (*write, prefix.clone(), args.clone());
+                self.file_op(write, &prefix, &args)
+            }
+            // `open_read(fs, path)` (§7.24, `docs/file-handles.md`
+            // §2.1), mirroring `lex-sys-codegen`'s own `Expr::OpenFile`
+            // arm.
+            Expr::OpenFile { prefix, args } => {
+                let (prefix, args) = (prefix.clone(), args.clone());
+                self.open_file(&prefix, &args)
+            }
             other => Err(format!(
                 "`{other:?}` is not part of the LLVM backend yet (docs/llvm-backend.md §5)"
             )),
@@ -557,6 +573,37 @@ impl<'a> FuncEmitter<'a> {
                 self.out.push_str(&format!(
                     "  {result} = call i32 @accept(i32 {fd32}, ptr null, ptr null)\n"
                 ));
+                let widened = self.fresh();
+                self.out.push_str(&format!("  {widened} = sext i32 {result} to i64\n"));
+                Ok(vec![LValue::Reg(widened)])
+            }
+            // `file_read(file, into)` (§7.24, `docs/file-handles.md`
+            // §3): `file` is a reference (`&!f File`), so it is not a
+            // capability and is not erased -- `args[0]` is its one
+            // pointer leaf, `args[1..]` the buffer.
+            Callee::Builtin(Builtin::ReadFile) => {
+                let args: Vec<LValue> = evaluated.into_iter().flatten().collect();
+                if args.len() != 3 {
+                    return Err(format!(
+                        "`file_read` needs 3 leaves but {} were given",
+                        args.len()
+                    ));
+                }
+                self.read_file(&args)
+            }
+            // `file_close(file)` (§7.24): `file` is `File` by value, one
+            // leaf -- the descriptor itself, not its address, unlike
+            // `file_read`'s reference above.
+            Callee::Builtin(Builtin::Close) => {
+                let fd64 = evaluated
+                    .into_iter()
+                    .flatten()
+                    .next()
+                    .ok_or_else(|| "`file_close` needs a file argument".to_owned())?;
+                let fd = self.fresh();
+                self.out.push_str(&format!("  {fd} = trunc i64 {} to i32\n", operand(&fd64)));
+                let result = self.fresh();
+                self.out.push_str(&format!("  {result} = call i32 @close(i32 {fd})\n"));
                 let widened = self.fresh();
                 self.out.push_str(&format!("  {widened} = sext i32 {result} to i64\n"));
                 Ok(vec![LValue::Reg(widened)])

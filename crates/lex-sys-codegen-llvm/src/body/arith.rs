@@ -135,7 +135,7 @@ impl<'a> FuncEmitter<'a> {
             BinOp::BitOr => Ok(vec![self.plain("or", a, b)]),
             BinOp::BitXor => Ok(vec![self.plain("xor", a, b)]),
             BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
-                Ok(vec![self.compare(op, a, b)])
+                Ok(vec![self.compare(op, lhs_kind, a, b)])
             }
             BinOp::And | BinOp::Or => unreachable!("refused above"),
         }
@@ -298,7 +298,16 @@ impl<'a> FuncEmitter<'a> {
     /// The six comparisons. `icmp` yields `i1`; `zext`ed to `i8` because
     /// that is this backend's `bool` leaf, the same widening Cranelift's
     /// `icmp` needs none of (its `i8` result already is one).
-    pub(crate) fn compare(&mut self, op: BinOp, a: LValue, b: LValue) -> LValue {
+    /// `docs/llvm-backend.md` §7.24: `kind` was missing here, and every
+    /// comparison was `icmp {cc} i64` regardless of what `a`/`b` actually
+    /// are -- silently correct for `int` (`i64` already), silently
+    /// **ill-typed** for `byte`/`bool` (`i8`), caught only once a real
+    /// program exercised one past every earlier gap that had aborted
+    /// codegen before `clang` ever saw the module. `std.bytes.find`'s
+    /// own `text[at + i] != needle[i]` is exactly that comparison, and
+    /// `std.bytes.compare` converting through `int_of` first is why nothing
+    /// had found this: it compares `int`s, never a raw `byte`.
+    pub(crate) fn compare(&mut self, op: BinOp, kind: LKind, a: LValue, b: LValue) -> LValue {
         let cc = match op {
             BinOp::Eq => "eq",
             BinOp::Ne => "ne",
@@ -309,7 +318,12 @@ impl<'a> FuncEmitter<'a> {
             other => unreachable!("`{other:?}` is not a comparison"),
         };
         let cmp = self.fresh();
-        self.out.push_str(&format!("  {cmp} = icmp {cc} i64 {}, {}\n", operand(&a), operand(&b)));
+        self.out.push_str(&format!(
+            "  {cmp} = icmp {cc} {} {}, {}\n",
+            kind.llvm(),
+            operand(&a),
+            operand(&b)
+        ));
         let widened = self.fresh();
         self.out.push_str(&format!("  {widened} = zext i1 {cmp} to i8\n"));
         LValue::Reg(widened)

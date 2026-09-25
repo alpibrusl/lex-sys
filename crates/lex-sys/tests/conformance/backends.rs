@@ -588,17 +588,17 @@ fn the_two_backends_agree_on_tree() {
 /// once §7.5 landed; bare `alloc[a]`/`box`/`unbox` moved out once §7.15
 /// landed; `Type::Float` moved out once §7.17 landed; matching through
 /// a reference moved out once §7.19 landed; a foreign call moved out
-/// once §7.23 landed. `tests/accept/file_handle.ls` now refuses on
-/// `Fs`'s own `fs_write` instead -- found while checking §7.23's own
-/// claim, and never named as a gap in this document until now.
+/// once §7.23 landed; `Fs` moved out once §7.24 landed.
+/// `tests/accept/static_data.ls` now refuses on `Expr::Static` instead
+/// -- found the same way `Fs` was, by checking a real fixture.
 #[test]
 fn a_program_outside_this_backend_is_refused_through_the_cli() {
-    let dir = scratch("backends-llvm-fs");
+    let dir = scratch("backends-llvm-static");
     let exe = dir.join("out");
     let build = Command::new(BIN)
         .args([
             "build".as_ref(),
-            repo_root().join("tests/accept/file_handle.ls").as_os_str(),
+            repo_root().join("tests/accept/static_data.ls").as_os_str(),
             "--std".as_ref(),
             "--backend".as_ref(),
             "llvm".as_ref(),
@@ -609,10 +609,10 @@ fn a_program_outside_this_backend_is_refused_through_the_cli() {
         .expect("the compiler runs");
     let _ = std::fs::remove_dir_all(&dir);
 
-    assert!(!build.status.success(), "`file_handle.ls` is outside this backend and should refuse");
+    assert!(!build.status.success(), "`static_data.ls` is outside this backend and should refuse");
     assert_eq!(build.status.code(), Some(1), "an unsupported program is rule `internal`, exit 1");
     let message = String::from_utf8_lossy(&build.stderr).to_lowercase();
-    assert!(message.contains("fileop"), "the refusal should name the boundary it hit: {message}");
+    assert!(message.contains("static"), "the refusal should name the boundary it hit: {message}");
 }
 
 /// §7.23: a foreign call, closed -- the gap the test above used to name.
@@ -626,6 +626,20 @@ fn the_two_backends_agree_on_bytes_to_c() {
         "backends-bytes-to-c",
         "tests/accept/bytes_to_c.ls",
         "written straight to fd 1\nand so was this\n",
+    );
+}
+
+/// §7.24: `Fs`, closed -- the gap `a_program_outside_this_backend_is_
+/// refused_through_the_cli` used to name. `tests/accept/file_handle.ls`
+/// is the whole milestone in one program: `fs_write`, `open_read`,
+/// `file_read` (twice, including the `End` case a second read proves
+/// rather than assumes) and `file_close`.
+#[test]
+fn the_two_backends_agree_on_file_handle() {
+    assert_backends_agree(
+        "backends-file-handle",
+        "tests/accept/file_handle.ls",
+        "got 12\nend\nend again\nclosed\n",
     );
 }
 

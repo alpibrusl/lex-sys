@@ -110,32 +110,34 @@ fn the_first_slice_builds_and_runs_the_smoke_fixture() {
 /// `alloc_slice` moved out of this list once §7.5 landed; bare
 /// `alloc[a]`/`box`/`unbox` moved out once §7.15 landed; `Type::Float`
 /// moved out once §7.17 landed; matching through a reference moved out
-/// once §7.19 landed; a foreign call moved out once §7.23 landed. `Fs`
-/// (`fs_read`/`fs_write`/`open_read`/`file_read`) -- found while
-/// checking this slice's own claim against `examples/seek/`'s `Fs("")`
-/// use, and never named in this file's own module header before now --
-/// is the boundary this moves to.
+/// once §7.19 landed; a foreign call moved out once §7.23 landed; `Fs`
+/// moved out once §7.24 landed. `Expr::Static` (`docs/compile-time-
+/// data.md`, `tests/accept/static_data.ls`) -- found the same way `Fs`
+/// was, by checking a real fixture rather than assuming this backend's
+/// own `Expr` match was exhaustive -- is the boundary this moves to.
 #[test]
 fn a_program_outside_this_backend_is_refused_not_panicked() {
+    // Self-contained, unlike `tests/accept/static_data.ls` itself: that
+    // fixture imports `std.io`, which `compiled`'s bare `lex_sys_ir::
+    // lower` cannot resolve (no `--std` source injection at this level,
+    // §7.17's own note). One element is enough to reach `Expr::Static`.
     let source = "\
+static answer: [int] {
+    let table = alloc_slice[static](1, 42);
+    return table;
+}
+
 fn main(world: World) -> [] int {
     let Split { io, ffi, fs, heap, args } = split(world);
-    release(args);
-    release(ffi);
-    release(io);
-    release(heap);
-    var result = 0;
-    borrow fs as &f in {
-        fs_write(f, \"/tmp/lex-sys-llvm-boundary.txt\", \"hi\");
-    }
-    release(fs);
-    return result;
+    release(args); release(heap); release(fs); release(ffi); release(io);
+    return answer[0];
 }
 ";
     let ast = parse(source).expect("parses");
     let program = lex_sys_ir::lower(&ast).expect("type-checks");
-    let error = compile_object(&program, "main").expect_err("`Fs` is not part of this backend yet");
-    assert!(error.message.contains("FileOp"), "{}", error.message);
+    let error = compile_object(&program, "main")
+        .expect_err("`Expr::Static` is not part of this backend yet");
+    assert!(error.message.contains("Static"), "{}", error.message);
 }
 
 /// §7.23: a foreign call, closed -- the gap the test above used to name.
@@ -716,5 +718,59 @@ fn main(world: World) -> [] int {
         Some(4),
         "connecting to a port outside the capability's bound should trap with SIGILL, matching \
          Cranelift's own signal (docs/llvm-backend.md §3.2)"
+    );
+}
+
+/// `docs/llvm-backend.md` §7.24: `compare` hardcoded `icmp {cc} i64`
+/// regardless of what its operands actually are -- silently correct for
+/// `int` (already `i64`), silently **ill-typed** for `byte`/`bool`
+/// (`i8`), and nothing had caught it: every comparison in every fixture
+/// and `benches/` program this document tracks compares `int`s. `std.
+/// bytes.find`'s own `text[at + i] != needle[i]` compares raw bytes, and
+/// building `examples/cut/`/`examples/seek/` against this slice -- both
+/// of which call it through `std.flags` -- is what found `clang`
+/// refusing the emitted module rather than a wrong answer, once `Fs`
+/// stopped being the first thing either program hit. `x`, echoed
+/// through `putchar`, keeps `byte_of(x)`/`byte_of(x + 1)` from folding
+/// to a compile-time constant the checker would take a different path
+/// for (`docs/compile-time.md` §3), the same device `program_returning`
+/// uses for `int`.
+#[test]
+fn byte_comparison_uses_the_right_width() {
+    let source = "\
+fn probe[&i](io: &!i Io) -> [io_write] int {
+    return putchar(io, 0);
+}
+
+fn main(world: World) -> [] int {
+    let Split { io, ffi, fs, heap, args } = split(world);
+    release(args); release(heap); release(fs); release(ffi);
+    var x = 0;
+    borrow mut io as &!i in {
+        x = probe(i);
+    }
+    release(io);
+
+    let a = byte_of(x);
+    let b = byte_of(x + 1);
+    var status = 0;
+    if a != b {
+        status = status + 1;
+    }
+    if a == a {
+        status = status + 1;
+    }
+    if b != a {
+        status = status + 1;
+    }
+    return status - 3;
+}
+";
+    let object = compiled(source, "main");
+    let output = run(&object, "byte-comparison");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "a `byte` comparison should compare at `i8`, not be silently widened to `i64`"
     );
 }
