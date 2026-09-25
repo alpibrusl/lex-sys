@@ -31,19 +31,13 @@ fn build_with(tag: &str, relative: &str, backend: &str) -> std::process::Output 
     run
 }
 
-/// The LLVM backend's first slice (`docs/llvm-backend.md` §5) builds
-/// `tests/accept/llvm_smoke.ls` -- the fixture the doc's original bullet
-/// list actually describes -- and the two backends agree with each other
-/// and with the fixture's own `//~ STDOUT`/`//~ EXIT` directives.
-#[test]
-fn the_two_backends_agree_on_the_llvm_smoke_fixture() {
-    let relative = "tests/accept/llvm_smoke.ls";
-    let cranelift = build_with("backends-cranelift", relative, "cranelift");
-    let llvm = build_with("backends-llvm", relative, "llvm");
+fn assert_backends_agree(tag: &str, relative: &str, expected_stdout: &str) {
+    let cranelift = build_with(&format!("{tag}-cranelift"), relative, "cranelift");
+    let llvm = build_with(&format!("{tag}-llvm"), relative, "llvm");
 
     assert!(
         llvm.status.success(),
-        "`--backend llvm` should build and run `llvm_smoke.ls`, but said:\n{}",
+        "`--backend llvm` should build and run `{relative}`, but said:\n{}",
         String::from_utf8_lossy(&llvm.stderr)
     );
     assert_eq!(
@@ -56,8 +50,25 @@ fn the_two_backends_agree_on_the_llvm_smoke_fixture() {
         cranelift.status.code(),
         "the two backends exited differently for the same program"
     );
-    assert_eq!(String::from_utf8_lossy(&llvm.stdout), "Hi!\n");
+    assert_eq!(String::from_utf8_lossy(&llvm.stdout), expected_stdout);
     assert_eq!(llvm.status.code(), Some(0));
+}
+
+/// The LLVM backend's first slice (`docs/llvm-backend.md` §5) builds
+/// `tests/accept/llvm_smoke.ls` -- the fixture the doc's original bullet
+/// list actually describes -- and the two backends agree with each other
+/// and with the fixture's own `//~ STDOUT`/`//~ EXIT` directives.
+#[test]
+fn the_two_backends_agree_on_the_llvm_smoke_fixture() {
+    assert_backends_agree("backends-smoke", "tests/accept/llvm_smoke.ls", "Hi!\n");
+}
+
+/// §5's second slice: checked arithmetic. `tests/accept/llvm_arith.ls`
+/// exercises every trapping `BinOp` plus the bitwise operators, and the
+/// two backends compute byte-for-byte the same answers.
+#[test]
+fn the_two_backends_agree_on_the_llvm_arith_fixture() {
+    assert_backends_agree("backends-arith", "tests/accept/llvm_arith.ls", "Hi! OK$iK\n");
 }
 
 /// The boundary this slice draws is a located refusal, not a crash or a

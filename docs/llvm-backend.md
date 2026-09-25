@@ -1,11 +1,14 @@
 # A second backend, and how it would actually get built
 
-> **Status: first slice built** (§5, `lex-sys-codegen-llvm`, `--backend
-> llvm`). §5 originally named `examples/hello.ls` as this slice's target;
-> building it found that claim false, corrected in place below — `hello.ls`
-> needs checked arithmetic, bounds-checked indexing and string-literal
-> data, none of which this slice lowers. `tests/accept/llvm_smoke.ls` is
-> what the original bullet list actually describes, and is what got built.
+> **Status: first two slices built** (§5, `lex-sys-codegen-llvm`, `--backend
+> llvm`). §5 originally named `examples/hello.ls` as the first slice's
+> target; building it found that claim false, corrected in place below —
+> `hello.ls` needs checked arithmetic, bounds-checked indexing and
+> string-literal data, and only the first of those three is built yet.
+> `tests/accept/llvm_smoke.ls` and `tests/accept/llvm_arith.ls` are what
+> the two slices' own bullet lists actually describe. The second slice
+> also found LLVM's `sdiv`/`srem` are **undefined**, not trapping, on the
+> two inputs Cranelift traps — a correction below, not assumed going in.
 >
 > `backend-limits.md` made the case: three separate performance
 > arguments — `aliasing.md`'s unspent uniqueness fact, `purity.md`'s
@@ -288,26 +291,78 @@ already guarantees, a gap here is an ordinary limit of an opt-in,
 unfinished backend, and `--backend cranelift` is unaffected either way
 (`--backend` is purely additive, defaulting to `cranelift`).
 
-**Second slice: checked arithmetic, on both targets.** Every `BinOp`
-that can trap (`Add`, `Sub`, `Mul`, `Div`, `Rem`, `Shl`, `Shr`), checked
-against `benches/guards.c`-style kernels the way
-`every_guard_kernel_agrees_across_its_three_modes` already checks
-Cranelift's three modes against each other — extended to check the
-*signal* a trap raises, not only whether one fired, which §3.2 found
-nothing currently does. This is where §3.2's fix and §3.3's per-target
-asymmetry actually get implemented and pinned down as tests, on real
-CI hardware for both targets rather than one machine's disassembly.
+**Second slice: checked arithmetic — built, and not quite as scoped.**
+Every `BinOp` that can trap (`Add`, `Sub`, `Mul`, `Div`, `Rem`, `Shl`,
+`Shr`) lowers, plus the three bitwise operators (`BitAnd`, `BitOr`,
+`BitXor`), which cannot trap and so needed no extra scoping to include —
+`tests/accept/llvm_arith.ls` exercises all ten, each once, printing a
+value chosen so the exact byte proves the answer rather than only
+`clang` accepting the module. The six comparisons (`Eq`/`Ne`/`Lt`/`Le`/
+`Gt`/`Ge`) lower too, but stay untested end to end: they are this
+language's only way to produce a `bool`, and this language has no way to
+*observe* a `bool` outside `if`/`match` — control flow this backend still
+does not lower (§5's own next gap, not this slice's to close). `&&`/`||`
+stay refused outright: `ir.rs`'s own comment says they lower as control
+flow rather than as an instruction, for the same reason.
 
-**Later slices, each its own PR, not scoped further here:** structs and
-enums (LLVM's own aggregate types, a more direct mapping than
-Cranelift's flattened layout — worth its own measurement rather than an
-assumption), arenas and regions (a `Heap`-free allocation scheme LLVM
-has no special vocabulary for either, so likely the same bump-pointer
-strategy translated rather than redesigned), `Ffi`/`extern fn` (LLVM's
-own `declare` is close to a direct match), `Net`. Each is a `Builtin` or
-`BinOp` variant this document is not claiming to have scoped — `ir.rs`
-has 34 builtins and lists them so the next slice can pick a subset by
-reading them rather than guessing at the size of what is left
+Not built the way this section originally planned: **not** checked
+against `benches/guards.c`-style kernels the way
+`every_guard_kernel_agrees_across_its_three_modes` checks Cranelift's
+three modes against each other. That harness needs a loop to run a
+kernel's cases, and a loop is control flow. What replaced it: every
+runtime-unknown operand needed for a trap test is a value `putchar`
+hands back (an impure call the compile-time folder cannot evaluate,
+unlike a bare literal pair — see below), which is enough to prove each
+of the seven trapping operators raises `SIGILL` on a real `clang`
+without needing a loop to do it in. §3.2's fix and §3.3's per-target
+asymmetry are pinned down as tests for x86-64 here; aarch64 is CI-only,
+as it was after the first slice.
+
+**A finding this slice's own tests forced, not a design decision made in
+advance:** `docs/compile-time.md` §3 folds an operator whose *both*
+operands are literals at compile time, and turns one that would overflow
+into a refused program (`Rule::ConstantTraps`) rather than a running
+one. Writing `checked_add_traps_on_overflow` as `9223372036854775807 + 1`
+does not reach this backend at all — it is refused before lowering
+finishes, correctly, and for a reason that has nothing to do with either
+backend. Every trap test here instead routes one operand through `x`, a
+value read back from `probe`, a function that performs `io_write` and so
+is never a candidate for constant folding (`docs/purity.md` §2's own
+condition). This is not a workaround around the language; it is the
+proof that a *genuinely* run-time-unknown overflow reaches the checked-
+arithmetic codegen this slice built, rather than one the folder would
+have already caught for a different reason.
+
+**A second finding, in the codegen itself:** LLVM's `sdiv`/`srem` are
+**undefined**, not trapping, on a zero divisor or on `int::MIN / -1` —
+unlike Cranelift's, which trap on both (`docs/defined-behaviour.md`).
+The obvious LLVM translation of `Div`/`Rem` — lower straight to `sdiv`/
+`srem`, the way `Shl`/`Shr` almost can (masked by `LLVM`'s own semantics
+where Cranelift's would need the same explicit check this backend
+already writes) — would have been silently wrong on exactly the two
+inputs the language exists to make defined. Both checks are explicit,
+ahead of the instruction, the same shape `Shl`/`Shr`'s range check
+already has: `checked_div_traps_on_division_by_zero` and
+`checked_div_traps_on_int_min_over_negative_one` are what prove the
+checks actually run, on a real `clang`, rather than merely compile.
+
+**Later slices, each its own PR, not scoped further here:** control flow
+(`Stmt::If`/`Stmt::While`/`Stmt::Match` — named explicitly now, where the
+first two slices left it implicit, because it is what the comparisons
+built here still cannot be observed through, what bounds-checked
+indexing needs, and what a loop-based benchmark kernel needs; likely
+LLVM's `br`/`phi` rather than this slice's trap-only branching, since a
+real `if` merges two live values and this backend has not needed a `phi`
+node yet), structs and enums (LLVM's own aggregate types, a more direct
+mapping than Cranelift's flattened layout — worth its own measurement
+rather than an assumption), arenas and regions (a `Heap`-free allocation
+scheme LLVM has no special vocabulary for either, so likely the same
+bump-pointer strategy translated rather than redesigned), `Ffi`/`extern
+fn` (LLVM's own `declare` is close to a direct match), `Net`. Each is a
+`Builtin` or `BinOp` variant this document is not claiming to have
+scoped — `ir.rs` has 34 builtins and lists them so the next slice can
+pick a subset by reading them rather than guessing at the size of what
+is left
 (`crates/lex-sys-ir/src/builtin.rs`).
 
 **Explicitly not this document's to answer: is it faster.**
