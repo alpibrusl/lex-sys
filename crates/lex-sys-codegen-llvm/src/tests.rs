@@ -106,10 +106,11 @@ fn the_first_slice_builds_and_runs_the_smoke_fixture() {
 /// `docs/internal-errors.md`'s promise applies to this backend too, even
 /// though its gaps are "not implemented yet" rather than "the checker
 /// should have refused this": a program outside what this backend lowers
-/// is refused with a located `CodegenError`, never a panic. `region` is
-/// still such a gap -- it needs the arena allocation this backend does
-/// not build (`if`/`while` moved out of this list once control flow
-/// landed, `match`/structs/enums once this slice landed).
+/// is refused with a located `CodegenError`, never a panic. `region`/
+/// `alloc_slice` moved out of this list once §7.5 landed; bare `alloc[a]`
+/// (a single-value arena allocation, handing back a unique reference) is
+/// still such a gap -- `arena_roundtrip.ls` needed it and nothing else to
+/// stay outside this backend once §7.5 closed `alloc_slice`.
 #[test]
 fn a_program_outside_this_backend_is_refused_not_panicked() {
     let source = "\
@@ -119,18 +120,18 @@ fn main(world: World) -> [] int {
     release(fs);
     release(ffi);
     release(io);
+    release(heap);
     region r {
-        var s = alloc_slice[r](1, 0);
-        release(heap);
-        return s[0];
+        let p = alloc[r](0);
+        return 0;
     }
 }
 ";
     let ast = parse(source).expect("parses");
     let program = lex_sys_ir::lower(&ast).expect("type-checks");
     let error =
-        compile_object(&program, "main").expect_err("`region` is not part of this backend yet");
-    assert!(error.message.contains("region"), "{}", error.message);
+        compile_object(&program, "main").expect_err("bare `alloc` is not part of this backend yet");
+    assert!(error.message.contains("Alloc"), "{}", error.message);
 }
 
 /// `docs/llvm-backend.md` §5's second slice: `tests/accept/llvm_arith.ls`
@@ -306,4 +307,31 @@ fn indexing_past_a_slice_traps_with_sigill() {
 #[test]
 fn indexing_before_a_slice_traps_with_sigill() {
     assert_indexing_traps("0 - 1", "index-before");
+}
+
+/// `docs/llvm-backend.md` §7.5: `region`/`alloc_slice` -- exhausting the
+/// arena's chunk traps rather than handing back a slice past the end,
+/// matching `lex-sys-codegen`'s own `bump`. 9000 `int`s is 72000 bytes,
+/// past `ARENA_CHUNK`'s 65536.
+#[test]
+fn allocating_past_an_arenas_chunk_traps_with_sigill() {
+    let source = "\
+fn main(world: World) -> [] int {
+    let Split { io, ffi, fs, heap, args } = split(world);
+    release(args); release(fs); release(ffi); release(io); release(heap);
+    region a {
+        let s = alloc_slice[a](9000, 0);
+        return s[0];
+    }
+}
+";
+    let object = compiled(source, "main");
+    let output = run(&object, "arena-exhausted");
+    assert_eq!(output.status.code(), None, "an exhausted arena should be killed by a signal");
+    assert_eq!(
+        output.status.signal(),
+        Some(4),
+        "an exhausted arena should trap with SIGILL, matching Cranelift's own signal \
+         (docs/llvm-backend.md §3.2)"
+    );
 }

@@ -149,9 +149,42 @@ fn the_two_backends_agree_on_purity() {
     assert_backends_agree("backends-purity", "benches/three/purity.ls", "-7463529374017724416\n");
 }
 
+/// `docs/llvm-backend.md` §7.5: `region`/`alloc_slice` closed -- one
+/// `malloc` in, one `free` out, and a bump pointer kept in two `ptr`-typed
+/// `alloca` cells rather than in an SSA `Variable`, the same arena
+/// `lex-sys-codegen`'s own `body/memory.rs` already builds. `byte_of` and
+/// `!` (`Expr::Not`) closed alongside it -- both were the only things
+/// standing between this and `sieve`/`scan` actually building.
+#[test]
+fn the_two_backends_agree_on_sieve_checked() {
+    assert_backends_agree("backends-sieve-checked", "benches/sieve_checked.ls", "");
+}
+
+#[test]
+fn the_two_backends_agree_on_sieve_wrapping() {
+    assert_backends_agree("backends-sieve-wrapping", "benches/sieve_wrapping.ls", "");
+}
+
+#[test]
+fn the_two_backends_agree_on_scan_checked() {
+    assert_backends_agree("backends-scan-checked", "benches/scan_checked.ls", "");
+}
+
+#[test]
+fn the_two_backends_agree_on_scan_wrapping() {
+    assert_backends_agree("backends-scan-wrapping", "benches/scan_wrapping.ls", "");
+}
+
+#[test]
+fn the_two_backends_agree_on_the_three_language_sieve() {
+    assert_backends_agree("backends-sieve-three", "benches/three/sieve.ls", "6057\n");
+}
+
 /// The boundary this slice draws is a located refusal, not a crash or a
-/// silent wrong answer: `region`/`alloc_slice` need the arena allocation
-/// this backend does not lower yet (`docs/llvm-backend.md` §5).
+/// silent wrong answer: `region`/`alloc_slice` moved out of this list
+/// once §7.5 landed; `arena_roundtrip.ls` now refuses on bare `alloc[a]`
+/// instead (a single-value arena allocation handing back a unique
+/// reference, still not part of this backend).
 #[test]
 fn a_program_outside_this_backend_is_refused_through_the_cli() {
     let dir = scratch("backends-llvm-arena");
@@ -176,5 +209,5 @@ fn a_program_outside_this_backend_is_refused_through_the_cli() {
     );
     assert_eq!(build.status.code(), Some(1), "an unsupported program is rule `internal`, exit 1");
     let message = String::from_utf8_lossy(&build.stderr).to_lowercase();
-    assert!(message.contains("region"), "the refusal should name the boundary it hit: {message}");
+    assert!(message.contains("alloc"), "the refusal should name the boundary it hit: {message}");
 }

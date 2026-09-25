@@ -55,6 +55,12 @@
 > after, the same three kernels are **8%–54% faster** than Cranelift, not
 > slower, and the seven trap-signal tests still pass unchanged — a
 > genuinely false claim, corrected in place rather than left standing.
+> §7.4 closed `wrapping_add`/`sub`/`mul` and found LLVM can delete a
+> whole no-op loop outright once nothing in it can trap. §7.5 closed
+> `region`/`alloc_slice` — the biggest remaining gap — and found the
+> first real vectorisation in this document: the wrapping halves of
+> `sieve`/`scan` compile to hundreds of SIMD instructions where their
+> checked twins, otherwise identical, compile to none.
 
 ---
 
@@ -661,27 +667,30 @@ inspecting `emit.rs` and guessing:
 
 | Gap | Blocks | Where it already shows up in this document |
 |---|---|---|
-| `region`/`alloc_slice` (arena allocation, `Stmt::Region`) | `sieve_*.ls`, `scan_*.ls`, `benches/three/sieve.ls`, `benches/game/fasta.ls`, `benches/game/revcomp.ls` | §5's "later slices" list, already named |
+| ~~`region`/`alloc_slice` (arena allocation, `Stmt::Region`)~~ | **Closed, §7.5**: `sieve_*.ls`, `scan_*.ls`, `benches/three/sieve.ls` now build (`fasta.ls`/`revcomp.ls` still refuse, on `Type::Float` and `getchar` respectively — their own rows below) | §5's "later slices" list, already named |
 | ~~`wrapping_add`/`wrapping_sub`/`wrapping_mul`~~ | **Closed, §7.4**: every `_wrapping.ls` half of a `benches/` pair and `benches/three/purity.ls` now build on `--backend llvm` | Implicit in §5's "every `Builtin` beyond `PutChar`/`Split`/`Release`/`Narrow`/`IntOf`"; not previously named on its own |
+| Bare `Expr::Alloc` (single-value arena allocation) | `tests/accept/arena_roundtrip.ls` — this backend's own "outside the boundary" fixture, not a `benches/` program | Not previously named on its own; distinguished from `alloc_slice` only once §7.5 closed the latter |
 | Heap boxing (`box`, `box_slice`, `Contents`, `unbox`, `unbox_slice` — `Type::Box`/`BoxedSlice`) | `reduce_*.ls`, every `benches/layout/*.ls` file | Same bucket as above; not previously named on its own |
 | `arg_count` (and argument reading generally) | `benches/game/binarytrees.ls`, `benches/game/fannkuch.ls` | Same bucket |
-| `Type::Float` and float arithmetic | `benches/game/spectral.ls` | `emit.rs`'s own `LKind` doc comment already says floats are refused; not previously named as a *benchmark*-blocking gap |
+| `Type::Float` and float arithmetic | `benches/game/spectral.ls`, `benches/game/fasta.ls` (two `alloc_slice` fills) | `emit.rs`'s own `LKind` doc comment already says floats are refused; not previously named as a *benchmark*-blocking gap |
+| `getchar`/`io_read` | `benches/game/revcomp.ls` | Found trying to build `revcomp.ls` once §7.5 closed `region`; not previously named |
 
-Ordered by what it would unblock: **`wrapping_*` first** — it was the
-smallest of the four remaining (three `BinOp`-adjacent builtins, no new
-type, no new `Place`), and closing it (§7.4) let `sum`, `fib`'s wrapping
-halves and `benches/three/purity.ls` build, making the overflow-check's
-own cost (`docs/overflow-cost.md`'s question) measurable on this backend
-for the first time. **Arenas next** — `sieve`/`scan`/`fasta`/`revcomp`
-are four of the remaining programs behind one gap, and it is already
-`docs/llvm-backend.md`'s own next-named slice. Heap boxing, `arg_count`
-and float are each smaller pockets behind their own single gap, not
-bundled with anything else in `benches/`.
+Ordered by what it would unblock, as each closed: **`wrapping_*` first**
+(§7.4) — smallest of the remaining gaps, and it made the overflow-
+check's own cost (`docs/overflow-cost.md`'s question) measurable on
+this backend for the first time. **Arenas next** (§7.5) — the biggest
+single gap by program count, and building against the real targets
+found two smaller gaps (`byte_of`, `Expr::Not`) sitting in front of it
+that no inspection of `emit.rs` alone would have named. What is left —
+heap boxing, bare `alloc`, `arg_count`, float, `getchar` — is five
+smaller pockets, each behind its own single gap, none bundled with
+anything else in `benches/` (§7.6 has the current, complete list).
 
 | Bench | |
 |---|---|
-| `scripts/backend_compare.py` | Interleaved cranelift-vs-llvm timing on the kernels that build on both, today five; `--with-c` adds a three-way leg for `mandelbrot.ls` against `mandelbrot.c` |
-| `crates/lex-sys/tests/conformance/backends.rs` | `the_two_backends_agree_on_{sum_checked,fib_checked,mandelbrot,sum_wrapping,fib_wrapping,purity}` — not a timing gate, for the reason `every_benchmark_pair_agrees` gives |
+| `scripts/backend_compare.py` | Interleaved cranelift-vs-llvm timing on the kernels that build on both, today nine; `--with-c` adds a three-way leg for `mandelbrot.ls` against `mandelbrot.c` |
+| `crates/lex-sys/tests/conformance/backends.rs` | `the_two_backends_agree_on_{sum_checked,fib_checked,mandelbrot,sum_wrapping,fib_wrapping,purity,sieve_checked,sieve_wrapping,scan_checked,scan_wrapping,the_three_language_sieve}` — not a timing gate, for the reason `every_benchmark_pair_agrees` gives |
+| `crates/lex-sys-codegen-llvm/src/tests.rs` | `allocating_past_an_arenas_chunk_traps_with_sigill` — the arena-exhaustion trap, checked by signal the same way every other trap here is |
 
 ### 7.4 `wrapping_add`/`sub`/`mul`, closed — and what removing a trap buys an optimiser
 
@@ -739,3 +748,92 @@ byproduct worth naming here: on this one kernel, the gap between checked
 and wrapping is far larger under LLVM (a real loop vs. no loop at all)
 than under Cranelift (`overflow-cost.md`'s own **+40.5%** on the same
 kernel shape) — because LLVM had a bigger optimisation to lose.
+
+### 7.5 `region`/`alloc_slice`, closed — and a vectoriser firing for the first time
+
+§7.3's second-named gap, and the bigger of the two remaining: `Stmt::
+Region`/`Expr::AllocSlice` need real arena allocation, which this
+backend had none of. Built the same shape `lex-sys-codegen`'s own
+`body/memory.rs` already has — one `malloc` in, one `free` out, and a
+bump pointer that only ever moves forward within the chunk — kept in two
+`ptr`-typed `alloca` cells rather than in an SSA value, this backend's
+own idiom for anything that needs to vary rather than an
+`lex-sys-codegen` `Variable`. `bump`'s bounds check is textually the
+same two-comparison shape (`next` past `end`, or `next` wrapped below
+`at`) `lex-sys-codegen`'s own `bump` makes, translated into `ptr`
+arithmetic throughout (`getelementptr`/`icmp` both work directly on
+`ptr` in LLVM IR, so nothing here needs `ptrtoint`). `ARENA_CHUNK` is
+the same 64 KiB constant, unmodified from `lex-sys-codegen`'s
+`abi::ARENA_CHUNK` — `sieve_checked.ls`'s own header sizes its
+allocation against this exact number, so a mismatched chunk would trap
+where the Cranelift build does not, or the reverse.
+
+Building `sieve`/`scan` against this found two smaller gaps actually
+sitting in front of them, not named until tried: `byte_of` (narrow-or-
+trap, `docs/strings.md` §2 — one unsigned comparison and a `trunc`, the
+same shape `element_address`'s own bounds check already has) and
+`Expr::Not` (`!b` — a `bool` leaf is 0 or 1, so flipping the low bit is
+the negation, one instruction, never trapping). Neither is its own row
+in §7.3's table; both were found by building the actual target and
+reading the refusal, the same method §7.3 itself used.
+
+Every program behind only these four gaps now builds on `--backend
+llvm`: `sieve_checked.ls`, `sieve_wrapping.ls`, `scan_checked.ls`,
+`scan_wrapping.ls`, and `benches/three/sieve.ls` — five differential
+tests join the nine already in `backends.rs`, checked byte-for-byte
+(or exit-code-for-exit-code) against Cranelift, plus a new crate-level
+trap test: `allocating_past_an_arenas_chunk_traps_with_sigill`,
+requesting 9000 `int`s (72000 bytes) from one arena and checking the
+same `SIGILL` §3.2 already established for every other trap here.
+`fasta.ls`/`revcomp.ls` — §7.3's other two `region`-blocked programs —
+still refuse: `fasta.ls` on a `float`-typed `alloc_slice` fill, and
+`revcomp.ls` on `getchar` (`io_read`), each its own already-named gap.
+
+**Measured, `--rounds 25`, minimum of each interleaved half:**
+
+```
+program           cranelift        llvm      llvm/cranelift
+sieve_checked        0.173s       0.122s            -29%
+sieve_wrapping       0.144s       0.061s            -58%
+scan_checked         0.192s       0.061s            -68%
+scan_wrapping        0.192s       0.040s            -79%
+```
+
+These are the first memory-bound, bounds-checked kernels measured
+backend-vs-backend — every program in §7.2/§7.4 was either pure
+arithmetic or recursion. LLVM is faster on all four, in the same
+direction as every kernel so far.
+
+**And, checked with `objdump` rather than assumed: the wrapping halves
+of these two pairs are the first kernels in this document where LLVM
+actually vectorises.** `scan_wrapping.ls`'s object has **409**
+`%xmm`/`%ymm`/`%zmm` instructions; `sieve_wrapping.ls`'s has **22**.
+`scan_checked.ls` and `sieve_checked.ls` — otherwise identical source,
+diffed to confirm the only change is `+`/`-` becoming `wrapping_add`/
+`wrapping_sub` at every site, including the loop's own induction
+variable — have **zero**, matching §7.2's and §7.4's finding on
+`sum_checked.ls`/`mandelbrot.ls` exactly. `check-cost.md`'s "an
+observable trap is not reassociable" is not a claim about arithmetic
+kernels specifically; this is the first direct evidence it holds for a
+bounds-checked memory scan too, on a real backend, both directions of
+the comparison in the same controlled pair. `sieve_wrapping.ls`'s
+smaller SIMD count against `scan_wrapping.ls`'s is not measured further
+here — its inner loop's stride (`m = m + p`) is data-dependent, not
+unit, which is a harder shape to vectorise regardless of trapping, and
+untangling how much of the gap is that versus something else is its own
+question this document is not answering today.
+
+### 7.6 What still blocks the rest of `benches/`, updated
+
+`region`/`alloc_slice`/`byte_of`/`Expr::Not` move out of §7.3's table.
+What is left: heap boxing (`box`/`box_slice` — `reduce_*.ls`, `benches/
+layout/*.ls`), bare `Expr::Alloc` (a single-value arena allocation —
+`tests/accept/arena_roundtrip.ls`, not a `benches/` program but this
+backend's own "outside the boundary" fixture now that `alloc_slice`
+lowers), `arg_count` (`benches/game/{binarytrees,fannkuch}.ls`),
+`Type::Float` (`benches/game/spectral.ls`, and now also `fasta.ls`'s
+two `float`-filled `alloc_slice` calls), and `getchar`/`io_read`
+(`benches/game/revcomp.ls`, `fasta.ls`'s own read side has none to
+need it). Heap boxing is the largest remaining pocket by program count;
+`getchar` is the smallest gap still blocking a real target, one read
+primitive rather than a family of builtins.
