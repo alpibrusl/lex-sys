@@ -1510,11 +1510,105 @@ prefix, then the exact-port check) are checked at the crate level, by
 signal, the same way `bind`'s own wrong-port trap already is — Cranelift
 and this backend agree, `SIGILL` every time.
 
-**Still refused: `Ffi`/`extern fn`**, named since §7.19 and now the
-*only* remaining gap. `Net` itself is fully built on `--backend llvm` —
-`listen`, `accept`, `bind` and `connect` all lower — but a program that
-wants to `read`/`write` what it accepted or connected to still needs
-`extern fn` for that, the same way `examples/serve/`/`examples/fetch/`
-do on Cranelift. Closing `Ffi`/`extern fn` is what would let a program
-like `examples/seek/`'s next-door neighbour actually move bytes over a
-socket on this backend, not merely open one.
+**Still refused: `Ffi`/`extern fn`**, named since §7.19. `Net` itself is
+fully built on `--backend llvm` — `listen`, `accept`, `bind` and
+`connect` all lower — but a program that wants to `read`/`write` what it
+accepted or connected to still needs `extern fn` for that, the same way
+`examples/serve/`/`examples/fetch/` do on Cranelift. Closing `Ffi`/
+`extern fn` is what would let a program like `examples/seek/`'s
+next-door neighbour actually move bytes over a socket on this backend,
+not merely open one.
+
+> **Correction.** This section, and this file's module-header summary in
+> `lib.rs`, called `Ffi`/`extern fn` "the only gap left" three times over
+> §7.20–§7.22. That was never measured — `Fs` (`fs_read`/`fs_write`/
+> `open_read`/`file_read`) has been unbuilt on this backend the entire
+> time, and nothing in this document named it, because no slice had
+> tried building a program that used it. §7.23 found this the first time
+> it checked a real `Fs`-using program (`examples/seek/`) against the
+> backend it had just declared complete. Corrected here rather than
+> quietly, the same way §3.3 and §7 corrected an earlier wrong claim in
+> place instead of deleting the sentence that made it.
+
+### 7.23 `Ffi`/`extern fn`, closed — and the correction finding it forced
+
+An import under the symbol the declaration named, mirroring
+`lex-sys-codegen`'s own `Callee::Extern` arm: a capability parameter
+carries no data and never reaches C (`crosses_to_c`, copied over
+unchanged); everything else crosses at lex-sys's own widths — an `int`
+is `i64` here whatever the C function's own parameter width is, the same
+choice `lex-sys-codegen`'s own `emit.rs` makes and `docs/reach.md` §3
+documents. `emit.rs` gained a new pass declaring one `declare` per
+distinct symbol in `program.externs`, deduplicated (`docs/modules.md`
+§3: an `extern fn` name is scoped to its module, but the C symbol is
+not, so two declarations can share one) — computed with the same
+`leaves_of`/`crosses_to_c` pair the call site uses, so the two can never
+disagree. `Type::Unit` (no `-> Type` written) reads as `void`; it is
+otherwise unwritable, so this is the one place it is read rather than
+produced.
+
+**The call site reuses `Callee::Fn`'s own call-and-unpack shape**,
+factored out as `emit_call` once `Callee::Extern` needed the identical
+"`void` to nothing, one leaf to a register, more than one to
+`extractvalue`" logic — a real, if small, simplification found while
+building this slice rather than a plan going in.
+
+**One structural gap surfaced immediately: `scalar_kind`** (§7.17) had
+no arm for `Expr::Call { callee: Callee::Extern(_), .. }`, so a foreign
+call's result could not be told apart from a `float` — needed the
+moment a program built here uses one in an expression rather than only
+as a statement. Closed the same way `Callee::Fn`'s own arm already was:
+the declared return type's leaf, read structurally rather than
+evaluated.
+
+**Checked against `tests/accept/bytes_to_c.ls`, not a fixture written
+for this slice.** It was already checked in — GNU's own `write(fd, ptr,
+len)`, both a string literal and an arena-allocated slice crossing as
+the pointer-and-length pair `docs/strings.md` §6 describes — and its
+existing `//~ STDOUT`/`//~ EXIT` directives are now met on
+`--backend llvm` unchanged. `backends.rs`'s new
+`the_two_backends_agree_on_bytes_to_c` checks both backends against it;
+`crates/lex-sys-codegen-llvm/src/tests.rs`'s new
+`extern_fn_labs_computes_the_real_answer` is the plain-`int` case,
+checked against the real answer (`labs(-5) == 5`) rather than only
+against "it built".
+
+**What checking real programs against this slice actually found: two
+things this document had not named.**
+
+1. **`Fs` is still unbuilt**, per the correction above — found trying
+   `examples/seek/`'s own `read_file` against `--backend llvm` and
+   getting `` `OpenFile { .. }` is not part of the LLVM backend yet ``.
+   The "outside this backend" boundary fixture moves a sixth time, from
+   `tests/accept/bytes_to_c.ls` (now inside) to `tests/accept/
+   file_handle.ls`, refusing on `fs_write`'s own `FileOp` — checked at
+   the crate level and through the CLI, the same two ways every earlier
+   move was.
+2. **A user-declared `extern fn` can collide with this backend's own
+   fixed libc declarations.** `examples/serve/serve.ls` declares
+   `extern fn socket[&f](ffi, domain: int, kind: int, proto: int)`,
+   crossing every `int` at `i64`; `bind` (§7.21) already declared
+   `@socket` unconditionally at libc's own `i32` width, for its own
+   internal use. Two declared signatures, one linker symbol — `clang -c`
+   correctly refuses the module (`invalid redefinition of function
+   'socket'`), a located, non-crashing refusal, not a silently wrong
+   build. **Not a new bug**: `docs/ROADMAP.md`'s own entry for #92
+   already recorded the identical exposure on Cranelift — `close`
+   declared at
+   two different widths by `bind`'s own failure path and by a program's
+   `extern fn close`, "not fixed \[t\]here \[...\] a known exposure
+   shared with `open_read`/`fs_read`/`fs_write` since before `Net`
+   existed." This slice makes the same exposure visible on
+   `--backend llvm` too, for the same reason and left unfixed for the
+   same one: none of `serve.ls`/`fetch.ls`/`report.ls`/`collect.ls`
+   needs a *different* `socket`/`bind`/`connect`/`listen`/`accept`/
+   `setsockopt`/`close` than this backend already declares for `Net`
+   itself, so the fix is narrowing what each program actually asks
+   for, not this backend's declare list — the same shape the Cranelift
+   note already reached for the same reason.
+
+Between the two: `Ffi`/`extern fn` lowers, and `docs/agent-tools.md`'s
+own `examples/seek/` is closer to portable across both backends than it
+was, but `Fs` is what actually stands between it and `--backend llvm`
+today — not `Ffi`, which this document spent three slices calling the
+last gap before checking.

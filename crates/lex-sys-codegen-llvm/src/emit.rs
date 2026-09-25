@@ -49,6 +49,20 @@ pub(crate) const CANONICAL_NAN: i64 = 0x7ff8_0000_0000_0000;
 pub(crate) const TRUNCATE_UPPER_BOUND: &str = "0x43E0000000000000";
 pub(crate) const TRUNCATE_LOWER_BOUND: &str = "0xC3E0000000000000";
 
+/// `docs/reach.md` §3: a capability parameter carries no data at run
+/// time, so it never crosses to C. Mirrors `lex-sys-codegen`'s own
+/// `abi::crosses_to_c` exactly -- the one exception is a `&r [byte]`
+/// reference, which crosses as the pointer-and-length pair every other
+/// slice leaf already is.
+pub(crate) fn crosses_to_c(ty: &Type) -> bool {
+    match ty {
+        Type::Ref { inner, .. } => {
+            matches!(inner.as_ref(), Type::Slice(element) if **element == Type::Byte)
+        }
+        _ => true,
+    }
+}
+
 /// The machine types a leaf may be. `F64` is `docs/floating-point.md`'s
 /// `float` -- binary64, one leaf, exactly like `int` (§7.17).
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -251,6 +265,45 @@ pub(crate) fn emit_module(
     text.push_str("declare i32 @getaddrinfo(ptr, ptr, ptr, ptr)\n");
     text.push_str("declare void @freeaddrinfo(ptr)\n");
     text.push_str("declare i32 @connect(i32, ptr, i32)\n\n");
+
+    // `extern fn` (§7.23, §8.4): an import under the symbol the
+    // declaration named. A capability parameter carries no data and
+    // never reaches C (`crosses_to_c`); everything else crosses at
+    // lex-sys's own widths -- an `int` is `i64` here whatever the C
+    // function's own parameter width is, the same choice
+    // `lex-sys-codegen`'s own `emit.rs` makes and `docs/reach.md` §3
+    // documents. `Type::Unit` (no `-> Type` in the declaration) is
+    // `void`; it is otherwise unwritable, so this is the one place it
+    // is read rather than produced. Declared once per distinct symbol:
+    // two `extern fn` declarations naming the same symbol (in different
+    // modules, `docs/modules.md` §3) would otherwise redeclare it, which
+    // `clang` refuses if the signatures disagree the same way Cranelift's
+    // own `declare_function` already does.
+    let mut declared_symbols = std::collections::BTreeSet::new();
+    for ext in &program.externs {
+        if !declared_symbols.insert(ext.symbol.clone()) {
+            continue;
+        }
+        let mut params = Vec::new();
+        for param in ext.params.iter().filter(|t| crosses_to_c(t)) {
+            for leaf in leaves_of(param, program).map_err(|m| (None, m))? {
+                params.push(leaf.llvm().to_owned());
+            }
+        }
+        let ret_ty = if matches!(ext.ret, Type::Unit) {
+            "void".to_owned()
+        } else {
+            match leaves_of(&ext.ret, program).map_err(|m| (None, m))?.as_slice() {
+                [] => "void".to_owned(),
+                [k] => k.llvm().to_owned(),
+                kinds => struct_ty(kinds),
+            }
+        };
+        text.push_str(&format!("declare {ret_ty} @{}({})\n", ext.symbol, params.join(", ")));
+    }
+    if !program.externs.is_empty() {
+        text.push('\n');
+    }
 
     // `arg_count`/`arg` (§7.13, `docs/arguments.md` §3): `argc`/`argv` as
     // `main` was handed them, stashed once into module-local storage and
