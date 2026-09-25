@@ -123,10 +123,29 @@ pub(crate) fn emit_module(
     text.push_str("declare {i64, i1} @llvm.ssub.with.overflow.i64(i64, i64)\n");
     text.push_str("declare {i64, i1} @llvm.smul.with.overflow.i64(i64, i64)\n\n");
 
+    // Every string literal's bytes (§5's fourth slice) become one global
+    // constant, named as it is met rather than once per unique text --
+    // `docs/strings.md` §8 leaves interning an open question, so two
+    // occurrences of the same literal get two objects here exactly as
+    // `lex-sys-codegen`'s own `literals` counter gives them two. Built up
+    // across every function before any of it is written into `text`,
+    // because a function later in `program.funcs` may be the first one a
+    // reader meets textually if `program.funcs` and source order ever
+    // diverge (`docs/README.md`'s own "definition order never matters").
+    let mut globals = String::new();
+    let mut next_literal: u32 = 0;
+    let mut bodies: Vec<String> = Vec::with_capacity(program.funcs.len());
     for (index, func) in program.funcs.iter().enumerate() {
-        let body = FuncEmitter::new(program, func, triple)
+        let body = FuncEmitter::new(program, func, triple, &mut globals, &mut next_literal)
             .and_then(|mut fe| fe.emit())
             .map_err(|message| (Some(index), message))?;
+        bodies.push(body);
+    }
+    text.push_str(&globals);
+    if !globals.is_empty() {
+        text.push('\n');
+    }
+    for body in bodies {
         text.push_str(&body);
         text.push('\n');
     }
@@ -164,6 +183,14 @@ struct FuncEmitter<'a> {
     /// Per slot, the LLVM type of each of its leaves.
     slot_kinds: Vec<Vec<LKind>>,
     triple: &'a Triple,
+    /// Module-level constant declarations, shared across every function's
+    /// `FuncEmitter` (§5's fourth slice): a string literal's global lives
+    /// here, not in `out`, because a global declaration is not valid
+    /// inside a function body.
+    globals: &'a mut String,
+    /// Shared across every function, so two literals in two different
+    /// functions still get two distinct symbol names.
+    next_literal: &'a mut u32,
     out: String,
     temp: u32,
     /// Numbers each `trap`/`ok` block pair a checked operator opens
@@ -175,7 +202,13 @@ struct FuncEmitter<'a> {
 }
 
 impl<'a> FuncEmitter<'a> {
-    fn new(program: &'a Program, func: &'a Func, triple: &'a Triple) -> Result<Self, String> {
+    fn new(
+        program: &'a Program,
+        func: &'a Func,
+        triple: &'a Triple,
+        globals: &'a mut String,
+        next_literal: &'a mut u32,
+    ) -> Result<Self, String> {
         let slot_kinds =
             func.slots.iter().map(|ty| leaves_of(ty, program)).collect::<Result<Vec<_>, _>>()?;
         Ok(FuncEmitter {
@@ -183,6 +216,8 @@ impl<'a> FuncEmitter<'a> {
             func,
             slot_kinds,
             triple,
+            globals,
+            next_literal,
             out: String::new(),
             temp: 0,
             blocks: 0,
@@ -514,10 +549,17 @@ impl<'a> FuncEmitter<'a> {
                         ));
                     }
                 }
+                Stmt::Store { place: Place::Element { base, index, element }, value } => {
+                    let values = self.expr(value)?;
+                    let addr = self.element_address(base, index, element)?;
+                    let kinds = leaves_of(element, self.program)?;
+                    self.store_leaves(&addr, &kinds, &values);
+                }
                 Stmt::Store { .. } => {
                     return Err(
-                        "only a whole local is an assignable place in the LLVM backend's first \
-                         slice (docs/llvm-backend.md §5)"
+                        "a `Field`/`Deref` place is not part of the LLVM backend yet -- both \
+                         need the struct/box layout this backend does not lower \
+                         (docs/llvm-backend.md §5)"
                             .to_owned(),
                     );
                 }
@@ -757,10 +799,103 @@ impl<'a> FuncEmitter<'a> {
             }
             Expr::Call { callee, args } => self.call(callee, args),
             Expr::Bin { op, lhs, rhs } => self.binop(*op, lhs, rhs),
+            Expr::Bytes(text) => Ok(self.bytes_lit(text)),
+            // The length is the slice's second leaf -- already there,
+            // never computed, exactly as `lex-sys-codegen`'s own
+            // `Expr::Len` arm reads it.
+            Expr::Len(slice) => {
+                let mut values = self.expr(slice)?;
+                if values.len() != 2 {
+                    return Err(
+                        "`len`'s argument is not a slice (expected 2 leaves: pointer and length)"
+                            .to_owned(),
+                    );
+                }
+                Ok(vec![values.remove(1)])
+            }
+            Expr::Index { base, index, element } => {
+                let addr = self.element_address(base, index, element)?;
+                let kinds = leaves_of(element, self.program)?;
+                Ok(self.load_leaves(&addr, &kinds))
+            }
             other => Err(format!(
-                "`{other:?}` is not part of the LLVM backend's first slice (docs/llvm-backend.md §5)"
+                "`{other:?}` is not part of the LLVM backend yet (docs/llvm-backend.md §5)"
             )),
         }
+    }
+
+    /// A string literal's bytes (§5's fourth slice): one read-only global
+    /// per occurrence, and no instruction needed to get its address --
+    /// unlike Cranelift's `global_value`, an LLVM global symbol is
+    /// already a usable `ptr` constant wherever one is expected. Written
+    /// as a plain integer-array constant (`[i8 72, i8 105, ...]`) rather
+    /// than the `c"..."` shorthand, which needs its own escaping rules
+    /// this backend has no reason to also get right.
+    fn bytes_lit(&mut self, text: &str) -> Vec<LValue> {
+        let bytes = text.as_bytes();
+        let name = format!("@str.{}", *self.next_literal);
+        *self.next_literal += 1;
+        let body = if bytes.is_empty() {
+            "zeroinitializer".to_owned()
+        } else {
+            let items: Vec<String> = bytes.iter().map(|b| format!("i8 {b}")).collect();
+            format!("[{}]", items.join(", "))
+        };
+        self.globals.push_str(&format!(
+            "{name} = private unnamed_addr constant [{} x i8] {body}\n",
+            bytes.len()
+        ));
+        vec![LValue::Reg(name), LValue::Const(bytes.len() as i64)]
+    }
+
+    /// The distance between elements of a `[T]`, matching
+    /// `lex-sys-codegen`'s own `abi::stride_of`: a byte is the one size
+    /// in the language not a multiple of 8 (`docs/strings.md` §3), so
+    /// that a string is something C could read.
+    fn stride_of(&self, element: &Type) -> Result<i64, String> {
+        if matches!(element, Type::Byte) {
+            Ok(1)
+        } else {
+            Ok(leaves_of(element, self.program)?.len() as i64 * 8)
+        }
+    }
+
+    /// `s[i]` -- bounds-checked (`docs/defined-behaviour.md` §1), the
+    /// address a read or a write both start from. `uge` catches a
+    /// negative index the same way it already catches an out-of-range
+    /// shift amount: reinterpreted as unsigned, a negative `i64` is far
+    /// past any real length. The index-times-stride multiply is this
+    /// backend's own address arithmetic, not user-level `*`, so it is
+    /// plain `mul`, not `checked_arith`'s overflow-checked one -- the
+    /// same distinction `lex-sys-codegen`'s address arithmetic draws.
+    fn element_address(
+        &mut self,
+        base: &Expr,
+        index: &Expr,
+        element: &Type,
+    ) -> Result<String, String> {
+        let values = self.expr(base)?;
+        if values.len() != 2 {
+            return Err("indexing needs a slice (expected 2 leaves: pointer and length)".to_owned());
+        }
+        let (ptr, len) = (values[0].clone(), values[1].clone());
+        let idx = self.scalar(index)?;
+        let out_of_range = self.fresh();
+        self.out.push_str(&format!(
+            "  {out_of_range} = icmp uge i64 {}, {}\n",
+            operand(&idx),
+            operand(&len)
+        ));
+        self.trap_if(&out_of_range)?;
+        let stride = self.stride_of(element)?;
+        let offset = self.fresh();
+        self.out.push_str(&format!("  {offset} = mul i64 {}, {stride}\n", operand(&idx)));
+        let addr = self.fresh();
+        self.out.push_str(&format!(
+            "  {addr} = getelementptr i8, ptr {}, i64 {offset}\n",
+            operand(&ptr)
+        ));
+        Ok(addr)
     }
 
     fn call(&mut self, callee: &Callee, args: &[Expr]) -> Result<Vec<LValue>, String> {
@@ -784,6 +919,19 @@ impl<'a> FuncEmitter<'a> {
                 self.out.push_str(&format!("  {result} = call i32 @putchar(i32 {narrowed})\n"));
                 let widened = self.fresh();
                 self.out.push_str(&format!("  {widened} = sext i32 {result} to i64\n"));
+                Ok(vec![LValue::Reg(widened)])
+            }
+            // `int_of(b: byte) -> int` widens, always defined: every
+            // `byte` is 0..255, so zero-extension is exact -- the direct
+            // counterpart of `lex-sys-codegen`'s `uextend`.
+            Callee::Builtin(Builtin::IntOf) => {
+                let byte = evaluated
+                    .into_iter()
+                    .flatten()
+                    .next()
+                    .ok_or_else(|| "`int_of` needs a byte argument".to_owned())?;
+                let widened = self.fresh();
+                self.out.push_str(&format!("  {widened} = zext i8 {} to i64\n", operand(&byte)));
                 Ok(vec![LValue::Reg(widened)])
             }
             Callee::Fn(id) => {
