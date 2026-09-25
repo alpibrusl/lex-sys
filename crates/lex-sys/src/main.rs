@@ -28,9 +28,9 @@ const USAGE: &str = "\
 lex-sys — the bootstrap compiler for the lex-sys systems dialect
 
 usage:
-    lex-sys build <file.ls>... [-o <output>] [--emit exe|obj] [--std]
-    lex-sys check <file.ls>... [--std] [--output json]
-    lex-sys run   <file.ls>... [--std]
+    lex-sys build <file.ls>... [-o <output>] [--emit exe|obj] [--std] [--backend cranelift|llvm]
+    lex-sys check <file.ls>... [--std] [--output json] [--backend cranelift|llvm]
+    lex-sys run   <file.ls>... [--std] [--backend cranelift|llvm]
     lex-sys ids   <file.ls>... [--std]
     lex-sys authority <file.ls>... [--std] [--output json]
     lex-sys layout    <file.ls>... [--std]
@@ -43,6 +43,12 @@ options:
     --emit exe|obj  emit a linked executable (default) or a bare object file
     --std           make the standard library's source available
     --output json   `check` and `authority` as data rather than prose
+    --backend cranelift|llvm
+                    which backend generates code (default: cranelift). `llvm`
+                    is `lex-sys-codegen-llvm`'s first slice
+                    (docs/llvm-backend.md §5): opt-in, and it refuses -- with
+                    an ordinary located error, not a crash -- any program
+                    outside that slice. `cranelift` is unaffected either way.
 
 A program is the set of files named on the command line, in any order.
 Each file is in a module -- the root, unless it says `module a.b;` -- and
@@ -118,6 +124,15 @@ enum Emit {
     Obj,
 }
 
+/// Which backend generates code (`docs/llvm-backend.md` §4: purely
+/// additive, so `Cranelift` is every existing invocation's behaviour
+/// unchanged).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Backend {
+    Cranelift,
+    Llvm,
+}
+
 fn run(args: &[String]) -> Result<ExitCode, Failure> {
     let Some(command) = args.first() else {
         return Err(usage("no command given"));
@@ -137,8 +152,8 @@ fn run(args: &[String]) -> Result<ExitCode, Failure> {
             Ok(ExitCode::SUCCESS)
         }
         "check" => {
-            let Invocation { inputs, with_std, json, .. } = parse_args(&args[1..], false)?;
-            check_program(&inputs, with_std, json)
+            let Invocation { inputs, with_std, json, backend, .. } = parse_args(&args[1..], false)?;
+            check_program(&inputs, with_std, json, backend)
         }
         // The one command that reads no program: it is a contract with
         // whoever is about to write one.
@@ -185,19 +200,20 @@ fn run(args: &[String]) -> Result<ExitCode, Failure> {
             Ok(ExitCode::SUCCESS)
         }
         "build" => {
-            let Invocation { inputs, output, emit, with_std, .. } = parse_args(&args[1..], true)?;
+            let Invocation { inputs, output, emit, with_std, backend, .. } =
+                parse_args(&args[1..], true)?;
             let output = output.unwrap_or_else(|| default_output(&inputs[0], emit));
-            build(&inputs, &output, emit, with_std)?;
+            build(&inputs, &output, emit, with_std, backend)?;
             Ok(ExitCode::SUCCESS)
         }
         "run" => {
-            let Invocation { inputs, with_std, .. } = parse_args(&args[1..], false)?;
+            let Invocation { inputs, with_std, backend, .. } = parse_args(&args[1..], false)?;
             let dir = std::env::temp_dir().join(format!("lex-sys-run-{}", std::process::id()));
             std::fs::create_dir_all(&dir)
                 .map_err(|e| environment(format!("cannot create `{}`: {e}", dir.display())))?;
             let exe =
                 dir.join(default_output(&inputs[0], Emit::Exe).file_name().unwrap_or_default());
-            let result = build(&inputs, &exe, Emit::Exe, with_std).and_then(|()| {
+            let result = build(&inputs, &exe, Emit::Exe, with_std, backend).and_then(|()| {
                 Command::new(&exe)
                     .status()
                     .map_err(|e| environment(format!("cannot run `{}`: {e}", exe.display())))
@@ -258,6 +274,8 @@ struct Invocation {
     /// `--output json` (`docs/authority.md` §3): the report as data rather
     /// than as prose, for a consumer that checks it against a grant.
     json: bool,
+    /// `--backend` (`docs/llvm-backend.md` §4).
+    backend: Backend,
 }
 
 fn parse_args(args: &[String], allow_output: bool) -> Result<Invocation, Failure> {
@@ -266,6 +284,7 @@ fn parse_args(args: &[String], allow_output: bool) -> Result<Invocation, Failure
     let mut emit = Emit::Exe;
     let mut with_std = false;
     let mut json = false;
+    let mut backend = Backend::Cranelift;
     let mut it = args.iter();
 
     while let Some(arg) = it.next() {
@@ -292,6 +311,14 @@ fn parse_args(args: &[String], allow_output: bool) -> Result<Invocation, Failure
                 Some(other) => return Err(usage(format!("unknown output form `{other}`"))),
                 None => return Err(usage("`--output` needs a form")),
             },
+            "--backend" => {
+                backend = match it.next().map(String::as_str) {
+                    Some("cranelift") => Backend::Cranelift,
+                    Some("llvm") => Backend::Llvm,
+                    Some(other) => return Err(usage(format!("unknown backend `{other}`"))),
+                    None => return Err(usage("`--backend` needs a name")),
+                };
+            }
             other if other.starts_with('-') => {
                 return Err(usage(format!("unknown option `{other}`")));
             }
@@ -304,7 +331,7 @@ fn parse_args(args: &[String], allow_output: bool) -> Result<Invocation, Failure
     if inputs.is_empty() {
         return Err(usage("no input file given"));
     }
-    Ok(Invocation { inputs, output, emit, with_std, json })
+    Ok(Invocation { inputs, output, emit, with_std, json, backend })
 }
 
 fn default_output(input: &Path, emit: Emit) -> PathBuf {
@@ -403,13 +430,18 @@ fn compile_to_ir(inputs: &[PathBuf], with_std: bool) -> Result<lex_sys_ir::Progr
 /// Either way the exit status is the same: **1** for a refused program.
 /// A machine-readable body does not change what happened, and this
 /// repository already has semantic exit codes.
-fn check_program(inputs: &[PathBuf], with_std: bool, json: bool) -> Result<ExitCode, Failure> {
+fn check_program(
+    inputs: &[PathBuf],
+    with_std: bool,
+    json: bool,
+    backend_kind: Backend,
+) -> Result<ExitCode, Failure> {
     // `docs/internal-errors.md` §3: the backend runs here too, and its
     // object is thrown away, so a program `check` accepts is a program
     // `build` can generate code for. Before, `check` stopped after
     // lowering and answered an empty list for a program `build` refused.
     let refusals = match compile_reporting(inputs, with_std) {
-        Ok((program, _)) => match backend(&program, inputs) {
+        Ok((program, _)) => match backend(&program, inputs, backend_kind) {
             Ok(_) => Vec::new(),
             Err(refusals) => refusals,
         },
@@ -583,10 +615,24 @@ fn compile_reporting(
 /// the backend is caught per function by `lex-sys-codegen`; the default
 /// hook, which would print Rust's "thread 'main' panicked at", is
 /// silenced for the duration and put back.
-fn backend(program: &lex_sys_ir::Program, inputs: &[PathBuf]) -> Result<Vec<u8>, Vec<Refusal>> {
+///
+/// `docs/llvm-backend.md` §4: `--backend` is purely additive, so
+/// `Backend::Cranelift` is this function's old, only behaviour, unchanged.
+/// `Backend::Llvm` never panics by design (`lex-sys-codegen-llvm` returns
+/// `CodegenError` for everything its first slice does not lower), but the
+/// same catch applies to it too: a bug there should read as `internal`,
+/// not as a crash, exactly like a bug in `lex-sys-codegen` does.
+fn backend(
+    program: &lex_sys_ir::Program,
+    inputs: &[PathBuf],
+    backend_kind: Backend,
+) -> Result<Vec<u8>, Vec<Refusal>> {
     let hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {}));
-    let result = lex_sys_codegen::compile_object(program, "main");
+    let result = match backend_kind {
+        Backend::Cranelift => lex_sys_codegen::compile_object(program, "main"),
+        Backend::Llvm => lex_sys_codegen_llvm::compile_object(program, "main"),
+    };
     std::panic::set_hook(hook);
     result.map_err(|e| vec![internal_refusal(program, &e, inputs)])
 }
@@ -971,12 +1017,18 @@ fn print_ids(inputs: &[PathBuf], with_std: bool) -> Result<(), Failure> {
     }
 }
 
-fn build(inputs: &[PathBuf], output: &Path, emit: Emit, with_std: bool) -> Result<(), Failure> {
+fn build(
+    inputs: &[PathBuf],
+    output: &Path,
+    emit: Emit,
+    with_std: bool,
+    backend_kind: Backend,
+) -> Result<(), Failure> {
     let program = compile_to_ir(inputs, with_std)?;
     // A backend failure is a refusal with rule `internal`, exit 1, located
     // at the function (`docs/internal-errors.md` §2) -- no longer exit 3,
     // which says the *environment* failed.
-    let object = backend(&program, inputs).map_err(|refusals| {
+    let object = backend(&program, inputs, backend_kind).map_err(|refusals| {
         let text: Vec<String> = match parse_program(inputs, with_std) {
             Ok((_, map)) => refusals.iter().map(|r| r.render(&map)).collect(),
             Err(_) => refusals.iter().map(|r| r.message.clone()).collect(),
@@ -1038,8 +1090,8 @@ mod tests {
 
     fn refusal_for(body: lex_sys_ir::Stmt) -> (Refusal, lex_sys_syntax::Span) {
         let (program, span) = broken(body);
-        let mut refusals =
-            backend(&program, &[PathBuf::from("seven.ls")]).expect_err("the backend should refuse");
+        let mut refusals = backend(&program, &[PathBuf::from("seven.ls")], Backend::Cranelift)
+            .expect_err("the backend should refuse");
         assert_eq!(refusals.len(), 1, "code generation stops at the first failure");
         (refusals.remove(0), span)
     }

@@ -325,6 +325,7 @@ name = "lex-sys"
 version = "0.0.0"
 dependencies = [
  "lex-sys-codegen",
+ "lex-sys-codegen-llvm",
  "lex-sys-id",
  "lex-sys-ir",
  "lex-sys-syntax",
@@ -344,6 +345,17 @@ dependencies = [
  "lex-sys-syntax",
  "lex-sys-types",
  "object",
+ "target-lexicon",
+]
+
+[[package]]
+name = "lex-sys-codegen-llvm"
+version = "0.0.0"
+dependencies = [
+ "lex-sys-codegen",
+ "lex-sys-ir",
+ "lex-sys-syntax",
+ "lex-sys-types",
  "target-lexicon",
 ]
 

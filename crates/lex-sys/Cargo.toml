@@ -17,3 +17,4 @@ lex-sys-ir.workspace = true
 lex-sys-types.workspace = true
 lex-sys-id.workspace = true
 lex-sys-codegen.workspace = true
+lex-sys-codegen-llvm.workspace = true

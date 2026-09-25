@@ -1,6 +1,11 @@
 # A second backend, and how it would actually get built
 
-> **Status: settled, not built.**
+> **Status: first slice built** (§5, `lex-sys-codegen-llvm`, `--backend
+> llvm`). §5 originally named `examples/hello.ls` as this slice's target;
+> building it found that claim false, corrected in place below — `hello.ls`
+> needs checked arithmetic, bounds-checked indexing and string-literal
+> data, none of which this slice lowers. `tests/accept/llvm_smoke.ls` is
+> what the original bullet list actually describes, and is what got built.
 >
 > `backend-limits.md` made the case: three separate performance
 > arguments — `aliasing.md`'s unspent uniqueness fact, `purity.md`'s
@@ -221,6 +226,13 @@ relies on: *"the backend receives IR that cannot fail."* Internally it
 builds a `.ll` string and shells out to `clang -c` (§3.1), the way
 `link` already shells out to `cc` (§2).
 
+Built as such: `CodegenError` itself is not duplicated, only reused —
+`lex-sys-codegen-llvm` depends on `lex-sys-codegen` for that one type
+(`{ function: Option<usize>, message: String }`, already backend-agnostic)
+so the CLI's `internal_refusal` needed no change to accept either
+backend's failures. Everything else stays as sibling as the plan said:
+no Cranelift type, and no Cranelift call, crosses the boundary.
+
 The CLI grows one flag, `--backend cranelift|llvm`, defaulting to
 `cranelift` — so this is purely additive. This is not an edition:
 nothing about the *language* changes, only which tool compiles it. But
@@ -244,13 +256,37 @@ Matching `connect.md` §9's own precedent — `Net` turned out to be
 bigger than one slice too, and was "agreed as three slices once that
 came into view" rather than forced into one PR:
 
-**First slice: the doorway and the smallest possible program.**
-`lex-sys-codegen-llvm` exists, takes `--backend llvm`, and
-`examples/hello.ls` — the exact program `ci.yml`'s smoke test already
-builds — produces identical stdout through it. This needs: function
-declarations and calls, `int`/`Io`/capability erasure (already erased
-by the time IR reaches a backend, so this should cost nothing extra),
-`putchar`, and process exit. No arithmetic, no traps, no structs.
+**First slice: the doorway and the smallest possible program — built.**
+`lex-sys-codegen-llvm` exists, takes `--backend llvm`, and builds and
+runs a program needing exactly: function declarations and calls,
+`World`/capability erasure (every capability is a zero-field struct, so
+it scalarises to no leaves at all — confirmed rather than assumed, since
+`lex-sys-codegen`'s own `abi::leaves_into` has no special case for `Io`,
+`Ffi`, `Fs`, `Heap` or `Args`; they fall through to the same struct rule
+`Split` does, five zero-leaf fields making a zero-leaf whole), `putchar`,
+and process exit. No arithmetic, no traps, no structs with real fields.
+
+**This corrects the row above: that program is not `examples/hello.ls`.**
+`ci.yml`'s smoke test was assumed to be the smallest one, unchecked
+against what `strings.md` had since added to it. It is not — `write_all`'s
+`n = n + 1` and `n < len(s)` are checked arithmetic and a comparison,
+`s[n]` is bounds-checked indexing, and `"Hello, world!\n"` is a
+string-literal data object, and this slice lowers none of them.
+`tests/accept/llvm_smoke.ls` is the program this bullet list actually
+describes — two functions, one call between them, four `putchar`s, no
+operator anywhere — and it is what `lex-sys-codegen-llvm`'s own test
+builds and runs, checked byte-for-byte against the Cranelift path's
+output for the same file (`crates/lex-sys/tests/conformance/backends.rs`).
+`hello.ls` moves to the second slice below, where checked arithmetic
+lands, and needs bounds-checked indexing and string data besides —
+closer to a third and fourth slice than a continuation of this one.
+
+Every node this slice does not lower is refused with a located
+`CodegenError`, never a panic (`docs/internal-errors.md`): unlike
+`lex-sys-codegen`'s `unreachable!`s, which state an invariant the checker
+already guarantees, a gap here is an ordinary limit of an opt-in,
+unfinished backend, and `--backend cranelift` is unaffected either way
+(`--backend` is purely additive, defaulting to `cranelift`).
 
 **Second slice: checked arithmetic, on both targets.** Every `BinOp`
 that can trap (`Add`, `Sub`, `Mul`, `Div`, `Rem`, `Shl`, `Shr`), checked
@@ -289,7 +325,7 @@ an incomplete backend would be exactly the kind of claim
 
 | Question | Why it waits |
 |---|---|
-| The exact `ud2`/`udf` spelling and signal on linux-x86_64 | §3.2's fix is verified on darwin-aarch64 only — no x86-64 host in this session. First slice's CI, on real hardware, is the check |
-| Which `clang`/LLVM IR version to target | Textual IR has version-dependent syntax; pinning to whatever `ci.yml`'s two runners ship, rather than a specific LLVM release, is the plan until a real incompatibility forces a choice |
+| ~~The exact `ud2`/`udf` spelling and signal on linux-x86_64~~ | **Measured, this slice's session, on a real linux-x86_64 host**: `call void asm sideeffect "ud2", ""()` assembles to the same two bytes (`0f 0b`) Cranelift's own `ud2` does, and the linked binary exits 132 — `SIGILL` — every time, matching §3.2's aarch64 finding exactly (no `SIGTRAP` substitution, no divergence). One more thing confirmed alongside it: passing `clang -target <triple>` with the same spelling the `.ll` module's own `target triple` line carries silences the `overriding the module target triple` warning §3.1 first saw on darwin — `compile_object_for` always does this, so a program built through this crate never sees it. `aarch64`'s `udf #0xc11f` half of §3.2's fix is still unverified — no aarch64 host in this slice's session either — but this row is otherwise closed |
+| Which `clang`/LLVM IR version to target | Textual IR has version-dependent syntax; pinning to whatever `ci.yml`'s two runners ship, rather than a specific LLVM release, is the plan until a real incompatibility forces a choice. This slice's session measured against `clang` 18 on linux-x86_64 only |
 | Optimisation level and its effect on trap codegen | `clang -O2` might fold or reorder a checked operation in a way `-O0` would not; `check-cost.md` and `poison.md`'s Cranelift findings do not transfer automatically, and this needs its own measurement once arithmetic lowering exists (§5's second slice) |
 | Whether `noalias`/purity attributes get emitted at all | `backend-limits.md` §4's ceiling question — real, and not this document's to answer before the backend can run anything |
