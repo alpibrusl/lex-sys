@@ -1468,3 +1468,53 @@ test here already follows — Cranelift and this backend agree,
 `bind` needed; `Ffi`/`extern fn` remains the boundary named since
 §7.19. Both are what stand between this backend and a program that
 reads or writes what it accepts, not only accepts it.
+
+### 7.22 `connect`, closed — the last of `Net`'s four builtins
+
+Genuinely the larger of the two remaining pieces, as §7.21 predicted:
+`checked_host` (mirroring `lex-sys-codegen`'s own function of the same
+name) is a loop, not a straight-line byte-store sequence — copying the
+dialled name into a 256-byte stack buffer while checking, byte by byte,
+that the prefix inside the capability's bound matches, and NUL-
+terminating the result for `getaddrinfo`. Built the same "no `phi`" way
+every loop in this backend already is: a cursor in an `alloca i64` cell,
+advanced and reloaded each iteration, rather than a block parameter —
+`body/memory.rs`'s own arena-fill loop is the precedent, not a new one.
+
+`connect` itself reuses `checked_host`, then builds a `struct addrinfo
+hints` (IPv4, TCP, everything else zeroed) on the stack, calls
+`getaddrinfo`, patches the resolved `sockaddr`'s port bytes the same
+big-endian way `bind` already does, and calls `socket`/`connect`. Three
+independent failure points — resolution, `socket`, `connect` itself —
+none of which trap, so `bind`'s own "one `alloca i64` result cell,
+written in every branch, loaded once at the merge label" shape carries
+over unchanged, now with three failure paths funnelling into it instead
+of two. `store_field`/`load_field` are `store_byte`'s general form,
+needed once a struct has `i32` and `ptr` fields alongside `i8`s.
+`emit.rs` gained three more unconditional `declare`s: `getaddrinfo`,
+`freeaddrinfo`, `connect`.
+
+**Checked against a real accepted connection, both directions.**
+`crates/lex-sys/tests/conformance/backends.rs`'s
+`the_two_backends_connect_to_a_real_listener`: for each backend, build a
+client that `connect`s to a plain `std::net::TcpListener` (standing in
+for the peer, since `connect` does not care what accepted it) and check
+both the client's exit code and that the accept actually completed —
+isolating the half `connect` adds over `bind`, not re-checking `bind`'s
+own machinery. Manually, this slice's own session also built an
+all-LLVM pair — a `bind`/`listen`/`accept` listener and a `connect`
+client, both `--backend llvm`, talking over real loopback — the first
+time two programs built by this backend have ever talked to each other.
+The two bound-mismatch traps (`docs/connect.md` §10.1: host outside the
+prefix, then the exact-port check) are checked at the crate level, by
+signal, the same way `bind`'s own wrong-port trap already is — Cranelift
+and this backend agree, `SIGILL` every time.
+
+**Still refused: `Ffi`/`extern fn`**, named since §7.19 and now the
+*only* remaining gap. `Net` itself is fully built on `--backend llvm` —
+`listen`, `accept`, `bind` and `connect` all lower — but a program that
+wants to `read`/`write` what it accepted or connected to still needs
+`extern fn` for that, the same way `examples/serve/`/`examples/fetch/`
+do on Cranelift. Closing `Ffi`/`extern fn` is what would let a program
+like `examples/seek/`'s next-door neighbour actually move bytes over a
+socket on this backend, not merely open one.

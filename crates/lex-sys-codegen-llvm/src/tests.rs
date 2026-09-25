@@ -626,3 +626,68 @@ fn main(world: World) -> [] int {
          Cranelift's own signal (docs/llvm-backend.md §3.2)"
     );
 }
+
+/// `docs/llvm-backend.md` §7.22: `connect`, closed -- the last of `Net`'s
+/// four builtins. `docs/connect.md` §10.1: the *host* half of the bound
+/// is checked before `getaddrinfo` ever runs, the outbound mirror of
+/// `bind`'s own port check above.
+#[test]
+fn connecting_outside_the_granted_host_traps_with_sigill() {
+    let source = "\
+edition 2;
+
+fn main(world: World) -> [] int {
+    let Split { io, ffi, fs, heap, args, net } = split(world);
+    release(args); release(heap); release(ffi); release(fs); release(io);
+
+    var fd = 0;
+    let bound = narrow(net, \"127.0.0.1:1\");
+    borrow bound as &n in {
+        fd = connect(n, \"10.0.0.1\", 1);
+    }
+    release(bound);
+    return fd;
+}
+";
+    let object = compiled(source, "main");
+    let output = run(&object, "connect-outside-host");
+    assert_eq!(output.status.code(), None, "a host outside the bound should not exit normally");
+    assert_eq!(
+        output.status.signal(),
+        Some(4),
+        "connecting to a host outside the capability's bound should trap with SIGILL, matching \
+         Cranelift's own signal (docs/llvm-backend.md §3.2)"
+    );
+}
+
+/// §10.1's other half: the bound's port is checked exactly, not as a
+/// prefix, the outbound mirror of `binding_the_wrong_port_traps_with_
+/// sigill` above.
+#[test]
+fn connecting_to_the_wrong_port_traps_with_sigill() {
+    let source = "\
+edition 2;
+
+fn main(world: World) -> [] int {
+    let Split { io, ffi, fs, heap, args, net } = split(world);
+    release(args); release(heap); release(ffi); release(fs); release(io);
+
+    var fd = 0;
+    let bound = narrow(net, \"127.0.0.1:1\");
+    borrow bound as &n in {
+        fd = connect(n, \"127.0.0.1\", 2);
+    }
+    release(bound);
+    return fd;
+}
+";
+    let object = compiled(source, "main");
+    let output = run(&object, "connect-wrong-port");
+    assert_eq!(output.status.code(), None, "a port outside the bound should not exit normally");
+    assert_eq!(
+        output.status.signal(),
+        Some(4),
+        "connecting to a port outside the capability's bound should trap with SIGILL, matching \
+         Cranelift's own signal (docs/llvm-backend.md §3.2)"
+    );
+}

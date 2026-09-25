@@ -128,14 +128,34 @@
 //! process, and checks both exit `0` -- the first Net-capable program
 //! this backend has ever actually run, not a bad-fd stand-in.
 //!
-//! Still refused: `Ffi`/`extern fn`; `Net`'s `connect`
-//! (`Expr::Connect`, needing `getaddrinfo`-based host resolution,
-//! genuinely larger than `bind`); and every other `Builtin` beyond
-//! `PutChar`/`GetChar`/`ArgCount`/`Arg`/`Split`/`Release`/`Narrow`/
-//! `IntOf`/`ByteOf`/`WrappingAdd`/`WrappingSub`/`WrappingMul`/`Write`/
+//! §7.22 closed `connect`, the last of `Net`'s four builtins -- genuinely
+//! the larger remaining piece, as §7.21 predicted. `checked_host`
+//! (mirroring `lex-sys-codegen`'s own function) is this backend's first
+//! *loop* built for `Net`: copy the dialled name into a 256-byte stack
+//! buffer while checking, byte by byte, that the prefix inside the
+//! capability's bound matches, in the same "cursor in an `alloca i64`
+//! cell, no `phi`" shape `body/memory.rs`'s arena-fill loop already
+//! established. `connect` then builds a `struct addrinfo hints`,
+//! resolves with `getaddrinfo`, patches the port the same big-endian way
+//! `bind` does, and calls `socket`/`connect` -- three failure points
+//! rather than `bind`'s two, funnelled into the same one-result-cell
+//! shape. This slice's own session built an all-LLVM pair -- a listener
+//! and a client, both `--backend llvm` -- talking over real loopback,
+//! the first time two programs this backend built have ever talked to
+//! each other; `backends.rs`'s `the_two_backends_connect_to_a_real_
+//! listener` checks the same claim against a plain
+//! `std::net::TcpListener` peer.
+//!
+//! `Net` is now fully built on `--backend llvm`: `listen`, `accept`,
+//! `bind` and `connect` all lower. Still refused: `Ffi`/`extern fn`,
+//! named since §7.19 and now the *only* remaining gap -- what a program
+//! needs to read or write what it accepted or connected to, not merely
+//! open the socket. And every other `Builtin` beyond `PutChar`/
+//! `GetChar`/`ArgCount`/`Arg`/`Split`/`Release`/`Narrow`/`IntOf`/
+//! `ByteOf`/`WrappingAdd`/`WrappingSub`/`WrappingMul`/`Write`/
 //! `WriteErr`/`FloatOf`/`Truncate`/`BitsOf`/`IsNan`/`Sqrt`/`Listen`/
-//! `Accept` -- none with a `benches/` program or `tests/accept/`
-//! fixture asking for it yet.
+//! `Accept`/`Connect`/`Bind` -- none with a `benches/` program or
+//! `tests/accept/` fixture asking for it yet.
 //!
 //! This backend is intentionally partial. Everything it does not yet lower
 //! is refused with a [`CodegenError`], never a panic: unlike
