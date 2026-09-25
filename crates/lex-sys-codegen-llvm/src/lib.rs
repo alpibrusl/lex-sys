@@ -68,6 +68,15 @@ pub fn compile_object_for(
 /// differential suite makes) must not collide on one temporary file.
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
+/// `-O2`, always: `mem2reg` -- the pass every leaf's `alloca` (`emit.rs`'s
+/// own header) depends on to reach a register at all -- is **not** run at
+/// `clang`'s default `-O0`. `docs/llvm-backend.md` §5 called it "mandatory,"
+/// which was true of the *design* (`clang` needs no help from this crate to
+/// promote memory to SSA) but false of the *invocation* this function used
+/// to make: measured without `-O2`, `sum_checked.ls`'s loop compiles to nine
+/// stack loads and stores per iteration, all of them live past `-O0`. `-O2`
+/// is not an enhancement bolted on after the fact; it is what makes the
+/// header's own claim true (`docs/llvm-backend.md` §7 corrects it in place).
 fn run_clang(module: &str, triple: &Triple) -> Result<Vec<u8>, CodegenError> {
     let id = COUNTER.fetch_add(1, Ordering::Relaxed);
     let dir = std::env::temp_dir();
@@ -84,6 +93,7 @@ fn run_clang(module: &str, triple: &Triple) -> Result<Vec<u8>, CodegenError> {
         let cc = std::env::var("CLANG").unwrap_or_else(|_| "clang".to_owned());
         let status = Command::new(&cc)
             .arg("-c")
+            .arg("-O2")
             .arg("-target")
             .arg(triple.to_string())
             .arg(&ll_path)

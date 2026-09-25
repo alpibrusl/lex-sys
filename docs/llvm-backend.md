@@ -46,6 +46,15 @@
 > obvious way to emit lex-sys's overflow trap in LLVM IR produces the
 > **wrong signal**, silently, on one of the two targets this project
 > ships.
+>
+> §7 is a third thing, found later: `run_clang` never passed `clang` an
+> optimisation level, so the `mem2reg` promotion §5's third slice called
+> "mandatory" never actually ran — every leaf stayed a real stack slot,
+> and the backend was measurably *slower* than Cranelift on every kernel
+> that builds on both. Fixed by always passing `-O2`; measured again
+> after, the same three kernels are **8%–54% faster** than Cranelift, not
+> slower, and the seven trap-signal tests still pass unchanged — a
+> genuinely false claim, corrected in place rather than left standing.
 
 ---
 
@@ -371,7 +380,10 @@ operators, `And`/`Or`, which `ir.rs`'s own comment already said belonged
 here rather than in `binop`'s instruction table. The `phi` node §5's own
 text once assumed a real `if` would need never got written: every local
 in this backend is already an `alloca` (§5's first-slice design, chosen
-so `clang`'s `mem2reg` does the SSA work this crate does not), so the
+so `clang`'s `mem2reg` does the SSA work this crate does not — **at
+`-O1` or above**; §7 found and fixed the session where this crate was
+still invoking `clang` at its default `-O0`, where `mem2reg` does not
+run at all), so the
 block after an `if` simply `load`s whatever the taken arm last `store`d,
 and a `while`'s loop header is re-entered by its back edge the same way
 — fresh loads each time, no value carried in a register across the
@@ -506,14 +518,13 @@ claiming to have scoped — `ir.rs` has 34 builtins and lists them so the
 next slice can pick a subset by reading them rather than guessing at the
 size of what is left (`crates/lex-sys-ir/src/builtin.rs`).
 
-**Explicitly not this document's to answer: is it faster.**
-`backend-limits.md` §4 already warned against overclaiming what LLVM's
-vocabulary buys — the ceiling is lower than the sum of the three
-numbers, because `check-cost.md` and `poison.md` already found real
-limits on what a vectoriser rescues. Measuring the actual ratio against
-Cranelift wants a backend that is *correct* first; a speed number from
-an incomplete backend would be exactly the kind of claim
-`benchmarks-game.md` §2.1 was corrected for making before it measured.
+**Partially answered, later, in §7: is it faster.** This section still
+holds as written for the session that wrote it — five slices in, nothing
+here had measured a ratio, and `backend-limits.md` §4's warning against
+overclaiming what LLVM's vocabulary buys stands regardless of the
+number. §7 is where a first, narrow measurement was actually taken, once
+three real kernels built on both backends, and it found a bug in this
+crate before it found a ratio worth reporting.
 
 ---
 
@@ -523,5 +534,151 @@ an incomplete backend would be exactly the kind of claim
 |---|---|
 | ~~The exact `ud2`/`udf` spelling and signal on linux-x86_64~~ | **Measured, this slice's session, on a real linux-x86_64 host**: `call void asm sideeffect "ud2", ""()` assembles to the same two bytes (`0f 0b`) Cranelift's own `ud2` does, and the linked binary exits 132 — `SIGILL` — every time, matching §3.2's aarch64 finding exactly (no `SIGTRAP` substitution, no divergence). One more thing confirmed alongside it: passing `clang -target <triple>` with the same spelling the `.ll` module's own `target triple` line carries silences the `overriding the module target triple` warning §3.1 first saw on darwin — `compile_object_for` always does this, so a program built through this crate never sees it. `aarch64`'s `udf #0xc11f` half of §3.2's fix is still unverified — no aarch64 host in this slice's session either — but this row is otherwise closed |
 | Which `clang`/LLVM IR version to target | Textual IR has version-dependent syntax; pinning to whatever `ci.yml`'s two runners ship, rather than a specific LLVM release, is the plan until a real incompatibility forces a choice. This slice's session measured against `clang` 18 on linux-x86_64 only |
-| Optimisation level and its effect on trap codegen | `clang -O2` might fold or reorder a checked operation in a way `-O0` would not; `check-cost.md` and `poison.md`'s Cranelift findings do not transfer automatically, and this needs its own measurement once arithmetic lowering exists (§5's second slice) |
+| ~~Optimisation level and its effect on trap codegen~~ | **Measured, §7**: `clang -O2` is now what `run_clang` always passes (it has to be, for `mem2reg` to run at all — §7). All sixteen `lex-sys-codegen-llvm` unit tests, including all seven trap-signal tests, pass unchanged under it: `-O2` does not fold, reorder, or eliminate a checked operation's trap on any kernel this backend can build today |
 | Whether `noalias`/purity attributes get emitted at all | `backend-limits.md` §4's ceiling question — real, and not this document's to answer before the backend can run anything |
+
+---
+
+## 7. `-O2`, a first measurement, and what still blocks the rest of the suite
+
+### 7.1 The bug: `clang` was never asked to optimise anything
+
+§5's third slice justified the memory-backed design on `clang`'s
+"mandatory `mem2reg`". That is true of `clang`'s standard pipeline, and
+false of what this crate was actually invoking: `run_clang` (`lib.rs`)
+called `clang -c -target <triple> <file>.ll`, no `-O` flag at all, and
+`mem2reg` is not part of `-O0`. Confirmed directly — a minimal `.ll`
+identical in shape to `sum_checked.ls`'s inner loop (`alloca`, `store`,
+loop back-edge reading with `load`) compiles at the default optimisation
+level to nine real stack `load`/`store` instructions per iteration; at
+`-O2` the loop promotes to registers and, for a closed-form case like
+this toy one, disappears into a handful of instructions entirely. Every
+one of this backend's own tests still passed, because none of them time
+anything — `docs/llvm-backend.md`'s own §5 said as much when it deferred
+the speed question, but the reason it stayed deferred was this bug, not
+only that no kernel built yet.
+
+**Fixed**: `run_clang` now always passes `-O2`. This is not tunable per
+build — the backend has no `--opt-level` flag, and `docs/llvm-backend.md`
+is not proposing one; an "unoptimised LLVM backend" mode is not a
+configuration this project has a use for, since the entire reason to
+reach for `clang` over Cranelift is the optimisation pipeline §3.1
+already established `clang` brings for free. All sixteen
+`lex-sys-codegen-llvm` unit tests pass under `-O2`, including the seven
+that check a checked operation's trap raises the exact signal Cranelift
+raises (`the_two_backends_agree_on_*` in `crates/lex-sys/tests/
+conformance/backends.rs` also re-checks this at the CLI level) — `-O2`
+changes the code the trap sits inside, not whether or how it fires.
+
+### 7.2 A first backend-vs-backend measurement
+
+Three of `benches/`'s kernels build on both backends today, unchanged:
+`sum_checked.ls` (tight checked arithmetic, no memory traffic — the
+"worst case" for the overflow check, `sum_checked.ls`'s own header),
+`fib_checked.ls` (recursion; the cost is calls, not arithmetic) and
+`benches/three/mandelbrot.ls` (Q16.16 fixed-point compute, the kernel
+`docs/against-c-and-rust.md` already runs against C and Rust). All three
+are covered by a new differential test each
+(`the_two_backends_agree_on_sum_checked`,
+`..._on_fib_checked`, `..._on_mandelbrot` in `backends.rs`) and by
+`scripts/backend_compare.py`, which is `scripts/bench.py`'s own
+interleaved-minimum method applied to backend choice instead of
+source-program choice.
+
+Measured on this session's linux-x86_64 host, `--rounds 40`, minimum of
+each interleaved half (the run is noisy — a shared, non-dedicated
+host — so the **direction and rough size** of the gap is the finding,
+not the exact percentage):
+
+```
+program        cranelift        llvm      llvm/cranelift
+sum_checked      0.227s       0.105s            -54%
+fib_checked      0.010s       0.009s            -11%
+mandelbrot       0.148s       0.092s            -38%
+```
+
+LLVM is faster on all three, once `-O2` actually runs — consistent with
+`backend-limits.md`'s and `check-cost.md`/`gpu.md`'s original hypothesis
+(a missing vectoriser and missing per-target instruction selection are
+what the four-line Cranelift predicate they identify is blocked on), and
+the opposite of what §7.1's bug alone measured (LLVM 14%–58% *slower*
+across the same three kernels before the fix). `fib_checked`'s narrower
+gap is the expected shape: call/return overhead, not arithmetic, is that
+kernel's critical path, and a better arithmetic pipeline has less of the
+run to speed up. **This is not `backend-limits.md`'s full claim measured
+yet** — none of these three kernels exercises the memory-bound or
+SIMD-shaped cases (`sieve`, `scan`, `reduce`, the Benchmarks Game
+programs) that motivated the backend in the first place; §7.3 is why.
+
+**Against C, not just against Cranelift** — `scripts/backend_compare.py
+--with-c` adds a third, three-way interleaved leg for `mandelbrot.ls`
+against `mandelbrot.c`, the exact kernel `docs/against-c-and-rust.md`'s
+1.6×/1.69× headline came from:
+
+```
+mandelbrot, three-way interleaved against clang -O2 (20 rounds):
+  cranelift  0.1504s  (1.633x clang)
+  llvm       0.0887s  (0.964x clang)
+  clang      0.0921s  (1.000x clang)
+```
+
+`docs/against-c-and-rust.md` §2 stated a falsifier for exactly this
+number: *"if an LLVM backend lands and the gap stays at 1.6×, the claim
+was wrong."* It did not stay — lex-sys through `--backend llvm` is
+**indistinguishable from C** on this kernel (0.96×–1.00× across repeated
+runs), while `--backend cranelift` reproduces the original 1.6×–1.8×
+almost exactly. `docs/against-c-and-rust.md` §2 now carries this
+correction in place, next to the claim it falsifies.
+
+**Not vectorisation — checked, not assumed.** `gpu.md`'s own methodology
+warns against reading SIMD off the clock; `objdump -d` on both
+`sum_checked_llvm` and `mandelbrot_llvm`'s `.text` finds **zero**
+`%xmm`/`%ymm`/`%zmm` instructions, at `-O2`, on either. What actually
+changed against the pre-fix disassembly: every leaf that was a real
+`-0x10(%rsp)` load/store is now a register (`mem2reg`, finally running),
+and `sum_checked`'s loop is partially unrolled ×2 with the same
+`add`/`jo`/`sub`/`jo` sequence Cranelift already emits, just scheduled
+better and with no memory traffic between iterations. So `overflow-
+cost.md`/`check-cost.md`'s established finding — an observable trap is
+not reassociable, so a checked loop does not vectorise — **holds here
+too**, confirmed on a real backend rather than only inferred from
+Cranelift's absence of one: this is `docs/ROADMAP.md`'s "What is next"
+row's own open question, and the answer is **no, still scalar**, not
+"a vectoriser fixed it." The whole measured gain in §7.2 is register
+allocation and instruction selection catching this backend up to what a
+competent scalar compiler already does — real, and worth having, and a
+different, smaller claim than "LLVM vectorises checked arithmetic."
+
+### 7.3 What still blocks the rest of `benches/` from being comparable
+
+Not a request for the LLVM backend to reach Cranelift's *feature* set in
+the abstract — a request for exactly what would make the rest of the
+existing benchmark suite buildable on both backends, so the comparison
+`backend-limits.md` actually wants (memory-bound, checked-vs-wrapping,
+SIMD-shaped) can be taken. Found by trying to build every file under
+`benches/` with `--backend llvm` and reading the refusal, not by
+inspecting `emit.rs` and guessing:
+
+| Gap | Blocks | Where it already shows up in this document |
+|---|---|---|
+| `region`/`alloc_slice` (arena allocation, `Stmt::Region`) | `sieve_*.ls`, `scan_*.ls`, `benches/three/sieve.ls`, `benches/game/fasta.ls`, `benches/game/revcomp.ls` | §5's "later slices" list, already named |
+| `wrapping_add`/`wrapping_sub`/`wrapping_mul` | every `_wrapping.ls` half of a `benches/` pair, `benches/three/purity.ls` — so **no checked-vs-wrapping overflow-cost pair builds on this backend today**, only the checked half | Implicit in §5's "every `Builtin` beyond `PutChar`/`Split`/`Release`/`Narrow`/`IntOf`"; not previously named on its own |
+| Heap boxing (`box`, `box_slice`, `Contents`, `unbox`, `unbox_slice` — `Type::Box`/`BoxedSlice`) | `reduce_*.ls`, every `benches/layout/*.ls` file | Same bucket as above; not previously named on its own |
+| `arg_count` (and argument reading generally) | `benches/game/binarytrees.ls`, `benches/game/fannkuch.ls` | Same bucket |
+| `Type::Float` and float arithmetic | `benches/game/spectral.ls` | `emit.rs`'s own `LKind` doc comment already says floats are refused; not previously named as a *benchmark*-blocking gap |
+
+Ordered by what it would unblock: **`wrapping_*` first** — it is the
+smallest of the five (three `BinOp`-adjacent builtins, no new type, no
+new `Place`), and it alone would let `sum`, `fib`'s wrapping halves and
+`benches/three/purity.ls` build, making the overflow-check's own cost
+(`docs/overflow-cost.md`'s question) measurable on this backend for the
+first time. **Arenas second** — `sieve`/`scan`/`fasta`/`revcomp` are four
+of the remaining programs behind one gap, and it is already `docs/
+llvm-backend.md`'s own next-named slice. Heap boxing, `arg_count` and
+float are each smaller pockets behind their own single gap, not bundled
+with anything else in `benches/`.
+
+| Bench | |
+|---|---|
+| `scripts/backend_compare.py` | Interleaved cranelift-vs-llvm timing on the kernels that build on both, today three; `--with-c` adds a three-way leg for `mandelbrot.ls` against `mandelbrot.c` |
+| `crates/lex-sys/tests/conformance/backends.rs` | `the_two_backends_agree_on_{sum_checked,fib_checked,mandelbrot}` — not a timing gate, for the reason `every_benchmark_pair_agrees` gives |
