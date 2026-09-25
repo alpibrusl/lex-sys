@@ -73,6 +73,16 @@ fn operand(v: &LValue) -> String {
     }
 }
 
+/// The LLVM type a multi-leaf value returns as: an anonymous struct, one
+/// field per leaf -- the same shape `checked_arith`'s own `{i64, i1}`
+/// already is for LLVM's overflow intrinsics, applied here to a
+/// `lex-sys` value with more than one leaf (`docs/llvm-backend.md`
+/// §7.7: `contents(b)`'s own two leaves, called through a function like
+/// `reduce_checked.ls`'s `fill`, is what this exists for).
+fn struct_ty(kinds: &[LKind]) -> String {
+    format!("{{{}}}", kinds.iter().map(|k| k.llvm()).collect::<Vec<_>>().join(", "))
+}
+
 /// The leaves a type scalarises to, matching `lex-sys-codegen`'s
 /// `abi::leaves_into` for the subset this slice supports.
 ///
@@ -97,6 +107,20 @@ fn leaves_into(ty: &Type, program: &Program, out: &mut Vec<LKind>) -> Result<(),
         Type::Tuple(parts) => {
             for part in parts {
                 leaves_into(part, program, out)?;
+            }
+        }
+        // `docs/heap.md` §3: a box at run time is a pointer and nothing
+        // else -- no header, no refcount, no tag -- except a box of an
+        // *unsized* referent, which carries the length too, because
+        // nothing else knows how many elements there are (`docs/boxed-
+        // slices.md` §2, the same pair `&r [T]` already is). Matches
+        // `lex-sys-codegen`'s own `abi::leaves_into` exactly; `Box` is a
+        // prelude type, not an ordinary struct `program.type_info` would
+        // scalarise correctly on its own.
+        Type::Named(def, args) if def.0 as usize == lex_sys_ir::PRELUDE_BOX => {
+            out.push(LKind::Ptr);
+            if matches!(args.first(), Some(Type::Slice(_))) {
+                out.push(LKind::I64);
             }
         }
         Type::Named(def, args) => match program.type_info(*def) {
@@ -513,25 +537,44 @@ impl<'a> FuncEmitter<'a> {
     /// impossible tag-chain fall-through, need exactly the same thing.
     fn emit_default_return(&mut self) -> Result<(), String> {
         let ret_kinds = leaves_of(&self.func.ret, self.program)?;
-        match ret_kinds.first() {
-            Some(k) => self.out.push_str(&format!("  ret {} {}\n", k.llvm(), k.zero())),
-            None => self.out.push_str("  ret void\n"),
+        match ret_kinds.as_slice() {
+            [] => self.out.push_str("  ret void\n"),
+            [k] => self.out.push_str(&format!("  ret {} {}\n", k.llvm(), k.zero())),
+            kinds => {
+                let zeros: Vec<LValue> =
+                    kinds.iter().map(|k| LValue::Reg(k.zero().to_owned())).collect();
+                let agg = self.pack_struct(kinds, &zeros);
+                self.out.push_str(&format!("  ret {} {agg}\n", struct_ty(kinds)));
+            }
         }
         Ok(())
     }
 
+    /// Pack `values` into one aggregate register, one field per leaf --
+    /// the `insertvalue` chain a multi-leaf return needs, starting from
+    /// `undef` the same way LLVM's own multi-result intrinsics
+    /// (`checked_arith`'s `{i64, i1}`) are read back out of, in reverse.
+    fn pack_struct(&mut self, kinds: &[LKind], values: &[LValue]) -> String {
+        let ty = struct_ty(kinds);
+        let mut agg = "undef".to_owned();
+        for (i, (kind, value)) in kinds.iter().zip(values).enumerate() {
+            let next = self.fresh();
+            self.out.push_str(&format!(
+                "  {next} = insertvalue {ty} {agg}, {} {}, {i}\n",
+                kind.llvm(),
+                operand(value)
+            ));
+            agg = next;
+        }
+        agg
+    }
+
     fn emit(&mut self) -> Result<String, String> {
         let ret_kinds = leaves_of(&self.func.ret, self.program)?;
-        if ret_kinds.len() > 1 {
-            return Err(format!(
-                "`{}` returns more than one leaf, which the LLVM backend's first slice cannot \
-                 hand back yet (indirect returns are not implemented)",
-                self.func.name
-            ));
-        }
-        let ret_ty = match ret_kinds.first() {
-            Some(k) => k.llvm(),
-            None => "void",
+        let ret_ty = match ret_kinds.as_slice() {
+            [] => "void".to_owned(),
+            [k] => k.llvm().to_owned(),
+            kinds => struct_ty(kinds),
         };
 
         let mut params = Vec::new();
@@ -631,17 +674,21 @@ impl<'a> FuncEmitter<'a> {
                 }
                 Stmt::Return(expr) => {
                     let values = self.expr(expr)?;
-                    match values.len() {
-                        0 => self.out.push_str("  ret void\n"),
-                        1 => {
+                    match values.as_slice() {
+                        [] => self.out.push_str("  ret void\n"),
+                        [value] => {
                             let kinds = leaves_of(&self.func.ret, self.program)?;
                             self.out.push_str(&format!(
                                 "  ret {} {}\n",
                                 kinds[0].llvm(),
-                                operand(&values[0])
+                                operand(value)
                             ));
                         }
-                        _ => return Err("a multi-leaf return is not implemented yet".to_owned()),
+                        values => {
+                            let kinds = leaves_of(&self.func.ret, self.program)?;
+                            let agg = self.pack_struct(&kinds, values);
+                            self.out.push_str(&format!("  ret {} {agg}\n", struct_ty(&kinds)));
+                        }
                     }
                     return Ok(true);
                 }
@@ -853,14 +900,27 @@ impl<'a> FuncEmitter<'a> {
         Ok(())
     }
 
+    /// How many bytes `count` elements of stride `stride` take, checked --
+    /// `lex-sys-codegen`'s own `slice_bytes` (`body/memory.rs`), shared
+    /// here between `alloc_slice` and `boxed_slice` the same way. A
+    /// negative count traps ahead of the multiply, and the multiply
+    /// itself is `checked_arith`'s own `smul` -- the intrinsic
+    /// `lex-sys-codegen`'s version reaches for by a different name
+    /// (`smul_overflow`) for the identical reason: a length that
+    /// overflows the byte count would ask for less memory than is about
+    /// to be written.
+    fn slice_bytes(&mut self, count: &LValue, stride: i64) -> Result<LValue, String> {
+        let negative = self.fresh();
+        self.out.push_str(&format!("  {negative} = icmp slt i64 {}, 0\n", operand(count)));
+        self.trap_if(&negative)?;
+
+        let bytes = self.checked_arith("smul", count.clone(), LValue::Const(stride))?;
+        Ok(bytes.into_iter().next().expect("`checked_arith` returns exactly one value"))
+    }
+
     /// `alloc_slice[a](count, fill)` -- `count` copies of `fill`,
     /// contiguous (`lex-sys-codegen`'s own `alloc_slice`, `body/
-    /// memory.rs`). A negative count traps ahead of the multiply, and the
-    /// multiply itself is `checked_arith`'s own `smul` -- the intrinsic
-    /// `lex-sys-codegen`'s `slice_bytes` reaches for by a different name
-    /// (`smul_overflow`) for the identical reason: a length that overflows
-    /// the byte count would ask for less memory than is about to be
-    /// written.
+    /// memory.rs`).
     fn alloc_slice(
         &mut self,
         arena: u32,
@@ -871,16 +931,40 @@ impl<'a> FuncEmitter<'a> {
         let count = self.scalar(count)?;
         let values = self.expr(fill)?;
         let stride = self.stride_of(element)?;
-
-        let negative = self.fresh();
-        self.out.push_str(&format!("  {negative} = icmp slt i64 {}, 0\n", operand(&count)));
-        self.trap_if(&negative)?;
-
-        let bytes = self.checked_arith("smul", count.clone(), LValue::Const(stride))?;
-        let bytes = bytes.into_iter().next().expect("`checked_arith` returns exactly one value");
+        let bytes = self.slice_bytes(&count, stride)?;
 
         let start = self.bump(arena, &bytes)?;
         let kinds = leaves_of(element, self.program)?;
+        self.fill_slice(&start, &count, stride, &kinds, &values)?;
+        Ok(vec![start, count])
+    }
+
+    /// `box_slice(h, count, fill)` (`docs/boxed-slices.md` §3, §7.7): the
+    /// same sizing and the same fill `alloc_slice` uses; only where the
+    /// memory comes from differs -- one `malloc`, trapping on exhaustion
+    /// exactly as `region_stmt`'s own arena chunk does, rather than a
+    /// bump within one. What comes back is two leaves, a pointer *and* a
+    /// length, because nothing else knows how many elements there are
+    /// (`lex-sys-codegen`'s own `boxed_slice`, `body/memory.rs`).
+    fn boxed_slice(
+        &mut self,
+        element: &Type,
+        count: &Expr,
+        fill: &Expr,
+    ) -> Result<Vec<LValue>, String> {
+        let count = self.scalar(count)?;
+        let values = self.expr(fill)?;
+        let stride = self.stride_of(element)?;
+        let bytes = self.slice_bytes(&count, stride)?;
+
+        let start = self.fresh();
+        self.out.push_str(&format!("  {start} = call ptr @malloc(i64 {})\n", operand(&bytes)));
+        let is_null = self.fresh();
+        self.out.push_str(&format!("  {is_null} = icmp eq ptr {start}, null\n"));
+        self.trap_if(&is_null)?;
+
+        let kinds = leaves_of(element, self.program)?;
+        let start = LValue::Reg(start);
         self.fill_slice(&start, &count, stride, &kinds, &values)?;
         Ok(vec![start, count])
     }
@@ -1249,6 +1333,46 @@ impl<'a> FuncEmitter<'a> {
             Expr::AllocSlice { arena, element, count, fill } => {
                 self.alloc_slice(*arena, element, count, fill)
             }
+            Expr::BoxedSlice { element, count, fill } => self.boxed_slice(element, count, fill),
+            // One `free`, and the element count back -- the pointer is
+            // the first leaf and the length the second (`docs/boxed-
+            // slices.md` §2), the same order `boxed_slice` returns them.
+            Expr::UnboxedSlice { value } => {
+                let leaves = self.expr(value)?;
+                if leaves.len() != 2 {
+                    return Err(
+                        "`unbox_slice`'s argument is not a boxed slice (expected 2 leaves: \
+                         pointer and length)"
+                            .to_owned(),
+                    );
+                }
+                self.out.push_str(&format!("  call void @free(ptr {})\n", operand(&leaves[0])));
+                Ok(vec![leaves[1].clone()])
+            }
+            // `contents(b)`: one load. A reference to a box points at
+            // where the box's own leaves live, so reading them *is* the
+            // reference to what the box holds -- a boxed slice's own two
+            // leaves already *are* the `(pointer, length)` pair a plain
+            // `[T]` is, which is why this doubles as `&r [T]` (`docs/
+            // boxed-slices.md` §3). The second leaf, when present, sits
+            // at the same 8-byte stride every leaf here does.
+            Expr::Contents { ty, value } => {
+                let reference = self.scalar(value)?;
+                let held = self.fresh();
+                self.out.push_str(&format!("  {held} = load ptr, ptr {}\n", operand(&reference)));
+                if matches!(ty, Type::Slice(_)) {
+                    let length_addr = self.fresh();
+                    self.out.push_str(&format!(
+                        "  {length_addr} = getelementptr i8, ptr {}, i64 8\n",
+                        operand(&reference)
+                    ));
+                    let length = self.fresh();
+                    self.out.push_str(&format!("  {length} = load i64, ptr {length_addr}\n"));
+                    Ok(vec![LValue::Reg(held), LValue::Reg(length)])
+                } else {
+                    Ok(vec![LValue::Reg(held)])
+                }
+            }
             // `!b`: a `bool` leaf is 0 or 1, so flipping the low bit is
             // the negation -- `lex-sys-codegen`'s own `Expr::Not` arm
             // (`body/expr.rs`), one instruction and never trapping.
@@ -1426,15 +1550,8 @@ impl<'a> FuncEmitter<'a> {
                     .map(|(kind, value)| format!("{} {}", kind.llvm(), operand(value)))
                     .collect();
                 let ret_kinds = leaves_of(&target.ret, self.program)?;
-                if ret_kinds.len() > 1 {
-                    return Err(format!(
-                        "`{}` returns more than one leaf, which the LLVM backend's first slice \
-                         cannot call yet",
-                        target.name
-                    ));
-                }
-                match ret_kinds.first() {
-                    None => {
+                match ret_kinds.as_slice() {
+                    [] => {
                         self.out.push_str(&format!(
                             "  call void @lexs_{}({})\n",
                             target.name,
@@ -1442,7 +1559,7 @@ impl<'a> FuncEmitter<'a> {
                         ));
                         Ok(Vec::new())
                     }
-                    Some(kind) => {
+                    [kind] => {
                         let result = self.fresh();
                         self.out.push_str(&format!(
                             "  {result} = call {} @lexs_{}({})\n",
@@ -1451,6 +1568,26 @@ impl<'a> FuncEmitter<'a> {
                             printed.join(", ")
                         ));
                         Ok(vec![LValue::Reg(result)])
+                    }
+                    // A multi-leaf return comes back as one aggregate
+                    // (`emit`'s own `struct_ty`), unpacked here the same
+                    // way `checked_arith` already reads `{i64, i1}` back
+                    // out of LLVM's overflow intrinsics.
+                    kinds => {
+                        let ty = struct_ty(kinds);
+                        let agg = self.fresh();
+                        self.out.push_str(&format!(
+                            "  {agg} = call {ty} @lexs_{}({})\n",
+                            target.name,
+                            printed.join(", ")
+                        ));
+                        let mut unpacked = Vec::with_capacity(kinds.len());
+                        for i in 0..kinds.len() {
+                            let reg = self.fresh();
+                            self.out.push_str(&format!("  {reg} = extractvalue {ty} {agg}, {i}\n"));
+                            unpacked.push(LValue::Reg(reg));
+                        }
+                        Ok(unpacked)
                     }
                 }
             }

@@ -29,21 +29,28 @@
 //! `ptr`-typed `alloca` cells rather than in an SSA value, the same
 //! arena `lex-sys-codegen`'s own `body/memory.rs` builds -- plus
 //! `byte_of` and `Expr::Not`, the two smaller gaps actually standing
-//! between this and `sieve`/`scan` building. Every `benches/` program
-//! behind only those gaps now builds on `--backend llvm`.
+//! between this and `sieve`/`scan` building.
+//!
+//! §7.7 closed heap boxing -- `Expr::BoxedSlice`/`Expr::Contents`/
+//! `Expr::UnboxedSlice`, `boxed_slice` sharing `alloc_slice`'s own
+//! `slice_bytes` sizing and reaching for `malloc` instead of `bump` --
+//! and, found underneath it, a second gap nothing had tried to lift
+//! since the first slice: a function could not return more than one
+//! leaf. `struct_ty`/`pack_struct` close it in general, not just for a
+//! boxed slice's two leaves, the same shape `checked_arith`'s own
+//! `{i64, i1}` intrinsic reads already are. Every `benches/` program
+//! behind only these gaps now builds on `--backend llvm`.
 //!
 //! Still refused: matching *through* a reference (only an owned
 //! scrutinee's tag and payload are read directly; `docs/reading-
 //! references.md`'s address-only binding mode has no counterpart here
 //! yet), `Place::Field`/`Place::Deref` (writing through a reference
 //! needs pointer arithmetic into a referent this backend has not built),
-//! bare `Expr::Alloc` (a single-value arena allocation -- `alloc_slice`'s
-//! bump-and-fill covers the shape a slice needs, but handing back a
-//! unique reference to one value is its own small gap, not yet built),
-//! heap boxing (`box`/`box_slice`), `arg_count`, `Type::Float`,
-//! `getchar`/`io_read`, `Ffi`/`extern fn`, `Net`, and every other
-//! `Builtin` beyond `PutChar`/`Split`/`Release`/`Narrow`/`IntOf`/
-//! `ByteOf`/`WrappingAdd`/`WrappingSub`/`WrappingMul`.
+//! bare `Expr::Alloc`/`Expr::Boxed`/`Expr::Unboxed` (a single-value
+//! allocation, arena or heap -- nothing in `benches/` asks for one),
+//! `arg_count`, `Type::Float`, `getchar`/`io_read`, `Ffi`/`extern fn`,
+//! `Net`, and every other `Builtin` beyond `PutChar`/`Split`/`Release`/
+//! `Narrow`/`IntOf`/`ByteOf`/`WrappingAdd`/`WrappingSub`/`WrappingMul`.
 //!
 //! This backend is intentionally partial. Everything it does not yet lower
 //! is refused with a [`CodegenError`], never a panic: unlike

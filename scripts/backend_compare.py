@@ -8,18 +8,17 @@ backend, this compares one *source program* through two backends --
 `--backend cranelift` (the default) against `--backend llvm`
 (`docs/llvm-backend.md` §4).
 
-Nine of `benches/`'s programs build on both backends today: the rest of
-the suite still needs `box_slice` (heap-boxed slices), bare `alloc[a]`,
-`arg_count`, `Type::Float` or `getchar`/`io_read`, none of which the LLVM
-backend lowers yet (§7.5's gap inventory; `wrapping_add`/`sub`/`mul`
-closed in §7.4, `region`/`alloc_slice`/`byte_of`/`Expr::Not` in §7.5).
-`sum_checked.ls`/`sum_wrapping.ls`, `fib_checked.ls`/`fib_wrapping.ls`
-and `sieve_checked.ls`/`sieve_wrapping.ls`/`scan_checked.ls`/
-`scan_wrapping.ls` communicate correctness through their exit code
-(`result - expected`, zero when right); `mandelbrot.ls` also prints a
-checksum, which is compared as well as timed. The checked/wrapping pairs
-are also `docs/overflow-cost.md`'s own question -- `scripts/bench.py`
-measures it under Cranelift; this is the first
+Eleven of `benches/`'s programs build on both backends today: the rest
+of the suite still needs bare `alloc[a]`, `arg_count`, `Type::Float` or
+`getchar`/`io_read`, none of which the LLVM backend lowers yet (§7.7's
+gap inventory; `wrapping_add`/`sub`/`mul` closed in §7.4, `region`/
+`alloc_slice`/`byte_of`/`Expr::Not` in §7.5, `box_slice`/`contents`/
+`unbox_slice` plus multi-leaf function returns in §7.7). Every
+`_checked.ls`/`_wrapping.ls` pair here communicates correctness through
+its exit code (`result - expected`, zero when right); `mandelbrot.ls`
+also prints a checksum, which is compared as well as timed. The checked/
+wrapping pairs are also `docs/overflow-cost.md`'s own question --
+`scripts/bench.py` measures it under Cranelift; this is the first
 measurement of it under `--backend llvm`.
 
 Runs are **interleaved** (cranelift, llvm, cranelift, llvm, ...) so that
@@ -56,6 +55,8 @@ PROGRAMS = [
     ("fib_wrapping", "benches/fib_wrapping.ls", None),
     ("sieve_checked", "benches/sieve_checked.ls", None),
     ("sieve_wrapping", "benches/sieve_wrapping.ls", None),
+    ("reduce_checked", "benches/reduce_checked.ls", None),
+    ("reduce_wrapping", "benches/reduce_wrapping.ls", None),
     ("scan_checked", "benches/scan_checked.ls", None),
     ("scan_wrapping", "benches/scan_wrapping.ls", None),
     ("mandelbrot", "benches/three/mandelbrot.ls", "39690297"),
@@ -155,7 +156,7 @@ def main() -> None:
 
         print()
         print(f"{len(PROGRAMS)} of `benches/`'s programs build on both backends today;")
-        print("the rest need `box_slice`, `alloc`, `arg_count`, `Type::Float` or `getchar` (docs/llvm-backend.md §7.5).")
+        print("the rest need bare `alloc`, `arg_count`, `Type::Float` or `getchar` (docs/llvm-backend.md §7.7).")
 
         if args.with_c:
             wanted = (args.cc,) if args.cc else ("clang", "gcc")
