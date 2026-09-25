@@ -36,6 +36,7 @@ use std::process::{Command, Stdio};
 
 mod arguments;
 mod authority;
+mod backends;
 mod benchmarks;
 mod compile_time;
 mod corpus;

@@ -1,0 +1,92 @@
+//! `--backend cranelift|llvm` (`docs/llvm-backend.md` §4): the CLI wiring
+//! for the second backend's first slice, checked the way
+//! `differential.rs` checks the constant folder -- two independent paths
+//! agreeing on one answer is the point, not a detail of either.
+
+use super::*;
+
+fn build_with(tag: &str, relative: &str, backend: &str) -> std::process::Output {
+    let dir = scratch(tag);
+    let exe = dir.join("out");
+    let build = Command::new(BIN)
+        .args([
+            "build".as_ref(),
+            repo_root().join(relative).as_os_str(),
+            "--std".as_ref(),
+            "--backend".as_ref(),
+            backend.as_ref(),
+            "-o".as_ref(),
+            exe.as_os_str(),
+        ])
+        .output()
+        .expect("the compiler runs");
+    if !build.status.success() {
+        let _ = std::fs::remove_dir_all(&dir);
+        return build;
+    }
+    // Neither fixture this module builds declares `//~ STDIN`, so a plain
+    // run -- no piped input -- is exact, not merely convenient.
+    let run = Command::new(&exe).output().expect("the compiled program runs");
+    let _ = std::fs::remove_dir_all(&dir);
+    run
+}
+
+/// The LLVM backend's first slice (`docs/llvm-backend.md` §5) builds
+/// `tests/accept/llvm_smoke.ls` -- the fixture the doc's original bullet
+/// list actually describes -- and the two backends agree with each other
+/// and with the fixture's own `//~ STDOUT`/`//~ EXIT` directives.
+#[test]
+fn the_two_backends_agree_on_the_llvm_smoke_fixture() {
+    let relative = "tests/accept/llvm_smoke.ls";
+    let cranelift = build_with("backends-cranelift", relative, "cranelift");
+    let llvm = build_with("backends-llvm", relative, "llvm");
+
+    assert!(
+        llvm.status.success(),
+        "`--backend llvm` should build and run `llvm_smoke.ls`, but said:\n{}",
+        String::from_utf8_lossy(&llvm.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&llvm.stdout),
+        String::from_utf8_lossy(&cranelift.stdout),
+        "the two backends printed different things for the same program"
+    );
+    assert_eq!(
+        llvm.status.code(),
+        cranelift.status.code(),
+        "the two backends exited differently for the same program"
+    );
+    assert_eq!(String::from_utf8_lossy(&llvm.stdout), "Hi!\n");
+    assert_eq!(llvm.status.code(), Some(0));
+}
+
+/// The boundary this slice draws is a located refusal, not a crash or a
+/// silent wrong answer: `examples/hello.ls` needs checked arithmetic,
+/// bounds-checked indexing and string-literal data, none of which this
+/// slice lowers (`docs/llvm-backend.md` §5).
+#[test]
+fn a_program_outside_the_first_slice_is_refused_through_the_cli() {
+    let dir = scratch("backends-llvm-hello");
+    let exe = dir.join("out");
+    let build = Command::new(BIN)
+        .args([
+            "build".as_ref(),
+            repo_root().join("examples/hello.ls").as_os_str(),
+            "--std".as_ref(),
+            "--backend".as_ref(),
+            "llvm".as_ref(),
+            "-o".as_ref(),
+            exe.as_os_str(),
+        ])
+        .output()
+        .expect("the compiler runs");
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert!(!build.status.success(), "`hello.ls` is outside the first slice and should refuse");
+    assert_eq!(build.status.code(), Some(1), "an unsupported program is rule `internal`, exit 1");
+    let message = String::from_utf8_lossy(&build.stderr);
+    assert!(
+        message.contains("first slice"),
+        "the refusal should name the boundary it hit: {message}"
+    );
+}
