@@ -165,6 +165,19 @@ pub(crate) fn emit_module(
     // edge, which is what carries `EOF`'s `-1` back as `-1` rather than
     // as a very large unsigned number were it zero-extended instead.
     text.push_str("declare i32 @getchar()\n");
+    // `docs/bulk-io.md` §3 (§7.11): the whole slice in one call, through
+    // the same stdio stream `putchar` uses. `stdout`/`stderr` are `FILE
+    // *` *variables* in libc, so the symbol is the address of the
+    // pointer and the stream itself is one load away -- and the symbol
+    // differs by platform, the same split `lex-sys-codegen`'s own
+    // `emit.rs` already makes for it.
+    text.push_str("declare i64 @fwrite(ptr, i64, i64, ptr)\n");
+    let (stdout_symbol, stderr_symbol) = match triple.operating_system {
+        target_lexicon::OperatingSystem::Darwin(_) => ("__stdoutp", "__stderrp"),
+        _ => ("stdout", "stderr"),
+    };
+    text.push_str(&format!("@{stdout_symbol} = external global ptr\n"));
+    text.push_str(&format!("@{stderr_symbol} = external global ptr\n"));
     // `region`/`alloc_slice` (§7.5): one `malloc` per arena, one `free` on
     // the way out -- `lex-sys-codegen`'s own `body/memory.rs` `libc_fn`
     // declares these the same way, on first use rather than unconditionally
@@ -666,13 +679,30 @@ impl<'a> FuncEmitter<'a> {
                     let kinds = leaves_of(element, self.program)?;
                     self.store_leaves(&addr, &kinds, &values);
                 }
-                Stmt::Store { .. } => {
-                    return Err(
-                        "a `Field`/`Deref` place is not part of the LLVM backend yet -- both \
-                         need the struct/box layout this backend does not lower \
-                         (docs/llvm-backend.md §5)"
-                            .to_owned(),
-                    );
+                // `*r = e` -- the whole referent replaced, at the address
+                // the reference holds (`docs/reading-references.md` §3,
+                // §7.11).
+                Stmt::Store { place: Place::Deref { base, ty }, value } => {
+                    let values = self.expr(value)?;
+                    let address = self.scalar(base)?;
+                    let kinds = leaves_of(ty, self.program)?;
+                    self.store_leaves(&operand(&address), &kinds, &values);
+                }
+                // A field through a reference is the same arithmetic as
+                // reading one, running the other way (`lex-sys-codegen`'s
+                // own comment on `write`, `body/control.rs`, §7.11): find
+                // where the field starts among the referent's leaves,
+                // and store there.
+                Stmt::Store { place: Place::Field { base, def, args, index }, value } => {
+                    let values = self.expr(value)?;
+                    let address = self.scalar(base)?;
+                    let (offset, kinds) = self.field_offset(*def, args, *index)?;
+                    let addr = self.fresh();
+                    self.out.push_str(&format!(
+                        "  {addr} = getelementptr i8, ptr {}, i64 {offset}\n",
+                        operand(&address)
+                    ));
+                    self.store_leaves(&addr, &kinds, &values);
                 }
                 Stmt::Eval(expr) => {
                     self.expr(expr)?;
@@ -1288,18 +1318,90 @@ impl<'a> FuncEmitter<'a> {
             }
             Expr::Field { base, def, args, index } => {
                 let values = self.expr(base)?;
-                let lex_sys_ir::TypeInfo::Struct { fields, .. } = self.program.type_info(*def)
-                else {
-                    return Err("a field access on an enum is not part of this slice".to_owned());
-                };
-                let mut start = 0usize;
-                for (_, ty) in &fields[..*index as usize] {
-                    start += leaves_of(&ty.substitute(args, &[]), self.program)?.len();
+                let (offset, kinds) = self.field_offset(*def, args, *index)?;
+                let start = (offset / 8) as usize;
+                Ok(values[start..start + kinds.len()].to_vec())
+            }
+            // `base.index`, where `base` is a *reference* rather than a
+            // value (§7.11): the same field arithmetic `Expr::Field`
+            // already does, except the leaves are loaded out of the
+            // buffer the reference points at instead of picked out of
+            // leaves already in registers.
+            Expr::FieldRef { base, def, args, index } => {
+                let address = self.scalar(base)?;
+                let (offset, kinds) = self.field_offset(*def, args, *index)?;
+                let addr = self.fresh();
+                self.out.push_str(&format!(
+                    "  {addr} = getelementptr i8, ptr {}, i64 {offset}\n",
+                    operand(&address)
+                ));
+                Ok(self.load_leaves(&addr, &kinds))
+            }
+            // `base.index` where the field is `res`: a reference *to*
+            // the field rather than a copy of it (`docs/reading-
+            // references.md` §2.0) -- the same arithmetic as `Expr::
+            // FieldRef`, stopping one step earlier, since that node's
+            // own load is exactly what a `res` field cannot survive.
+            Expr::FieldAddr { base, def, args, index } => {
+                let address = self.scalar(base)?;
+                let (offset, _) = self.field_offset(*def, args, *index)?;
+                let addr = self.fresh();
+                self.out.push_str(&format!(
+                    "  {addr} = getelementptr i8, ptr {}, i64 {offset}\n",
+                    operand(&address)
+                ));
+                Ok(vec![LValue::Reg(addr)])
+            }
+            // `*r` -- the leaves at the address, loaded (`docs/reading-
+            // references.md` §3). The same arithmetic a field access
+            // does, over the whole referent rather than one member.
+            Expr::Deref { ty, value } => {
+                let address = self.scalar(value)?;
+                let kinds = leaves_of(ty, self.program)?;
+                Ok(self.load_leaves(&operand(&address), &kinds))
+            }
+            // A tuple value (`docs/tuples.md`). Positional already, so
+            // unlike `Expr::Struct` there is no declaration order to
+            // reorder into -- but the leaves are the same concatenation.
+            Expr::Tuple { parts } => {
+                let mut out = Vec::new();
+                for part in parts {
+                    out.extend(self.expr(part)?);
                 }
-                let len =
-                    leaves_of(&fields[*index as usize].1.substitute(args, &[]), self.program)?
-                        .len();
-                Ok(values[start..start + len].to_vec())
+                Ok(out)
+            }
+            // `base.index` on a tuple: `Expr::Field`'s own arithmetic,
+            // with the component types travelling on the node instead of
+            // a `DefId` to look them up with.
+            Expr::TupleField { base, components, index } => {
+                let values = self.expr(base)?;
+                let (offset, kinds) = self.tuple_field_offset(components, *index)?;
+                let start = (offset / 8) as usize;
+                Ok(values[start..start + kinds.len()].to_vec())
+            }
+            // `Expr::FieldRef`'s counterpart for a type with no
+            // declaration.
+            Expr::TupleFieldRef { base, components, index } => {
+                let address = self.scalar(base)?;
+                let (offset, kinds) = self.tuple_field_offset(components, *index)?;
+                let addr = self.fresh();
+                self.out.push_str(&format!(
+                    "  {addr} = getelementptr i8, ptr {}, i64 {offset}\n",
+                    operand(&address)
+                ));
+                Ok(self.load_leaves(&addr, &kinds))
+            }
+            // `Expr::FieldAddr`'s counterpart for a type with no
+            // declaration.
+            Expr::TupleFieldAddr { base, components, index } => {
+                let address = self.scalar(base)?;
+                let (offset, _) = self.tuple_field_offset(components, *index)?;
+                let addr = self.fresh();
+                self.out.push_str(&format!(
+                    "  {addr} = getelementptr i8, ptr {}, i64 {offset}\n",
+                    operand(&address)
+                ));
+                Ok(vec![LValue::Reg(addr)])
             }
             // A struct value is positional already, in declaration order
             // -- the same shape `Expr::Tuple` would be -- so its leaves
@@ -1418,6 +1520,47 @@ impl<'a> FuncEmitter<'a> {
             bytes.len()
         ));
         vec![LValue::Reg(name), LValue::Const(bytes.len() as i64)]
+    }
+
+    /// A struct field's leaf offset among its declaration, and the
+    /// field's own kinds -- shared by every way of reaching one
+    /// (`docs/llvm-backend.md` §7.11): `Expr::Field` picks the field's
+    /// leaves out of an owned value already in registers; `Expr::
+    /// FieldRef`/`Expr::FieldAddr`/`Place::Field` all reach the same
+    /// field through a reference instead, where the offset is bytes
+    /// into a referent rather than a position in a `Vec`.
+    fn field_offset(
+        &self,
+        def: DefId,
+        args: &[Type],
+        index: u32,
+    ) -> Result<(i64, Vec<LKind>), String> {
+        let lex_sys_ir::TypeInfo::Struct { fields, .. } = self.program.type_info(def) else {
+            return Err("a field access on an enum is not part of this slice".to_owned());
+        };
+        let mut start = 0i64;
+        for (_, ty) in &fields[..index as usize] {
+            start += leaves_of(&ty.substitute(args, &[]), self.program)?.len() as i64;
+        }
+        let kinds = leaves_of(&fields[index as usize].1.substitute(args, &[]), self.program)?;
+        Ok((start * 8, kinds))
+    }
+
+    /// The same offset arithmetic as [`Self::field_offset`], for a
+    /// tuple: `components` carries the element types directly, so there
+    /// is no declaration to look up (`Expr::TupleField`'s own reasoning,
+    /// applied here to `Expr::TupleFieldRef`/`Expr::TupleFieldAddr`).
+    fn tuple_field_offset(
+        &self,
+        components: &[Type],
+        index: u32,
+    ) -> Result<(i64, Vec<LKind>), String> {
+        let mut start = 0i64;
+        for ty in &components[..index as usize] {
+            start += leaves_of(ty, self.program)?.len() as i64;
+        }
+        let kinds = leaves_of(&components[index as usize], self.program)?;
+        Ok((start * 8, kinds))
     }
 
     /// The distance between elements of a `[T]`, matching
@@ -1568,6 +1711,36 @@ impl<'a> FuncEmitter<'a> {
                 let widened = self.fresh();
                 self.out.push_str(&format!("  {widened} = sext i32 {result} to i64\n"));
                 Ok(vec![LValue::Reg(widened)])
+            }
+            // `write_bytes`/`write_err` (§7.11): the whole slice in one
+            // `fwrite`, through the stream the module header already
+            // declared for this platform -- `docs/bulk-io.md` §3 and
+            // `docs/standard-error.md` §3.3 are the same call, one
+            // symbol apart.
+            Callee::Builtin(Builtin::Write | Builtin::WriteErr) => {
+                let skip = Builtin::Write.erased_args();
+                let flat: Vec<LValue> = evaluated.into_iter().skip(skip).flatten().collect();
+                let [start, len] = flat.as_slice() else {
+                    return Err("`write_bytes`/`write_err` need a byte slice argument".to_owned());
+                };
+                let symbol = match (callee, self.triple.operating_system) {
+                    (
+                        Callee::Builtin(Builtin::WriteErr),
+                        target_lexicon::OperatingSystem::Darwin(_),
+                    ) => "__stderrp",
+                    (Callee::Builtin(Builtin::WriteErr), _) => "stderr",
+                    (_, target_lexicon::OperatingSystem::Darwin(_)) => "__stdoutp",
+                    (_, _) => "stdout",
+                };
+                let stream = self.fresh();
+                self.out.push_str(&format!("  {stream} = load ptr, ptr @{symbol}\n"));
+                let result = self.fresh();
+                self.out.push_str(&format!(
+                    "  {result} = call i64 @fwrite(ptr {}, i64 1, i64 {}, ptr {stream})\n",
+                    operand(start),
+                    operand(len)
+                ));
+                Ok(vec![LValue::Reg(result)])
             }
             // `int_of(b: byte) -> int` widens, always defined: every
             // `byte` is 0..255, so zero-extension is exact -- the direct

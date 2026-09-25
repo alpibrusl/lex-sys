@@ -268,6 +268,98 @@ fn the_two_backends_agree_on_stdin_roundtrip() {
     }
 }
 
+/// `docs/llvm-backend.md` §7.11: `Place::Field`/`Place::Deref` closed --
+/// writing through a reference, whole-referent or one field, plus the
+/// read-side siblings (`Expr::FieldRef`/`Expr::FieldAddr`/`Expr::Deref`)
+/// nothing had built either. `tests/accept/deref_roundtrip.ls` already
+/// existed as exactly this fixture: `*n`/`*n = e` (a shared and a unique
+/// reference to a bare `int`), and `scale`'s `p.x`/`p.y` reading a field
+/// *through* a reference before `*p = Point { .. }` replaces the whole
+/// referent.
+#[test]
+fn the_two_backends_agree_on_deref_roundtrip() {
+    assert_backends_agree(
+        "backends-deref-roundtrip",
+        "tests/accept/deref_roundtrip.ls",
+        "41 42\n3 4 -> 30 40\n",
+    );
+}
+
+/// §7.11 closed tuples alongside struct/reference writes: `Expr::Tuple`,
+/// `Expr::TupleField` (an owner's `.0`/`.1`) and `Expr::TupleFieldRef`
+/// (the same, through a reference -- `sum`'s own `pair.0 + pair.1`
+/// where `pair: &p (int, int)`), none of them built before this slice
+/// either. `tests/accept/tuple_roundtrip.ls` already existed as exactly
+/// this fixture.
+#[test]
+fn the_two_backends_agree_on_tuple_roundtrip() {
+    assert_backends_agree(
+        "backends-tuple-roundtrip",
+        "tests/accept/tuple_roundtrip.ls",
+        "7 true\n42\n",
+    );
+}
+
+/// §7.11 also closed `write_bytes`/`write_err` (`docs/bulk-io.md` §3),
+/// found trying to build `revcomp.ls` once field/reference writes no
+/// longer stood in front of it -- `fwrite` through `stdout`/`stderr`,
+/// the platform-specific symbol `lex-sys-codegen`'s own `emit.rs`
+/// already resolves. `revcomp.ls` is the real target #106 traced this
+/// boundary to, checked against the Benchmarks Game's own reference
+/// output the same way `benchmarks.rs`'s
+/// `fasta_and_reverse_complement_print_the_published_answer` already
+/// does for `--backend cranelift`.
+#[test]
+fn the_two_backends_agree_on_revcomp() {
+    let root = repo_root().join("benches").join("game");
+    let stdin = std::fs::read_to_string(root.join("fasta-1000.txt")).expect("fasta-1000.txt");
+    let expected =
+        std::fs::read_to_string(root.join("revcomp-1000.txt")).expect("revcomp-1000.txt");
+
+    for backend in ["cranelift", "llvm"] {
+        let dir = scratch(&format!("backends-revcomp-{backend}"));
+        let exe = dir.join("out");
+        let build = Command::new(BIN)
+            .args([
+                "build".as_ref(),
+                root.join("revcomp.ls").as_os_str(),
+                "--std".as_ref(),
+                "--backend".as_ref(),
+                backend.as_ref(),
+                "-o".as_ref(),
+                exe.as_os_str(),
+            ])
+            .output()
+            .expect("the compiler runs");
+        assert!(
+            build.status.success(),
+            "`--backend {backend}` should build `revcomp.ls`, but said:\n{}",
+            String::from_utf8_lossy(&build.stderr)
+        );
+
+        let mut child = Command::new(&exe)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("the program runs");
+        child
+            .stdin
+            .take()
+            .expect("a piped stdin")
+            .write_all(stdin.as_bytes())
+            .expect("the program accepts its input");
+        let output = child.wait_with_output().expect("the program finishes");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(output.status.code(), Some(0), "`--backend {backend}` should exit 0");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            expected,
+            "`--backend {backend}` should print what the Benchmarks Game publishes"
+        );
+    }
+}
+
 /// The boundary this slice draws is a located refusal, not a crash or a
 /// silent wrong answer: `region`/`alloc_slice` moved out of this list
 /// once §7.5 landed; `arena_roundtrip.ls` now refuses on bare `alloc[a]`

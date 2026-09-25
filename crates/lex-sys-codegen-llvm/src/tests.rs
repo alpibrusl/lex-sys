@@ -276,6 +276,31 @@ fn structs_and_enums_build_and_run_the_enums_fixture() {
     assert_eq!(output.status.code(), Some(0), "the LLVM backend exited wrongly");
 }
 
+/// `docs/llvm-backend.md` §7.11: `Place::Field`/`Place::Deref`, plus the
+/// read-side siblings (`Expr::FieldRef`/`Expr::FieldAddr`/`Expr::Deref`)
+/// -- `tests/accept/deref_roundtrip.ls` exercises a shared and a unique
+/// reference to a bare `int` (`*n`, `*n = e`), a field read *through* a
+/// reference (`scale`'s own `p.x`/`p.y`), and the whole referent
+/// replaced (`*p = Point { .. }`), all in one fixture.
+#[test]
+fn field_and_deref_writes_build_and_run_the_deref_roundtrip_fixture() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("tests")
+        .join("accept")
+        .join("deref_roundtrip.ls");
+    let source = std::fs::read_to_string(&path).expect("the fixture exists");
+    let object = compiled(&source, "main");
+    let output = run(&object, "deref-roundtrip");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "41 42\n3 4 -> 30 40\n",
+        "the LLVM backend computed the wrong values"
+    );
+    assert_eq!(output.status.code(), Some(0), "the LLVM backend exited wrongly");
+}
+
 /// `s[i]` is bounds-checked (`docs/defined-behaviour.md` §1); `uge`
 /// catches both ends with one comparison, so a negative index and one
 /// past the end are the same check on real hardware, not only on paper.

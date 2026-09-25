@@ -43,22 +43,31 @@
 //! §7.9 closed `getchar` (the mirror of `putchar`) and, found sitting
 //! in front of `revcomp.ls`, `Expr::Subslice` (`s[a..b]`) -- the same
 //! two bounds checks `element_address` already makes, over a range
-//! rather than one element. `revcomp.ls` itself needs a third,
-//! materially bigger gap past both: `Place::Field`/`Place::Deref`,
-//! named since §5 and not closed here. Every `benches/` program behind
-//! only the gaps closed so far now builds on `--backend llvm`.
+//! rather than one element. `revcomp.ls` itself needed a third,
+//! materially bigger gap past both: `Place::Field`/`Place::Deref`.
+//!
+//! §7.11 closed that gap, and the read-side cluster sitting behind the
+//! same name: `Expr::Deref`/`Expr::FieldRef`/`Expr::FieldAddr` and
+//! their tuple-shaped counterparts, plus `Expr::Tuple`/`Expr::
+//! TupleField` -- one shared `field_offset`/`tuple_field_offset` helper
+//! underneath all of them -- and, found while building `revcomp.ls`
+//! against it, `write_bytes`/`write_err` (`fwrite` through `stdout`/
+//! `stderr`, platform-symbol resolution mirroring `lex-sys-codegen`'s
+//! own). `revcomp.ls` now builds, runs, and matches the Benchmarks
+//! Game's own published output. Every `benches/` program behind only
+//! the gaps closed so far now builds on `--backend llvm`.
 //!
 //! Still refused: matching *through* a reference (only an owned
 //! scrutinee's tag and payload are read directly; `docs/reading-
 //! references.md`'s address-only binding mode has no counterpart here
-//! yet), `Place::Field`/`Place::Deref` (writing through a reference
-//! needs pointer arithmetic into a referent this backend has not built
-//! -- `revcomp.ls`'s own boundary now), bare `Expr::Alloc`/`Expr::
-//! Boxed`/`Expr::Unboxed` (a single-value allocation, arena or heap --
-//! nothing in `benches/` asks for one), `arg_count`, `Type::Float`,
-//! `Ffi`/`extern fn`, `Net`, and every other `Builtin` beyond
-//! `PutChar`/`GetChar`/`Split`/`Release`/`Narrow`/`IntOf`/`ByteOf`/
-//! `WrappingAdd`/`WrappingSub`/`WrappingMul`.
+//! yet -- a different feature from the field/deref access §7.11
+//! closed, not yet connected to a `benches/` program), bare `Expr::
+//! Alloc`/`Expr::Boxed`/`Expr::Unboxed` (a single-value allocation,
+//! arena or heap -- nothing in `benches/` asks for one), `arg_count`,
+//! `Type::Float`, `Ffi`/`extern fn`, `Net`, and every other `Builtin`
+//! beyond `PutChar`/`GetChar`/`Split`/`Release`/`Narrow`/`IntOf`/
+//! `ByteOf`/`WrappingAdd`/`WrappingSub`/`WrappingMul`/`Write`/
+//! `WriteErr`.
 //!
 //! This backend is intentionally partial. Everything it does not yet lower
 //! is refused with a [`CodegenError`], never a panic: unlike
