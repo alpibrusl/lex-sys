@@ -70,19 +70,33 @@
 //! `alloc_slice`'s own `bump`, `boxed_slice`'s own `malloc`-and-null-
 //! check, both minus their fill loop. `binarytrees.ls` builds too now,
 //! taking both of §7.13's named targets with it rather than only one.
-//! Every `benches/` program behind only the gaps closed so far now
-//! builds on `--backend llvm`.
+//!
+//! §7.17 closed `Type::Float` -- the structural gap underneath it,
+//! `scalar_kind`, mattered more than the arithmetic itself: unlike
+//! Cranelift's intrinsically-typed `Value`, this backend's `LValue` has
+//! no type tag, so `binop`/`Expr::Neg` had no way to tell a `float`
+//! operand from an `int` one before evaluating it. `scalar_kind`
+//! answers that structurally, without evaluating anything, and every
+//! float operation -- unchecked arithmetic, ordered `fcmp` comparisons
+//! (`!=` the one unordered exception), `float_of`/`truncate` (three
+//! explicit checks ahead of `fptosi`, which is poison rather than
+//! trapping on the inputs that matter), `bits_of`'s NaN
+//! canonicalisation, `sqrt`, and (found unrelated but closed alongside,
+//! since nothing had built it either) both halves of `Expr::Neg` --
+//! follows from it. `spectral.ls` and `fasta.ls`, `Type::Float`'s two
+//! named targets, both build and match Cranelift exactly. Every
+//! `benches/` program this document tracks now builds on `--backend
+//! llvm`.
 //!
 //! Still refused: matching *through* a reference (only an owned
 //! scrutinee's tag and payload are read directly; `docs/reading-
 //! references.md`'s address-only binding mode has no counterpart here
 //! yet -- a different feature from the field/deref access §7.11
-//! closed, not yet connected to a `benches/` program), `Type::Float`
-//! (the only gap left blocking more than one `benches/` program --
-//! `spectral.ls` and `fasta.ls` both), `Ffi`/`extern fn`, `Net`, and
-//! every other `Builtin` beyond `PutChar`/`GetChar`/`ArgCount`/`Arg`/
-//! `Split`/`Release`/`Narrow`/`IntOf`/`ByteOf`/`WrappingAdd`/
-//! `WrappingSub`/`WrappingMul`/`Write`/`WriteErr`.
+//! closed, not yet connected to a `benches/` program), `Ffi`/`extern
+//! fn`, `Net`, and every other `Builtin` beyond `PutChar`/`GetChar`/
+//! `ArgCount`/`Arg`/`Split`/`Release`/`Narrow`/`IntOf`/`ByteOf`/
+//! `WrappingAdd`/`WrappingSub`/`WrappingMul`/`Write`/`WriteErr`/
+//! `FloatOf`/`Truncate`/`BitsOf`/`IsNan`/`Sqrt`.
 //!
 //! This backend is intentionally partial. Everything it does not yet lower
 //! is refused with a [`CodegenError`], never a panic: unlike
@@ -96,10 +110,15 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use lex_sys_codegen::CodegenError;
-use lex_sys_ir::Program;
+use lex_sys_ir::{Arm, BinOp, Builtin, Callee, Expr, Func, Place, Program, Slot, Stmt};
+use lex_sys_types::{DefId, Type};
 use target_lexicon::Triple;
 
+mod body;
 mod emit;
+
+use body::*;
+use emit::*;
 
 /// Compile a program to the bytes of a native object file for the host.
 pub fn compile_object(program: &Program, entry: &str) -> Result<Vec<u8>, CodegenError> {

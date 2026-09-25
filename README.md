@@ -447,16 +447,21 @@ still reproduces the **1.6×–1.8×** gap above almost exactly — and
 `objdump`, not the wall clock, confirms why on several kernels: once a
 loop's trap comes out (`wrapping_add`/`sub`/`mul` in place of `+`/`-`/
 `*`), `--backend llvm` actually vectorises it, where the checked twin,
-otherwise identical, compiles to zero SIMD instructions. Fourteen of
-`benches/`'s programs build through it today: `revcomp.ls` — **42%–46%
-faster** on `--backend llvm`, once writing through a reference
-(`Place::Field`/`Place::Deref`) closed — `fannkuch.ls` — **22%–28%
-faster**, once `arg_count`/`arg` closed — and `binarytrees.ls`, once
-single-value allocation (`alloc`/`box`/`unbox`) closed too. It is
-**not** a complete backend — matching through a reference, `float`
-arithmetic, `Ffi`/`extern fn` and `Net` are among what it still
-refuses, deliberately, as an opt-in and partial backend rather than a
-finished second one.
+otherwise identical, compiles to zero SIMD instructions. Sixteen of
+`benches/`'s programs build through it today, every one this document
+tracks: `revcomp.ls` — **42%–46% faster** on `--backend llvm`, once
+writing through a reference (`Place::Field`/`Place::Deref`) closed —
+`fannkuch.ls` — **22%–28% faster**, once `arg_count`/`arg` closed —
+`binarytrees.ls`, once single-value allocation (`alloc`/`box`/`unbox`)
+closed too — and `spectral.ls`/`fasta.ls` (**45%–56%**/**10%–20%
+faster**), once `float` arithmetic closed. `float`'s own gap turned out
+to be structural, not arithmetic: this backend's `LValue` carries no
+type tag the way Cranelift's `Value` does, so telling a `float`
+operand from an `int` one needed a new helper, `scalar_kind`, reading
+the expression that produced a value rather than the value itself. It
+is **not** a complete backend — matching through a reference,
+`Ffi`/`extern fn` and `Net` are what it still refuses, deliberately, as
+an opt-in and partial backend rather than a finished second one.
 [`ROADMAP.md`](docs/ROADMAP.md) says what's next.
 
 ---

@@ -108,12 +108,20 @@ fn the_first_slice_builds_and_runs_the_smoke_fixture() {
 /// should have refused this": a program outside what this backend lowers
 /// is refused with a located `CodegenError`, never a panic. `region`/
 /// `alloc_slice` moved out of this list once §7.5 landed; bare
-/// `alloc[a]`/`box`/`unbox` moved out once §7.15 landed. `Type::Float`
-/// is still such a gap -- `tests/accept/floating_point.ls` needed it
-/// and nothing else to stay outside this backend.
+/// `alloc[a]`/`box`/`unbox` moved out once §7.15 landed; `Type::Float`
+/// moved out once §7.17 landed. Matching *through* a reference is still
+/// such a gap -- `match`ing a `borrow`ed reference to an enum rather
+/// than an owned value, right inside `main` so this backend's own
+/// "emit only what `main` reaches" pruning does not skip it the way a
+/// separate, uncalled function would be.
 #[test]
 fn a_program_outside_this_backend_is_refused_not_panicked() {
     let source = "\
+enum E {
+    A,
+    B(int),
+}
+
 fn main(world: World) -> [] int {
     let Split { io, ffi, fs, heap, args } = split(world);
     release(args);
@@ -121,15 +129,79 @@ fn main(world: World) -> [] int {
     release(ffi);
     release(io);
     release(heap);
-    let x = 1.0 / 2.0;
-    return 0;
+    let e = E::B(1);
+    var result = 0;
+    borrow e as &r in {
+        match r {
+            E::A => { result = 0; }
+            E::B(n) => { result = *n; }
+        }
+    }
+    return result;
 }
 ";
     let ast = parse(source).expect("parses");
     let program = lex_sys_ir::lower(&ast).expect("type-checks");
     let error = compile_object(&program, "main")
-        .expect_err("`Type::Float` is not part of this backend yet");
-    assert!(error.message.contains("Float"), "{}", error.message);
+        .expect_err("matching through a reference is not part of this backend yet");
+    assert!(error.message.contains("reference"), "{}", error.message);
+}
+
+/// §7.17: `Type::Float` closed. `tests/accept/floating_point.ls` itself
+/// imports `std.io` for its printing, which `compiled`'s bare
+/// `lex_sys_ir::lower` cannot resolve (no `--std` source injection at
+/// this level, unlike every other crate-level fixture here) -- so this
+/// is a self-contained program instead, covering the same ground:
+/// arithmetic, `truncate`, `sqrt`, `bits_of`, `is_nan`, threaded
+/// through `x`, an unfoldable runtime value the same way
+/// `program_returning` keeps one, so the checker cannot fold this into
+/// a `static` and skip codegen entirely.
+#[test]
+fn floating_point_arithmetic_conversions_and_sqrt_build_and_run() {
+    let source = "\
+fn probe[&i](io: &!i Io) -> [io_write] int {
+    return putchar(io, 0);
+}
+
+fn main(world: World) -> [] int {
+    let Split { io, ffi, fs, heap, args } = split(world);
+    release(args); release(heap); release(fs); release(ffi);
+    var x = 0;
+    borrow mut io as &!i in {
+        x = probe(i);
+    }
+    release(io);
+
+    let n = float_of(x) + 4.0;
+    let sum = n + 1.5;
+    let product = sum * 2.0;
+    let back = truncate(product);
+    let root = sqrt(product * product);
+    let nan = (n - n) / (n - n);
+
+    var status = 0;
+    if back == 11 {
+        status = status + 1;
+    }
+    if root == product {
+        status = status + 1;
+    }
+    if bits_of(n) == bits_of(4.0) {
+        status = status + 1;
+    }
+    if is_nan(nan) {
+        status = status + 1;
+    }
+    return status - 4;
+}
+";
+    let object = compiled(source, "main");
+    let output = run(&object, "float-arithmetic");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "one of float_of/truncate/sqrt/bits_of/is_nan computed the wrong value"
+    );
 }
 
 /// `docs/llvm-backend.md` §5's second slice: `tests/accept/llvm_arith.ls`
