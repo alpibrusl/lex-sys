@@ -590,3 +590,39 @@ fn main(world: World) -> [] int {
         "listen/accept on an invalid fd should both report failure, matching Cranelift"
     );
 }
+
+/// `docs/llvm-backend.md` §7.21: `bind`, closed -- the second of `Net`'s
+/// four builtins, after `listen`/`accept` (§7.20). §6.1's own rule:
+/// `bind`'s port is checked against the capability's bound *before* any
+/// syscall runs, the same as `lex-sys-codegen`'s own `bind` and confirmed
+/// here the same way `assert_traps_with_sigill`/`assert_subslicing_traps`
+/// already check a trap -- by signal, not only by `status.code() ==
+/// None`, since every signal alike would satisfy that.
+#[test]
+fn binding_the_wrong_port_traps_with_sigill() {
+    let source = "\
+edition 2;
+
+fn main(world: World) -> [] int {
+    let Split { io, ffi, fs, heap, args, net } = split(world);
+    release(args); release(heap); release(fs); release(ffi); release(io);
+
+    var fd = 0;
+    let bound = narrow(net, \"1\");
+    borrow bound as &n in {
+        fd = bind(n, 2);
+    }
+    release(bound);
+    return fd;
+}
+";
+    let object = compiled(source, "main");
+    let output = run(&object, "bind-wrong-port");
+    assert_eq!(output.status.code(), None, "a port outside the bound should not exit normally");
+    assert_eq!(
+        output.status.signal(),
+        Some(4),
+        "binding a port outside the capability's bound should trap with SIGILL, matching \
+         Cranelift's own signal (docs/llvm-backend.md §3.2)"
+    );
+}

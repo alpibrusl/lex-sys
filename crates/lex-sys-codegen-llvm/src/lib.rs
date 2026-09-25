@@ -113,11 +113,26 @@
 //! a *real* fd, so `listen`/`accept` are tested here against a
 //! deliberately invalid one (`tests/accept/listen_accept_bad_fd.ls`).
 //!
-//! Still refused: `Ffi`/`extern fn`; `Net`'s `connect` and `bind`
-//! (`Expr::Connect`/`Expr::Bind`, dedicated IR nodes, not
-//! `Callee::Builtin`); and every other `Builtin` beyond `PutChar`/
-//! `GetChar`/`ArgCount`/`Arg`/`Split`/`Release`/`Narrow`/`IntOf`/
-//! `ByteOf`/`WrappingAdd`/`WrappingSub`/`WrappingMul`/`Write`/
+//! §7.21 closed `bind`: `socket`+`setsockopt(SO_REUSEADDR)`+`bind`
+//! folded into one call, the same `struct sockaddr_in`
+//! `lex-sys-codegen`'s own `bind` builds by hand. The one new shape:
+//! `socket`/`bind` can each fail, returning `-1` rather than trapping
+//! (only a bound mismatch traps, checked first), so this is the first
+//! *expression* needing a value conditional on which of three runtime
+//! paths ran -- a plain `alloca i64` result cell written in each
+//! branch and loaded once at the merge label, following `if_stmt`'s
+//! own "no `phi`" rule rather than introducing a new one.
+//! `crates/lex-sys/tests/conformance/backends.rs`'s
+//! `the_two_backends_bind_and_accept_a_real_connection` builds a
+//! listener on each backend, connects a real `TcpStream` from the test
+//! process, and checks both exit `0` -- the first Net-capable program
+//! this backend has ever actually run, not a bad-fd stand-in.
+//!
+//! Still refused: `Ffi`/`extern fn`; `Net`'s `connect`
+//! (`Expr::Connect`, needing `getaddrinfo`-based host resolution,
+//! genuinely larger than `bind`); and every other `Builtin` beyond
+//! `PutChar`/`GetChar`/`ArgCount`/`Arg`/`Split`/`Release`/`Narrow`/
+//! `IntOf`/`ByteOf`/`WrappingAdd`/`WrappingSub`/`WrappingMul`/`Write`/
 //! `WriteErr`/`FloatOf`/`Truncate`/`BitsOf`/`IsNan`/`Sqrt`/`Listen`/
 //! `Accept` -- none with a `benches/` program or `tests/accept/`
 //! fixture asking for it yet.

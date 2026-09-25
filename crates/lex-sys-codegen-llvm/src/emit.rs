@@ -236,7 +236,15 @@ pub(crate) fn emit_module(
     // declared unconditionally the same way every other libc symbol
     // here is.
     text.push_str("declare i32 @listen(i32, i32)\n");
-    text.push_str("declare i32 @accept(i32, ptr, ptr)\n\n");
+    text.push_str("declare i32 @accept(i32, ptr, ptr)\n");
+    // `bind` (§7.21, `docs/listen.md` §6): `socket`+`setsockopt`+`bind`
+    // folded into one call, the same libc surface `examples/serve/
+    // serve.ls` reaches by hand and `lex-sys-codegen`'s own `body/net.rs`
+    // already declares for Cranelift.
+    text.push_str("declare i32 @socket(i32, i32, i32)\n");
+    text.push_str("declare i32 @setsockopt(i32, i32, i32, ptr, i32)\n");
+    text.push_str("declare i32 @bind(i32, ptr, i32)\n");
+    text.push_str("declare i32 @close(i32)\n\n");
 
     // `arg_count`/`arg` (§7.13, `docs/arguments.md` §3): `argc`/`argv` as
     // `main` was handed them, stashed once into module-local storage and

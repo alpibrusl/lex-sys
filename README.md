@@ -470,8 +470,16 @@ backend — `Ffi`/`extern fn` and `Net` are what it refuses, with no
 opt-in and partial backend rather than a finished second one. `Net`
 has since been scoped directly rather than waiting on a `benches/`
 program: `listen`/`accept`, the two of its four builtins that take no
-capability, are closed — `connect`/`bind` and `Ffi`/`extern fn`, the
-only way to obtain a real fd, are still refused.
+capability, closed first, then `bind` itself — `socket`+
+`setsockopt(SO_REUSEADDR)`+`bind` folded into one call, the same
+`struct sockaddr_in` `lex-sys-codegen`'s own `bind` builds by hand,
+and the first `--backend llvm` expression needing a value conditional
+on which of three runtime paths ran rather than trapping or writing
+into an already-`alloca`'d `var`. A differential test now builds a
+listener on each backend, connects a real `TcpStream`, and checks
+both accept it — the first Net-capable program `--backend llvm` has
+ever actually run. `connect` and `Ffi`/`extern fn`, the only way to
+reach the network any other way, are still refused.
 [`ROADMAP.md`](docs/ROADMAP.md) says what's next.
 
 ---

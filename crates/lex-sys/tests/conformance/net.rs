@@ -214,14 +214,6 @@ fn the_network_programs_are_counted() {
 // `examples/fetch/` — the first program that connects (`docs/connect.md`)
 // ---------------------------------------------------------------------
 
-fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .expect("a free loopback port")
-        .local_addr()
-        .expect("a bound address")
-        .port()
-}
-
 /// A lex-sys client, fetching from a lex-sys server.
 ///
 /// Both halves of the network in one test: `examples/serve/` binds and
