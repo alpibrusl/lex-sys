@@ -244,17 +244,14 @@ impl<'a> FuncEmitter<'a> {
         Ok(values.remove(0))
     }
 
-    /// `docs/llvm-backend.md` §5's second slice: every `BinOp` except the
-    /// two short-circuit logical operators, which lower as control flow
-    /// (a real merge between two live values) rather than as an
-    /// instruction -- the same reason `Stmt::If`/`Stmt::While` are still
-    /// outside this backend.
+    /// `docs/llvm-backend.md` §5: every `BinOp`. The two short-circuit
+    /// logical operators are handled before either operand is evaluated
+    /// -- `rhs` must not run when `lhs` already decided the answer, which
+    /// is the one thing this function's usual "evaluate both, then
+    /// dispatch" shape must not do here.
     fn binop(&mut self, op: BinOp, lhs: &Expr, rhs: &Expr) -> Result<Vec<LValue>, String> {
         if op.is_short_circuit() {
-            return Err(format!(
-                "`{op:?}` short-circuits, which needs the control flow this backend does not \
-                 lower yet (docs/llvm-backend.md §5)"
-            ));
+            return self.short_circuit(op, lhs, rhs);
         }
         let a = self.scalar(lhs)?;
         let b = self.scalar(rhs)?;
@@ -367,6 +364,55 @@ impl<'a> FuncEmitter<'a> {
         let widened = self.fresh();
         self.out.push_str(&format!("  {widened} = zext i1 {cmp} to i8\n"));
         LValue::Reg(widened)
+    }
+
+    /// This backend's `bool` leaf is `i8` (0 or 1); every branch needs
+    /// LLVM's own `i1`, which this is the one conversion for.
+    fn truthy(&mut self, value: &LValue) -> String {
+        let cond = self.fresh();
+        self.out.push_str(&format!("  {cond} = icmp ne i8 {}, 0\n", operand(value)));
+        cond
+    }
+
+    /// `&&`/`||`: `ir.rs`'s own comment says these lower as control flow
+    /// rather than as an instruction, because `rhs` must not run once
+    /// `lhs` has already decided the answer. A one-leaf `alloca` holds
+    /// the result across the two blocks that can write it -- the same
+    /// "memory instead of a phi" choice every other branch in this file
+    /// makes -- so this needs no merge instruction, only two stores and a
+    /// load.
+    fn short_circuit(&mut self, op: BinOp, lhs: &Expr, rhs: &Expr) -> Result<Vec<LValue>, String> {
+        let a = self.scalar(lhs)?;
+        let cond = self.truthy(&a);
+        let n = self.blocks;
+        self.blocks += 1;
+        let (rhs_label, short_label, end_label) =
+            (format!("sc_rhs{n}"), format!("sc_short{n}"), format!("sc_end{n}"));
+        let slot = self.fresh();
+        self.out.push_str(&format!("  {slot} = alloca i8\n"));
+        // `&&`: a true `lhs` still needs `rhs`; a false one already
+        // answered `false`, so the branch taken on `lhs == true` goes to
+        // `rhs_label` and `lhs == false` goes to `short_label`. `||` is
+        // the mirror of both: `lhs == true` already answered `true`, and
+        // only `lhs == false` still needs `rhs`.
+        let (on_true, on_false) = if op == BinOp::And {
+            (rhs_label.clone(), short_label.clone())
+        } else {
+            (short_label.clone(), rhs_label.clone())
+        };
+        self.out.push_str(&format!("  br i1 {cond}, label %{on_true}, label %{on_false}\n"));
+        self.out.push_str(&format!("{rhs_label}:\n"));
+        let b = self.scalar(rhs)?;
+        self.out.push_str(&format!("  store i8 {}, ptr {slot}\n", operand(&b)));
+        self.out.push_str(&format!("  br label %{end_label}\n"));
+        self.out.push_str(&format!("{short_label}:\n"));
+        let shorted = if op == BinOp::And { 0 } else { 1 };
+        self.out.push_str(&format!("  store i8 {shorted}, ptr {slot}\n"));
+        self.out.push_str(&format!("  br label %{end_label}\n"));
+        self.out.push_str(&format!("{end_label}:\n"));
+        let result = self.fresh();
+        self.out.push_str(&format!("  {result} = load i8, ptr {slot}\n"));
+        Ok(vec![LValue::Reg(result)])
     }
 
     fn slot_reg(slot: u32, leaf: u32) -> String {
@@ -499,10 +545,27 @@ impl<'a> FuncEmitter<'a> {
                         return Ok(true);
                     }
                 }
-                Stmt::If { .. } | Stmt::While { .. } | Stmt::Match { .. } | Stmt::Region { .. } => {
-                    return Err("control flow is not part of the LLVM backend's first slice \
-                         (docs/llvm-backend.md §5); `--backend cranelift` builds this program"
-                        .to_owned());
+                Stmt::If { cond, then_body, else_body } => {
+                    if self.if_stmt(cond, then_body, else_body)? {
+                        return Ok(true);
+                    }
+                }
+                Stmt::While { cond, body } => self.while_stmt(cond, body)?,
+                Stmt::Match { .. } => {
+                    return Err(
+                        "`match` is not part of the LLVM backend yet -- it needs the enum \
+                         layout this backend does not lower (docs/llvm-backend.md §5); \
+                         `--backend cranelift` builds this program"
+                            .to_owned(),
+                    );
+                }
+                Stmt::Region { .. } => {
+                    return Err(
+                        "`region` is not part of the LLVM backend yet -- it needs the arena \
+                         allocation this backend does not lower (docs/llvm-backend.md §5); \
+                         `--backend cranelift` builds this program"
+                            .to_owned(),
+                    );
                 }
             }
         }
@@ -556,6 +619,79 @@ impl<'a> FuncEmitter<'a> {
             }
         }
         Ok(terminated)
+    }
+
+    /// `if`/`else`. Returns whether *both* arms terminate -- the checker's
+    /// own `terminates()` rule, and the reason a terminating `if` is
+    /// always a block's last statement: nothing here needs to merge a
+    /// live value between the two arms, because every local this backend
+    /// has is memory (`docs/llvm-backend.md` §5's own note on why this
+    /// crate never builds a `phi`), so the block after the `if` simply
+    /// reads whatever the taken arm last wrote.
+    fn if_stmt(
+        &mut self,
+        cond: &Expr,
+        then_body: &[Stmt],
+        else_body: &[Stmt],
+    ) -> Result<bool, String> {
+        let value = self.scalar(cond)?;
+        let cond1 = self.truthy(&value);
+        let n = self.blocks;
+        self.blocks += 1;
+        let (then_label, else_label, end_label) =
+            (format!("then{n}"), format!("else{n}"), format!("endif{n}"));
+        self.out.push_str(&format!("  br i1 {cond1}, label %{then_label}, label %{else_label}\n"));
+
+        self.out.push_str(&format!("{then_label}:\n"));
+        let then_terminated = self.stmts(then_body)?;
+        if !then_terminated {
+            self.out.push_str(&format!("  br label %{end_label}\n"));
+        }
+
+        self.out.push_str(&format!("{else_label}:\n"));
+        let else_terminated = self.stmts(else_body)?;
+        if !else_terminated {
+            self.out.push_str(&format!("  br label %{end_label}\n"));
+        }
+
+        let terminated = then_terminated && else_terminated;
+        // A block with no predecessor left (both arms terminated) is
+        // never branched to, and LLVM still requires it to end in a
+        // terminator if it exists at all -- so it is simplest not to
+        // emit it: nothing after this `if` runs either way, the same
+        // fact `terminates()` already established for the caller.
+        if !terminated {
+            self.out.push_str(&format!("{end_label}:\n"));
+        }
+        Ok(terminated)
+    }
+
+    /// `while`. Never itself a terminator -- `terminates()`'s own rule,
+    /// because a `while` might run zero times -- so this has no bool to
+    /// return, unlike `if_stmt`/`borrow_stmt`. The loop header is
+    /// re-entered by the back edge as well as by the first fall-through,
+    /// but it needs no `phi` for the same reason `if_stmt` needs none:
+    /// `cond` reads current values out of memory fresh on every entry.
+    fn while_stmt(&mut self, cond: &Expr, body: &[Stmt]) -> Result<(), String> {
+        let n = self.blocks;
+        self.blocks += 1;
+        let (head, body_label, end_label) =
+            (format!("loophead{n}"), format!("loopbody{n}"), format!("loopend{n}"));
+
+        self.out.push_str(&format!("  br label %{head}\n"));
+        self.out.push_str(&format!("{head}:\n"));
+        let value = self.scalar(cond)?;
+        let cond1 = self.truthy(&value);
+        self.out.push_str(&format!("  br i1 {cond1}, label %{body_label}, label %{end_label}\n"));
+
+        self.out.push_str(&format!("{body_label}:\n"));
+        let terminated = self.stmts(body)?;
+        if !terminated {
+            self.out.push_str(&format!("  br label %{head}\n"));
+        }
+
+        self.out.push_str(&format!("{end_label}:\n"));
+        Ok(())
     }
 
     fn store_leaves(&mut self, buffer: &str, kinds: &[LKind], values: &[LValue]) {

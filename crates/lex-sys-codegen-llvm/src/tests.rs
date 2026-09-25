@@ -105,11 +105,15 @@ fn the_first_slice_builds_and_runs_the_smoke_fixture() {
 
 /// `docs/internal-errors.md`'s promise applies to this backend too, even
 /// though its gaps are "not implemented yet" rather than "the checker
-/// should have refused this": a program outside the first slice is
-/// refused with a located `CodegenError`, never a panic.
+/// should have refused this": a program outside what this backend lowers
+/// is refused with a located `CodegenError`, never a panic. `match` is
+/// still such a gap -- it needs the enum layout this backend does not
+/// build (`if`/`while` moved out of this list once control flow landed).
 #[test]
-fn a_program_outside_the_first_slice_is_refused_not_panicked() {
+fn a_program_outside_this_backend_is_refused_not_panicked() {
     let source = "\
+enum Two { A, B }
+
 fn main(world: World) -> [] int {
     let Split { io, ffi, fs, heap, args } = split(world);
     release(args);
@@ -117,18 +121,17 @@ fn main(world: World) -> [] int {
     release(fs);
     release(ffi);
     release(io);
-    var n = 0;
-    while n < 3 {
-        n = n + 1;
+    match Two::A {
+        Two::A => { return 0; }
+        Two::B => { return 1; }
     }
-    return n;
 }
 ";
     let ast = parse(source).expect("parses");
     let program = lex_sys_ir::lower(&ast).expect("type-checks");
-    let error = compile_object(&program, "main")
-        .expect_err("a `while` loop is not part of the first slice");
-    assert!(error.message.contains("first slice"), "{}", error.message);
+    let error =
+        compile_object(&program, "main").expect_err("`match` is not part of this backend yet");
+    assert!(error.message.contains("match"), "{}", error.message);
 }
 
 /// `docs/llvm-backend.md` §5's second slice: `tests/accept/llvm_arith.ls`
@@ -149,6 +152,30 @@ fn checked_arithmetic_builds_and_runs_the_arith_fixture() {
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
         "Hi! OK$iK\n",
+        "the LLVM backend computed the wrong values"
+    );
+    assert_eq!(output.status.code(), Some(0), "the LLVM backend exited wrongly");
+}
+
+/// `docs/llvm-backend.md` §5's third slice: `tests/accept/llvm_control.ls`
+/// exercises `if`/`else`, `while`, all six comparisons and both
+/// short-circuit operators. The exact bytes prove the loop ran the right
+/// number of times and that `&&`/`||` skipped `shout` exactly when they
+/// should have, not only that the module compiled.
+#[test]
+fn control_flow_builds_and_runs_the_control_fixture() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("tests")
+        .join("accept")
+        .join("llvm_control.ls");
+    let source = std::fs::read_to_string(&path).expect("the fixture exists");
+    let object = compiled(&source, "main");
+    let output = run(&object, "control");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "01X34Z\n+-42\nF\n!T\nT\n!T\n",
         "the LLVM backend computed the wrong values"
     );
     assert_eq!(output.status.code(), Some(0), "the LLVM backend exited wrongly");
