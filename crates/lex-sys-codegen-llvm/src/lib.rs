@@ -103,11 +103,23 @@
 //! document names a `benches/`/`tests/accept/` target for is now
 //! closed.
 //!
-//! Still refused: `Ffi`/`extern fn`, `Net`, and every other `Builtin`
-//! beyond `PutChar`/`GetChar`/`ArgCount`/`Arg`/`Split`/`Release`/
-//! `Narrow`/`IntOf`/`ByteOf`/`WrappingAdd`/`WrappingSub`/
-//! `WrappingMul`/`Write`/`WriteErr`/`FloatOf`/`Truncate`/`BitsOf`/
-//! `IsNan`/`Sqrt` -- none with a `benches/` program or `tests/accept/`
+//! §7.20 closed the first two of `Net`'s four builtins: `listen`/
+//! `accept`, neither of which takes a capability (the fd's authority
+//! was already proved at `bind`), so both are ordinary fixed-signature
+//! `libc` calls, no different in shape from `Sqrt`. This slice was
+//! scoped directly rather than by a `benches/` program -- `Net` has
+//! none -- and closes smallest-first: `connect`/`bind` and `Ffi`/
+//! `extern fn` are still refused, and with them the only way to obtain
+//! a *real* fd, so `listen`/`accept` are tested here against a
+//! deliberately invalid one (`tests/accept/listen_accept_bad_fd.ls`).
+//!
+//! Still refused: `Ffi`/`extern fn`; `Net`'s `connect` and `bind`
+//! (`Expr::Connect`/`Expr::Bind`, dedicated IR nodes, not
+//! `Callee::Builtin`); and every other `Builtin` beyond `PutChar`/
+//! `GetChar`/`ArgCount`/`Arg`/`Split`/`Release`/`Narrow`/`IntOf`/
+//! `ByteOf`/`WrappingAdd`/`WrappingSub`/`WrappingMul`/`Write`/
+//! `WriteErr`/`FloatOf`/`Truncate`/`BitsOf`/`IsNan`/`Sqrt`/`Listen`/
+//! `Accept` -- none with a `benches/` program or `tests/accept/`
 //! fixture asking for it yet.
 //!
 //! This backend is intentionally partial. Everything it does not yet lower

@@ -229,7 +229,14 @@ pub(crate) fn emit_module(
     // `sqrt` (§7.17, `docs/float-math.md` §2): correctly rounded per
     // IEEE-754, which is why this is the one arithmetic builtin that is
     // an intrinsic rather than an instruction sequence.
-    text.push_str("declare double @llvm.sqrt.f64(double)\n\n");
+    text.push_str("declare double @llvm.sqrt.f64(double)\n");
+    // `listen`/`accept` (`docs/net.md` §7.20, `docs/listen.md` §6):
+    // neither takes a capability -- the port was already bound at
+    // `bind` -- so both are ordinary fixed-signature libc calls,
+    // declared unconditionally the same way every other libc symbol
+    // here is.
+    text.push_str("declare i32 @listen(i32, i32)\n");
+    text.push_str("declare i32 @accept(i32, ptr, ptr)\n\n");
 
     // `arg_count`/`arg` (§7.13, `docs/arguments.md` §3): `argc`/`argv` as
     // `main` was handed them, stashed once into module-local storage and
