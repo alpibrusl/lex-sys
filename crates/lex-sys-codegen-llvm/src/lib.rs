@@ -54,8 +54,17 @@
 //! against it, `write_bytes`/`write_err` (`fwrite` through `stdout`/
 //! `stderr`, platform-symbol resolution mirroring `lex-sys-codegen`'s
 //! own). `revcomp.ls` now builds, runs, and matches the Benchmarks
-//! Game's own published output. Every `benches/` program behind only
-//! the gaps closed so far now builds on `--backend llvm`.
+//! Game's own published output.
+//!
+//! §7.13 closed `arg_count`/`arg` -- `argc`/`argv` stashed once into
+//! module-local storage by `@main`, mirroring `lex-sys-codegen`'s own
+//! `emit_c_main`, `arg`'s bounds check the same `icmp uge` shape every
+//! other indexing operation here already uses. Only one of the two
+//! named targets builds past it: `fannkuch.ls` does, checked against a
+//! real argument and not only the no-argument fallback; `binarytrees.ls`
+//! reaches bare `Expr::Boxed` instead, one row lower in the same table.
+//! Every `benches/` program behind only the gaps closed so far now
+//! builds on `--backend llvm`.
 //!
 //! Still refused: matching *through* a reference (only an owned
 //! scrutinee's tag and payload are read directly; `docs/reading-
@@ -63,11 +72,11 @@
 //! yet -- a different feature from the field/deref access §7.11
 //! closed, not yet connected to a `benches/` program), bare `Expr::
 //! Alloc`/`Expr::Boxed`/`Expr::Unboxed` (a single-value allocation,
-//! arena or heap -- nothing in `benches/` asks for one), `arg_count`,
-//! `Type::Float`, `Ffi`/`extern fn`, `Net`, and every other `Builtin`
-//! beyond `PutChar`/`GetChar`/`Split`/`Release`/`Narrow`/`IntOf`/
-//! `ByteOf`/`WrappingAdd`/`WrappingSub`/`WrappingMul`/`Write`/
-//! `WriteErr`.
+//! arena or heap -- blocks `binarytrees.ls` now, not only this
+//! backend's own boundary fixture), `Type::Float`, `Ffi`/`extern fn`,
+//! `Net`, and every other `Builtin` beyond `PutChar`/`GetChar`/
+//! `ArgCount`/`Arg`/`Split`/`Release`/`Narrow`/`IntOf`/`ByteOf`/
+//! `WrappingAdd`/`WrappingSub`/`WrappingMul`/`Write`/`WriteErr`.
 //!
 //! This backend is intentionally partial. Everything it does not yet lower
 //! is refused with a [`CodegenError`], never a panic: unlike

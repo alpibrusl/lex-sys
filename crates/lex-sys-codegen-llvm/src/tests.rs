@@ -301,6 +301,30 @@ fn field_and_deref_writes_build_and_run_the_deref_roundtrip_fixture() {
     assert_eq!(output.status.code(), Some(0), "the LLVM backend exited wrongly");
 }
 
+/// `tests/accept/arguments.ls`, run with no arguments (`run` passes none):
+/// `argc` is still `1`, its own name, exactly as C hands it over
+/// (`docs/arguments.md` §3). The conformance suite's differential test
+/// passes real arguments; this fixture's own contract only covers the
+/// no-argument case.
+#[test]
+fn arg_count_and_arg_build_and_run_the_arguments_fixture() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("tests")
+        .join("accept")
+        .join("arguments.ls");
+    let source = std::fs::read_to_string(&path).expect("the fixture exists");
+    let object = compiled(&source, "main");
+    let output = run(&object, "arguments");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "1\nnamed: 1\n",
+        "the LLVM backend computed the wrong argc/argv"
+    );
+    assert_eq!(output.status.code(), Some(0), "the LLVM backend exited wrongly");
+}
+
 /// `s[i]` is bounds-checked (`docs/defined-behaviour.md` §1); `uge`
 /// catches both ends with one comparison, so a negative index and one
 /// past the end are the same check on real hardware, not only on paper.
