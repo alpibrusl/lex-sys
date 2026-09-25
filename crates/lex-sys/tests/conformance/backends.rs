@@ -94,18 +94,27 @@ fn the_two_backends_agree_on_hello_ls() {
     assert_backends_agree("backends-hello", "examples/hello.ls", "Hello, world!\n");
 }
 
+/// §5's fifth slice: structs and enums. `tests/accept/enums.ls`
+/// exercises a struct literal, an enum with payloads (one of them
+/// struct-typed), and `match` -- a chain of tag tests, a wildcard arm,
+/// and field access on an owned matched binding -- and the two backends
+/// compute byte-for-byte the same answers.
+#[test]
+fn the_two_backends_agree_on_the_enums_fixture() {
+    assert_backends_agree("backends-enums", "tests/accept/enums.ls", "001220069901\n");
+}
+
 /// The boundary this slice draws is a located refusal, not a crash or a
-/// silent wrong answer: a `struct`/`enum`/`match` program needs the
-/// aggregate layout and enum dispatch this backend does not lower yet
-/// (`docs/llvm-backend.md` §5).
+/// silent wrong answer: `region`/`alloc_slice` need the arena allocation
+/// this backend does not lower yet (`docs/llvm-backend.md` §5).
 #[test]
 fn a_program_outside_this_backend_is_refused_through_the_cli() {
-    let dir = scratch("backends-llvm-enums");
+    let dir = scratch("backends-llvm-arena");
     let exe = dir.join("out");
     let build = Command::new(BIN)
         .args([
             "build".as_ref(),
-            repo_root().join("tests/accept/enums.ls").as_os_str(),
+            repo_root().join("tests/accept/arena_roundtrip.ls").as_os_str(),
             "--std".as_ref(),
             "--backend".as_ref(),
             "llvm".as_ref(),
@@ -116,11 +125,11 @@ fn a_program_outside_this_backend_is_refused_through_the_cli() {
         .expect("the compiler runs");
     let _ = std::fs::remove_dir_all(&dir);
 
-    assert!(!build.status.success(), "`enums.ls` is outside this backend and should refuse");
+    assert!(
+        !build.status.success(),
+        "`arena_roundtrip.ls` is outside this backend and should refuse"
+    );
     assert_eq!(build.status.code(), Some(1), "an unsupported program is rule `internal`, exit 1");
     let message = String::from_utf8_lossy(&build.stderr).to_lowercase();
-    assert!(
-        message.contains("enum") || message.contains("struct"),
-        "the refusal should name the boundary it hit: {message}"
-    );
+    assert!(message.contains("region"), "the refusal should name the boundary it hit: {message}");
 }

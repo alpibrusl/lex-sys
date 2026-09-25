@@ -1,25 +1,33 @@
 # A second backend, and how it would actually get built
 
-> **Status: first four slices built, and `examples/hello.ls` builds**
+> **Status: first five slices built, and `examples/hello.ls` builds**
 > (§5, `lex-sys-codegen-llvm`, `--backend llvm`). §5 originally named
 > `hello.ls` as the *first* slice's target; building that slice found the
 > claim false — `hello.ls` needed checked arithmetic, bounds-checked
 > indexing, string-literal data, and (found along the way) control flow,
 > four things across four slices rather than one. The fourth, slices and
-> strings, is what closes the loop: `hello.ls` — `ci.yml`'s own smoke
-> test — now builds and runs through this backend, byte for byte the
-> same as through Cranelift. `tests/accept/llvm_smoke.ls`, `llvm_arith.ls`
-> and `llvm_control.ls` are what the first three slices' own bullet lists
-> actually describe; the fourth needed no new fixture of its own, because
-> `hello.ls` already was one. The second slice found LLVM's `sdiv`/`srem`
-> are **undefined**, not trapping, on the two inputs Cranelift traps — a
-> correction below, not assumed going in. The third needed no `phi`:
-> every local here is already memory, so an `if`'s two arms and a
-> `while`'s back edge just read whatever was last written, the same fact
-> the first slice's `alloca`-per-leaf design was for. The fourth reused
-> that fact a third time: a string literal's global symbol is already a
-> usable pointer constant in LLVM IR, so `Expr::Bytes` needed no
-> instruction at all, only a declaration.
+> strings, is what closed that loop: `hello.ls` — `ci.yml`'s own smoke
+> test — builds and runs through this backend, byte for byte the same as
+> through Cranelift. The fifth, structs and enums, is a different kind of
+> slice: nothing in this document's original plan asked for it by name
+> the way `hello.ls` asked for the first four — it is next because
+> `docs/ROADMAP.md`'s own "later slices" list already named it, and
+> `tests/accept/enums.ls` turned out to be a ready-made target once it
+> landed. `tests/accept/llvm_smoke.ls`, `llvm_arith.ls` and
+> `llvm_control.ls` are what the first three slices' own bullet lists
+> actually describe; the fourth and fifth needed no new fixture of their
+> own, because `hello.ls` and `enums.ls` already were ones. The second
+> slice found LLVM's `sdiv`/`srem` are **undefined**, not trapping, on
+> the two inputs Cranelift traps — a correction below, not assumed going
+> in. The third needed no `phi`: every local here is already memory, so
+> an `if`'s two arms and a `while`'s back edge just read whatever was
+> last written, the same fact the first slice's `alloca`-per-leaf design
+> was for. The fourth reused that fact a third time: a string literal's
+> global symbol is already a usable pointer constant in LLVM IR, so
+> `Expr::Bytes` needed no instruction at all, only a declaration. The
+> fifth reused `trap_if` a third time too, for `match`'s own tag-test
+> chain, and needed no `phi` either — the same memory-backed reasoning,
+> applied to a chain of branches instead of a diamond or a loop.
 >
 > `backend-limits.md` made the case: three separate performance
 > arguments — `aliasing.md`'s unspent uniqueness fact, `purity.md`'s
@@ -432,13 +440,67 @@ the read side uses, so indexed writes are not a silent asymmetric gap
 next to indexed reads. `Place::Field`/`Place::Deref` stay refused —
 both need struct/box layout, structs-and-enums' question below.
 
-**Later slices, each its own PR, not scoped further here:** structs and enums (LLVM's own aggregate types, a more
-direct mapping than Cranelift's flattened layout — worth its own
-measurement rather than an assumption; `Stmt::Match` waits on this),
-arenas and regions (a `Heap`-free allocation scheme LLVM has no special
-vocabulary for either, so likely the same bump-pointer strategy
-translated rather than redesigned; `Stmt::Region` waits on this),
-`Ffi`/`extern fn` (LLVM's own `declare` is close to a direct match),
+**Fifth slice: structs and enums — built.** `Expr::Struct` needed
+almost nothing new: a struct value is positional already (declaration
+order, not source order), so its leaves are just every field's leaves
+concatenated — the same shape `Expr::Tuple` would be, and this backend
+already reads a struct's fields this way through `Expr::Field`, one
+slice's worth of reading built before any construction was.
+
+`Expr::Enum` and `Stmt::Match` are where the real work was, and both
+matched `lex-sys-codegen`'s own layout exactly rather than inventing a
+narrower one: an enum's leaves are a tag (`i64`) followed by **every**
+variant's payload leaves, not only the constructed one — wasteful and
+deliberately so, because overlaying payloads is a layout decision this
+milestone makes none of. `variant_layout` computes where one variant's
+slice of that whole starts, shared by both directions: `enum_lit`
+writes the tag and the constructed variant's values, zero-filling
+every other variant's leaves (a value that is not this variant is not
+readable without matching on the tag first, so what is actually there
+is unobservable); `bind_payload` reads the same offsets back out when a
+`match` arm binds them. `match_stmt` lowers to a chain of tag tests —
+`icmp eq` against each arm's variant, in order, falling through on a
+miss — matching `lex-sys-codegen`'s own comment that a jump table would
+be faster and is the obvious later move for both backends alike, not
+just this one.
+
+**One real subtlety, not obvious until measured against `if_stmt`'s
+own shape:** a `match` whose every tested arm returns still needs a
+`merge` block, unlike `if_stmt`, which omits one in the equivalent
+case. The reason is exhaustiveness's two different sources. `if`/`else`
+are syntactically exhaustive — there is always a real `else`, even an
+empty one — so §5's third slice could simply not emit a fall-through
+edge when both sides terminate. A `match` over enum variants is only
+exhaustive because the *checker* proved every variant is covered, which
+a chain of `icmp`s does not know on its own: with no wildcard arm, the
+chain's final `next` block falls through what the value's type makes
+impossible but the IR does not. That block still needs a legal
+terminator, so `match_stmt` always emits `merge` and gives it a default
+return exactly when nothing valid reaches it — the same "unreachable
+but must still be well-formed" reasoning `emit_default_return` (factored
+out of `emit`'s own function-level fall-through in this slice) already
+had one job for.
+
+**Deliberately not in this slice:** matching *through* a reference.
+`docs/reading-references.md`'s address-only binding mode — where a
+matched payload is a pointer into the referent rather than a copy of
+it, and costs nothing because nothing is loaded — has no counterpart
+here; `by_reference` scrutinees are refused outright. Getting that
+right needs the same pointer-into-a-referent arithmetic
+`Place::Field`/`Place::Deref` need, which is also still refused, for
+the same reason: none of it was needed to make `tests/accept/enums.ls`
+build, and `enums.ls`'s own `match` binds an *owned* `Point` (`Shape::
+At(p, r) => p.x + p.y + r`), read back through the `Expr::Field` this
+backend already had.
+
+**Later slices, each its own PR, not scoped further here:** matching
+through a reference and `Place::Field`/`Place::Deref` (both need
+pointer arithmetic into a referent — the address-only counterpart to
+what this slice built by value), arenas and regions (a `Heap`-free
+allocation scheme LLVM has no special vocabulary for either, so likely
+the same bump-pointer strategy translated rather than redesigned;
+`Stmt::Region` waits on this), `Ffi`/`extern fn` (LLVM's own `declare`
+is close to a direct match),
 `Net`. Each is a `Builtin` or `BinOp` variant this document is not
 claiming to have scoped — `ir.rs` has 34 builtins and lists them so the
 next slice can pick a subset by reading them rather than guessing at the

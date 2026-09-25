@@ -106,32 +106,31 @@ fn the_first_slice_builds_and_runs_the_smoke_fixture() {
 /// `docs/internal-errors.md`'s promise applies to this backend too, even
 /// though its gaps are "not implemented yet" rather than "the checker
 /// should have refused this": a program outside what this backend lowers
-/// is refused with a located `CodegenError`, never a panic. `match` is
-/// still such a gap -- it needs the enum layout this backend does not
-/// build (`if`/`while` moved out of this list once control flow landed).
+/// is refused with a located `CodegenError`, never a panic. `region` is
+/// still such a gap -- it needs the arena allocation this backend does
+/// not build (`if`/`while` moved out of this list once control flow
+/// landed, `match`/structs/enums once this slice landed).
 #[test]
 fn a_program_outside_this_backend_is_refused_not_panicked() {
     let source = "\
-enum Two { A, B }
-
 fn main(world: World) -> [] int {
     let Split { io, ffi, fs, heap, args } = split(world);
     release(args);
-    release(heap);
     release(fs);
     release(ffi);
     release(io);
-    match Two::A {
-        Two::A => { return 0; }
-        Two::B => { return 1; }
+    region r {
+        var s = alloc_slice[r](1, 0);
+        release(heap);
+        return s[0];
     }
 }
 ";
     let ast = parse(source).expect("parses");
     let program = lex_sys_ir::lower(&ast).expect("type-checks");
     let error =
-        compile_object(&program, "main").expect_err("`match` is not part of this backend yet");
-    assert!(error.message.contains("match"), "{}", error.message);
+        compile_object(&program, "main").expect_err("`region` is not part of this backend yet");
+    assert!(error.message.contains("region"), "{}", error.message);
 }
 
 /// `docs/llvm-backend.md` §5's second slice: `tests/accept/llvm_arith.ls`
@@ -247,6 +246,31 @@ fn hello_ls_builds_and_runs_end_to_end() {
         String::from_utf8_lossy(&output.stdout),
         "Hello, world!\n",
         "the LLVM backend printed the wrong thing"
+    );
+    assert_eq!(output.status.code(), Some(0), "the LLVM backend exited wrongly");
+}
+
+/// `docs/llvm-backend.md` §5's fifth slice: `tests/accept/enums.ls`
+/// exercises a struct literal, an enum with payloads (including a
+/// struct-typed payload), and `match` -- a chain of tag tests, a
+/// wildcard arm, and a matched binding read back through plain
+/// `Expr::Field`, since a by-value match binds an owned struct, not a
+/// reference to one.
+#[test]
+fn structs_and_enums_build_and_run_the_enums_fixture() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("tests")
+        .join("accept")
+        .join("enums.ls");
+    let source = std::fs::read_to_string(&path).expect("the fixture exists");
+    let object = compiled(&source, "main");
+    let output = run(&object, "enums");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "001220069901\n",
+        "the LLVM backend computed the wrong values"
     );
     assert_eq!(output.status.code(), Some(0), "the LLVM backend exited wrongly");
 }

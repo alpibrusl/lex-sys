@@ -13,8 +13,8 @@
 //! message -- exactly the shape [`lex_sys_codegen::CodegenError`] wants,
 //! without this crate depending on Cranelift to build it.
 
-use lex_sys_ir::{BinOp, Builtin, Callee, Expr, Func, Place, Program, Slot, Stmt};
-use lex_sys_types::Type;
+use lex_sys_ir::{Arm, BinOp, Builtin, Callee, Expr, Func, Place, Program, Slot, Stmt};
+use lex_sys_types::{DefId, Type};
 use target_lexicon::Triple;
 
 /// The machine types a leaf may be. No `f64`: `Type::Float` is refused
@@ -92,10 +92,18 @@ fn leaves_into(ty: &Type, program: &Program, out: &mut Vec<LKind>) -> Result<(),
                     leaves_into(&field.substitute(args, &[]), program, out)?;
                 }
             }
-            lex_sys_ir::TypeInfo::Enum { name, .. } => {
-                return Err(format!(
-                    "`{name}` is an enum, which the LLVM backend's first slice does not lower yet"
-                ));
+            // A tag, then *every* variant's payload leaves -- wasteful and
+            // deliberately so, matching `lex-sys-codegen`'s own rule
+            // (`abi::leaves_into`): overlaying the payloads is a layout
+            // decision no M1 backend makes. The tag is an `i64` for the
+            // same reason -- picking a narrower integer would be one too.
+            lex_sys_ir::TypeInfo::Enum { variants, .. } => {
+                out.push(LKind::I64);
+                for (_, payload) in variants {
+                    for ty in payload {
+                        leaves_into(&ty.substitute(args, &[]), program, out)?;
+                    }
+                }
             }
         },
         other => {
@@ -454,6 +462,19 @@ impl<'a> FuncEmitter<'a> {
         format!("%s{slot}_{leaf}")
     }
 
+    /// A zero of the function's own return type, for a block the checker
+    /// proved unreachable but LLVM still requires well-formed -- the
+    /// function's own fall-through at the end of `emit`, and `match_stmt`'s
+    /// impossible tag-chain fall-through, need exactly the same thing.
+    fn emit_default_return(&mut self) -> Result<(), String> {
+        let ret_kinds = leaves_of(&self.func.ret, self.program)?;
+        match ret_kinds.first() {
+            Some(k) => self.out.push_str(&format!("  ret {} {}\n", k.llvm(), k.zero())),
+            None => self.out.push_str("  ret void\n"),
+        }
+        Ok(())
+    }
+
     fn emit(&mut self) -> Result<String, String> {
         let ret_kinds = leaves_of(&self.func.ret, self.program)?;
         if ret_kinds.len() > 1 {
@@ -524,10 +545,7 @@ impl<'a> FuncEmitter<'a> {
         let body = self.func.body.clone();
         let terminated = self.stmts(&body)?;
         if !terminated {
-            match ret_kinds.first() {
-                Some(k) => self.out.push_str(&format!("  ret {} {}\n", k.llvm(), k.zero())),
-                None => self.out.push_str("  ret void\n"),
-            }
+            self.emit_default_return()?;
         }
         self.out.push_str("}\n");
         Ok(std::mem::take(&mut self.out))
@@ -593,13 +611,10 @@ impl<'a> FuncEmitter<'a> {
                     }
                 }
                 Stmt::While { cond, body } => self.while_stmt(cond, body)?,
-                Stmt::Match { .. } => {
-                    return Err(
-                        "`match` is not part of the LLVM backend yet -- it needs the enum \
-                         layout this backend does not lower (docs/llvm-backend.md §5); \
-                         `--backend cranelift` builds this program"
-                            .to_owned(),
-                    );
+                Stmt::Match { scrutinee, def, args, arms, by_reference } => {
+                    if self.match_stmt(scrutinee, *def, args, arms, *by_reference)? {
+                        return Ok(true);
+                    }
                 }
                 Stmt::Region { .. } => {
                     return Err(
@@ -736,6 +751,199 @@ impl<'a> FuncEmitter<'a> {
         Ok(())
     }
 
+    /// Where one variant's payload starts among the whole enum's leaves,
+    /// and how many leaves each of its payload fields is -- matching
+    /// `lex-sys-codegen`'s own `variant_layout` exactly: one leaf for the
+    /// tag, then every *earlier* variant's payload, whether or not this
+    /// value is ever that variant.
+    fn variant_layout(
+        &self,
+        def: DefId,
+        args: &[Type],
+        variant: u32,
+    ) -> Result<(usize, Vec<usize>), String> {
+        let lex_sys_ir::TypeInfo::Enum { variants, .. } = self.program.type_info(def) else {
+            return Err("a variant index on a type that is not an enum".to_owned());
+        };
+        let width = |ty: &Type| -> Result<usize, String> {
+            Ok(leaves_of(&ty.substitute(args, &[]), self.program)?.len())
+        };
+        let mut offset = 1usize;
+        for (_, payload) in &variants[..variant as usize] {
+            for ty in payload {
+                offset += width(ty)?;
+            }
+        }
+        let widths =
+            variants[variant as usize].1.iter().map(width).collect::<Result<Vec<_>, _>>()?;
+        Ok((offset, widths))
+    }
+
+    /// `Shape::Circle(2)`: the tag, then every variant's leaves -- this
+    /// variant's are the values just computed, the rest zeroed, because a
+    /// value that is not this variant is not readable without matching on
+    /// the tag first (matching `lex-sys-codegen`'s own `Expr::Enum` arm).
+    fn enum_lit(
+        &mut self,
+        def: DefId,
+        args: &[Type],
+        variant: u32,
+        payload: &[Expr],
+    ) -> Result<Vec<LValue>, String> {
+        let whole = Type::Named(def, args.to_vec());
+        let all_kinds = leaves_of(&whole, self.program)?;
+        let (offset, widths) = self.variant_layout(def, args, variant)?;
+        let payload_values: Vec<Vec<LValue>> =
+            payload.iter().map(|e| self.expr(e)).collect::<Result<_, _>>()?;
+
+        let mut out: Vec<LValue> = Vec::with_capacity(all_kinds.len());
+        out.push(LValue::Const(i64::from(variant)));
+        for kind in &all_kinds[1..] {
+            out.push(if *kind == LKind::Ptr {
+                LValue::Reg("null".to_owned())
+            } else {
+                LValue::Const(0)
+            });
+        }
+        let mut at = offset;
+        for (values, width) in payload_values.into_iter().zip(widths) {
+            debug_assert_eq!(values.len(), width);
+            for value in values {
+                out[at] = value;
+                at += 1;
+            }
+        }
+        Ok(out)
+    }
+
+    /// Copy a matched variant's payload into the slots its pattern bound
+    /// -- the by-value half of `lex-sys-codegen`'s own `bind_payload`
+    /// (matching *through* a reference is not part of this backend yet,
+    /// so there is no address-only half to mirror here).
+    fn bind_payload(
+        &mut self,
+        def: DefId,
+        args: &[Type],
+        variant: u32,
+        arm: &Arm,
+        values: &[LValue],
+    ) -> Result<(), String> {
+        let (offset, widths) = self.variant_layout(def, args, variant)?;
+        let mut at = offset;
+        for (binding, width) in arm.bindings.iter().zip(widths) {
+            if let Some(slot) = binding {
+                let kinds = self.slot_kinds[slot.0 as usize].clone();
+                for index in 0..width {
+                    let value = values[at + index].clone();
+                    self.out.push_str(&format!(
+                        "  store {} {}, ptr {}\n",
+                        kinds[index].llvm(),
+                        operand(&value),
+                        Self::slot_reg(slot.0, index as u32)
+                    ));
+                }
+            }
+            // A `_` binding still occupies its payload position; there is
+            // simply nowhere to put the value.
+            at += width;
+        }
+        Ok(())
+    }
+
+    /// `match`, lowered as a chain of tag tests -- a jump table would be
+    /// faster and is the obvious later move, matching
+    /// `lex-sys-codegen`'s own reasoning exactly. Returns whether every
+    /// arm returned, which makes the whole `match` a terminator.
+    ///
+    /// The merge block is always emitted, even when every tested arm
+    /// returns: the checker proves the arms exhaustive, but a chain that
+    /// falls all the way through without a wildcard still needs
+    /// somewhere well-formed to land, the same "unreachable but must
+    /// still be legal IR" reasoning `if_stmt` never needs (its two arms
+    /// are syntactically exhaustive) and this backend's own function
+    /// fall-through (`emit_default_return`) already has.
+    fn match_stmt(
+        &mut self,
+        scrutinee: &Expr,
+        def: DefId,
+        args: &[Type],
+        arms: &[Arm],
+        by_reference: bool,
+    ) -> Result<bool, String> {
+        if by_reference {
+            return Err("matching through a reference is not part of the LLVM backend yet \
+                 (docs/llvm-backend.md §5); `--backend cranelift` builds this program"
+                .to_owned());
+        }
+        let values = self.expr(scrutinee)?;
+        let Some(tag) = values.first().cloned() else {
+            return Err("a match scrutinee must be an enum (at least one leaf: the tag)".to_owned());
+        };
+
+        let n = self.blocks;
+        self.blocks += 1;
+        let merge = format!("matchend{n}");
+
+        let mut all_returned = true;
+        // Whether the fall-through chain still has an open block. A
+        // wildcard arm closes it, because nothing can follow one.
+        let mut open = true;
+
+        for (arm_index, arm) in arms.iter().enumerate() {
+            if !open {
+                break;
+            }
+            match arm.variant {
+                Some(variant) => {
+                    let body_label = format!("matcharm{n}_{arm_index}");
+                    let next_label = format!("matchnext{n}_{arm_index}");
+                    let matched = self.fresh();
+                    self.out.push_str(&format!(
+                        "  {matched} = icmp eq i64 {}, {variant}\n",
+                        operand(&tag)
+                    ));
+                    self.out.push_str(&format!(
+                        "  br i1 {matched}, label %{body_label}, label %{next_label}\n"
+                    ));
+
+                    self.out.push_str(&format!("{body_label}:\n"));
+                    self.bind_payload(def, args, variant, arm, &values)?;
+                    let returned = self.stmts(&arm.body)?;
+                    if !returned {
+                        self.out.push_str(&format!("  br label %{merge}\n"));
+                    }
+                    all_returned &= returned;
+
+                    self.out.push_str(&format!("{next_label}:\n"));
+                }
+                None => {
+                    // The wildcard binds nothing and needs no test: it
+                    // runs right here, in the block the chain fell
+                    // through to.
+                    let returned = self.stmts(&arm.body)?;
+                    if !returned {
+                        self.out.push_str(&format!("  br label %{merge}\n"));
+                    }
+                    all_returned &= returned;
+                    open = false;
+                }
+            }
+        }
+
+        if open {
+            // The checker proved the arms exhaustive, so this is
+            // unreachable. It still needs filling: an unterminated block
+            // is not legal IR.
+            self.out.push_str(&format!("  br label %{merge}\n"));
+        }
+
+        self.out.push_str(&format!("{merge}:\n"));
+        if all_returned {
+            self.emit_default_return()?;
+        }
+        Ok(all_returned)
+    }
+
     fn store_leaves(&mut self, buffer: &str, kinds: &[LKind], values: &[LValue]) {
         for (leaf, (kind, value)) in kinds.iter().zip(values).enumerate() {
             let addr = self.fresh();
@@ -796,6 +1004,19 @@ impl<'a> FuncEmitter<'a> {
                     leaves_of(&fields[*index as usize].1.substitute(args, &[]), self.program)?
                         .len();
                 Ok(values[start..start + len].to_vec())
+            }
+            // A struct value is positional already, in declaration order
+            // -- the same shape `Expr::Tuple` would be -- so its leaves
+            // are just every field's leaves, concatenated.
+            Expr::Struct { fields, .. } => {
+                let mut out = Vec::new();
+                for field in fields {
+                    out.extend(self.expr(field)?);
+                }
+                Ok(out)
+            }
+            Expr::Enum { def, args, variant, payload } => {
+                self.enum_lit(*def, args, *variant, payload)
             }
             Expr::Call { callee, args } => self.call(callee, args),
             Expr::Bin { op, lhs, rhs } => self.binop(*op, lhs, rhs),
