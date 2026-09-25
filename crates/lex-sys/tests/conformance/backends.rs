@@ -552,20 +552,53 @@ fn the_two_backends_agree_on_fasta() {
     }
 }
 
+/// `docs/llvm-backend.md` §7.19: matching through a reference closed --
+/// `tests/accept/match_a_reference.ls` reads the same list three times
+/// through a shared reference (twice via `total`, once via `length`,
+/// one of them discarding a bound position with `_`) before consuming
+/// and freeing it once.
+#[test]
+fn the_two_backends_agree_on_match_a_reference() {
+    assert_backends_agree(
+        "backends-match-a-reference",
+        "tests/accept/match_a_reference.ls",
+        "10 3 10\nfreed 10\n",
+    );
+}
+
+/// `examples/tree.ls`, the richer target §7.19 names: a three-field
+/// variant (two `Box[Tree]`, one `int`), matched by reference three
+/// separate ways -- all three bound and recursed (`contains`), the
+/// first position discarded past two others (`deepest`), and all three
+/// composed into a multi-leaf struct return (`tally`, folding
+/// sum/count/depth). Not gated by any test until now, but named by
+/// `docs/reading-references.md` §4 and `docs/llvm-backend.md` as this
+/// feature's own motivating case.
+#[test]
+fn the_two_backends_agree_on_tree() {
+    assert_backends_agree(
+        "backends-tree",
+        "examples/tree.ls",
+        "1 3 4 5 7 8 9\nsum 37 count 7 depth 3\nhas 4: 1  has 6: 0  deepest 9\n",
+    );
+}
+
 /// The boundary this slice draws is a located refusal, not a crash or a
 /// silent wrong answer: `region`/`alloc_slice` moved out of this list
 /// once §7.5 landed; bare `alloc[a]`/`box`/`unbox` moved out once §7.15
-/// landed; `Type::Float` moved out once §7.17 landed.
-/// `match_a_reference.ls` now refuses on matching through a reference
-/// instead, still not part of this backend.
+/// landed; `Type::Float` moved out once §7.17 landed; matching through
+/// a reference moved out once §7.19 landed -- every gap this document
+/// names a `benches/`/`tests/accept/` target for is closed.
+/// `tests/accept/bytes_to_c.ls` now refuses on a foreign call instead,
+/// still not part of this backend.
 #[test]
 fn a_program_outside_this_backend_is_refused_through_the_cli() {
-    let dir = scratch("backends-llvm-match-reference");
+    let dir = scratch("backends-llvm-foreign-call");
     let exe = dir.join("out");
     let build = Command::new(BIN)
         .args([
             "build".as_ref(),
-            repo_root().join("tests/accept/match_a_reference.ls").as_os_str(),
+            repo_root().join("tests/accept/bytes_to_c.ls").as_os_str(),
             "--std".as_ref(),
             "--backend".as_ref(),
             "llvm".as_ref(),
@@ -576,14 +609,8 @@ fn a_program_outside_this_backend_is_refused_through_the_cli() {
         .expect("the compiler runs");
     let _ = std::fs::remove_dir_all(&dir);
 
-    assert!(
-        !build.status.success(),
-        "`match_a_reference.ls` is outside this backend and should refuse"
-    );
+    assert!(!build.status.success(), "`bytes_to_c.ls` is outside this backend and should refuse");
     assert_eq!(build.status.code(), Some(1), "an unsupported program is rule `internal`, exit 1");
     let message = String::from_utf8_lossy(&build.stderr).to_lowercase();
-    assert!(
-        message.contains("reference"),
-        "the refusal should name the boundary it hit: {message}"
-    );
+    assert!(message.contains("foreign"), "the refusal should name the boundary it hit: {message}");
 }

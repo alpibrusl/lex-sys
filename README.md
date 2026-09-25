@@ -458,10 +458,16 @@ faster**), once `float` arithmetic closed. `float`'s own gap turned out
 to be structural, not arithmetic: this backend's `LValue` carries no
 type tag the way Cranelift's `Value` does, so telling a `float`
 operand from an `int` one needed a new helper, `scalar_kind`, reading
-the expression that produced a value rather than the value itself. It
-is **not** a complete backend — matching through a reference,
-`Ffi`/`extern fn` and `Net` are what it still refuses, deliberately, as
-an opt-in and partial backend rather than a finished second one.
+the expression that produced a value rather than the value itself.
+Matching through a reference — the last gap this document tracked —
+closed the same way: the address arithmetic it needed had already been
+built for `Place::Field`/`Place::Deref` and structs/enums, so the
+whole change was one conditional tag-load plus an address-only mirror
+of the existing by-value binding path. **Every gap `llvm-backend.md`
+names a target for is now closed.** It is still **not** a complete
+backend — `Ffi`/`extern fn` and `Net` are what it refuses, with no
+`benches/` program or fixture asking for them yet, deliberately, as an
+opt-in and partial backend rather than a finished second one.
 [`ROADMAP.md`](docs/ROADMAP.md) says what's next.
 
 ---

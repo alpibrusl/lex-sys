@@ -88,15 +88,27 @@
 //! `benches/` program this document tracks now builds on `--backend
 //! llvm`.
 //!
-//! Still refused: matching *through* a reference (only an owned
-//! scrutinee's tag and payload are read directly; `docs/reading-
-//! references.md`'s address-only binding mode has no counterpart here
-//! yet -- a different feature from the field/deref access §7.11
-//! closed, not yet connected to a `benches/` program), `Ffi`/`extern
-//! fn`, `Net`, and every other `Builtin` beyond `PutChar`/`GetChar`/
-//! `ArgCount`/`Arg`/`Split`/`Release`/`Narrow`/`IntOf`/`ByteOf`/
-//! `WrappingAdd`/`WrappingSub`/`WrappingMul`/`Write`/`WriteErr`/
-//! `FloatOf`/`Truncate`/`BitsOf`/`IsNan`/`Sqrt`.
+//! §7.19 closed matching *through* a reference -- unlike every slice
+//! before it, close to what it looked like on the surface, because
+//! §7.11's `getelementptr`-address idiom and the fifth slice's
+//! `variant_layout`/`bind_payload` had already built everything it
+//! needed: a reference is one pointer leaf, so the scrutinee evaluates
+//! the same way in both modes and only the tag read differs (one more
+//! `load` by reference); `bind_payload` gained the address-only mirror
+//! of its by-value half, `variant_layout`'s own offset scaled to bytes
+//! via `getelementptr` rather than a loaded value. `tests/accept/
+//! match_a_reference.ls` and `examples/tree.ls` (a three-field variant,
+//! `_` discarding past two positions, folded into a multi-leaf struct
+//! return) both build and match Cranelift exactly. Every gap this
+//! document names a `benches/`/`tests/accept/` target for is now
+//! closed.
+//!
+//! Still refused: `Ffi`/`extern fn`, `Net`, and every other `Builtin`
+//! beyond `PutChar`/`GetChar`/`ArgCount`/`Arg`/`Split`/`Release`/
+//! `Narrow`/`IntOf`/`ByteOf`/`WrappingAdd`/`WrappingSub`/
+//! `WrappingMul`/`Write`/`WriteErr`/`FloatOf`/`Truncate`/`BitsOf`/
+//! `IsNan`/`Sqrt` -- none with a `benches/` program or `tests/accept/`
+//! fixture asking for it yet.
 //!
 //! This backend is intentionally partial. Everything it does not yet lower
 //! is refused with a [`CodegenError`], never a panic: unlike
