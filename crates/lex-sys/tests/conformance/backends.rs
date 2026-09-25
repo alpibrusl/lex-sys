@@ -588,17 +588,26 @@ fn the_two_backends_agree_on_tree() {
 /// once §7.5 landed; bare `alloc[a]`/`box`/`unbox` moved out once §7.15
 /// landed; `Type::Float` moved out once §7.17 landed; matching through
 /// a reference moved out once §7.19 landed; a foreign call moved out
-/// once §7.23 landed; `Fs` moved out once §7.24 landed.
-/// `tests/accept/static_data.ls` now refuses on `Expr::Static` instead
-/// -- found the same way `Fs` was, by checking a real fixture.
+/// once §7.23 landed; `Fs` moved out once §7.24 landed; `Expr::Static`
+/// and `Expr::BitNot` moved out once §7.25 landed -- and with them,
+/// every real fixture in `tests/accept/` and `examples/` builds on
+/// `--backend llvm`, checked directly in that slice's own session by
+/// building all of them. The one still-refusing program left is
+/// `examples/collect/collect.ls`, and not because anything is unbuilt:
+/// it declares its own `extern fn socket`, which collides with this
+/// backend's internal `@socket` declaration the same already-documented,
+/// already-accepted way every `Net`-declaring `extern fn` does (§7.23,
+/// `docs/ROADMAP.md` #92). This test now names that refusal instead of
+/// an unbuilt `Expr` -- still located, still not a crash, just a
+/// different reason.
 #[test]
 fn a_program_outside_this_backend_is_refused_through_the_cli() {
-    let dir = scratch("backends-llvm-static");
+    let dir = scratch("backends-llvm-socket-collision");
     let exe = dir.join("out");
     let build = Command::new(BIN)
         .args([
             "build".as_ref(),
-            repo_root().join("tests/accept/static_data.ls").as_os_str(),
+            repo_root().join("examples/collect/collect.ls").as_os_str(),
             "--std".as_ref(),
             "--backend".as_ref(),
             "llvm".as_ref(),
@@ -609,10 +618,51 @@ fn a_program_outside_this_backend_is_refused_through_the_cli() {
         .expect("the compiler runs");
     let _ = std::fs::remove_dir_all(&dir);
 
-    assert!(!build.status.success(), "`static_data.ls` is outside this backend and should refuse");
+    assert!(
+        !build.status.success(),
+        "`collect.ls`'s own `extern fn socket` should still collide and refuse"
+    );
     assert_eq!(build.status.code(), Some(1), "an unsupported program is rule `internal`, exit 1");
     let message = String::from_utf8_lossy(&build.stderr).to_lowercase();
-    assert!(message.contains("static"), "the refusal should name the boundary it hit: {message}");
+    assert!(message.contains("socket"), "the refusal should name the symbol it hit: {message}");
+}
+
+/// §7.25: `Expr::Static`, closed. `tests/accept/static_data.ls` is the
+/// whole feature in one program: a table built by a loop, a `[byte]`
+/// table packed at the same one-byte stride every other byte slice
+/// uses, a second table built by calling a pure function against the
+/// first, and a pure function that reads a `static` directly --
+/// checked against Cranelift byte for byte rather than only against "it
+/// built".
+#[test]
+fn the_two_backends_agree_on_static_data() {
+    assert_backends_agree(
+        "backends-static-data",
+        "tests/accept/static_data.ls",
+        "squares 0 1 4 9 16 25 36 49 64 81\nshifted HELLO\ndoubled 0 2 8 18 32 50 72 98 128 162\n\
+         pure-read 25\n",
+    );
+}
+
+/// §7.25: `Expr::BitNot`, closed. `tests/accept/bitwise.ls` already ran
+/// against Cranelift alone (`corpus.rs`'s `accepted_programs_build_and_
+/// run`, which builds without `--backend` and so never touched this
+/// backend); this is its first check against `--backend llvm`. Its own
+/// `~0` folds to a literal before codegen ever sees a `BitNot` node, so
+/// it alone would not have caught this backend's missing arm --
+/// `bitnot_flips_every_bit_not_just_the_low_one`
+/// (`crates/lex-sys-codegen-llvm/src/tests.rs`) is what forces a
+/// genuinely unfoldable operand -- but every other operator on this
+/// fixture's own page (`&`, `|`, `^`, `<<`, `>>`, plus the precedence
+/// and shift-edge cases) is worth the same byte-for-byte check the rest
+/// of this file gives every other closed gap.
+#[test]
+fn the_two_backends_agree_on_bitwise() {
+    assert_backends_agree(
+        "backends-bitwise",
+        "tests/accept/bitwise.ls",
+        "and 8\nor 15\nxor 6\nnot -1\nshl 16\nshr -4\nsign 1\nmask 13\ntight 1\n",
+    );
 }
 
 /// §7.23: a foreign call, closed -- the gap the test above used to name.

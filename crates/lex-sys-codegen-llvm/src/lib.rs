@@ -184,38 +184,81 @@
 //! which nothing in eighteen prior slices had. Fixed by threading
 //! `binop`'s already-computed `lhs_kind` through to `compare`.
 //!
-//! The boundary fixture moves a seventh time, from `tests/accept/
-//! bytes_to_c.ls` (inside since §7.23) to `tests/accept/
-//! static_data.ls`, refusing on `Expr::Static` -- `docs/compile-time-
-//! data.md`'s whole feature, found unbuilt the same way `Fs` was, by
-//! checking rather than assuming this backend's `Expr` match was
-//! exhaustive.
+//! The boundary fixture moved a seventh time, from `tests/accept/
+//! bytes_to_c.ls` (inside since §7.23) to `tests/accept/static_data.ls`,
+//! refusing on `Expr::Static` -- `docs/compile-time-data.md`'s whole
+//! feature, found unbuilt the same way `Fs` was, by checking rather than
+//! assuming this backend's `Expr` match was exhaustive.
 //!
-//! Still refused: `Expr::Static`; a user-declared `extern fn` that
-//! names a symbol this backend still declares unconditionally for `Net`
-//! (`socket`/`bind`/`connect`/`listen`/`accept`/`setsockopt`/`close`) at
-//! a different width, which `clang` correctly refuses to link rather
-//! than silently miscompiling -- not a new bug, the same exposure
+//! §7.25 closed `Expr::Static` and, found next to it, `Expr::BitNot` --
+//! `~x` on `docs/bitwise.md` §1's `int`. `body/expr.rs`'s own `expr`
+//! match had no arm for `BitNot` at all, and nothing here had noticed:
+//! `tests/accept/bitwise.ls`'s one use, `~0`, is a literal the checker
+//! folds away before codegen ever runs, so the gap was silently
+//! unreachable rather than silently wrong, the same shape `compare`'s
+//! own bug (§7.24) was not -- found this time by checking that the
+//! `expr` match was *actually* exhaustive rather than assuming it once
+//! more, the question §7.24's own finding should have raised. `Static`
+//! itself needed two things: `emit_module` lays out each `Program::
+//! statics` entry as one `private unnamed_addr constant [N x i8]`
+//! global, packed at `stride_of`'s own byte-or-eight-byte stride so the
+//! bytes match how every other slice in this backend is laid out; and
+//! `Expr::Static` is then only a reference to that already-declared
+//! symbol, the same shape a string literal's *value* is once
+//! `bytes_lit` has declared its own global, minus the per-occurrence
+//! declaration since a static's global is defined once for the whole
+//! program. `BitNot` is `Not`'s own `xor`, at `i64` and `-1` rather than
+//! `i8` and `1`, since the two operators disagree on nothing else.
+//!
+//! Both closures left `expr`'s match with no unmatched `Expr` variant --
+//! so the wildcard arm that used to say "not part of the LLVM backend
+//! yet" came out, and `rustc` itself now refuses to build this crate if
+//! a future `Expr` variant goes unhandled, which is a stronger promise
+//! than any test in this crate could make on its own. The same check
+//! run over `Callee::Builtin`'s variants found nothing left either:
+//! every one reaches an arm, and `FsRead`/`FsWrite`/`OpenRead` never
+//! reach `Callee::Builtin` at all, lowered as their own `Expr::FileOp`/
+//! `Expr::OpenFile` nodes the same way `Connect`/`Bind` are. Checked
+//! against real programs rather than only against the enums: every
+//! fixture in `tests/accept/` and every program in `examples/` was
+//! built against `--backend llvm` in this slice's own session, and all
+//! of them succeed. `tests/accept/static_data.ls` matches Cranelift byte
+//! for byte (`backends.rs`'s `the_two_backends_agree_on_static_data`);
+//! `tests/accept/bitwise.ls` does too, now checked against this backend
+//! for the first time (`the_two_backends_agree_on_bitwise`) -- and
+//! because its own `~0` cannot exercise a genuinely unfoldable operand,
+//! `bitnot_flips_every_bit_not_just_the_low_one`
+//! (`crates/lex-sys-codegen-llvm/src/tests.rs`) checks `~x` on
+//! `putchar`'s own runtime echo instead.
+//!
+//! One friction remains, and it is not a gap this backend has left
+//! unbuilt: `examples/collect/`/`fetch/`/`report/`/`serve/` each declare
+//! their own `extern fn socket`, colliding with the fixed-width
+//! `@socket` (and `bind`/`connect`/`listen`/`accept`/`setsockopt`/
+//! `close`) this backend declares unconditionally for `Net`'s own use --
+//! `clang` correctly refuses to link the disagreement rather than
+//! silently miscompiling it. Not a new finding: the same exposure
 //! `docs/ROADMAP.md`'s #92 entry already recorded on Cranelift for
-//! `close`, left unfixed here for the same reason: none of
-//! `examples/serve/`/`fetch/`/`report/`/`collect/` needs a socket call
-//! this backend does not already have one for. And every other
-//! `Builtin` beyond `PutChar`/`GetChar`/`ArgCount`/`Arg`/`Split`/
-//! `Release`/`Narrow`/`IntOf`/`ByteOf`/`WrappingAdd`/`WrappingSub`/
-//! `WrappingMul`/`Write`/`WriteErr`/`FloatOf`/`Truncate`/`BitsOf`/
-//! `IsNan`/`Sqrt`/`Listen`/`Accept`/`Connect`/`Bind`/`ReadFile`/`Close`
-//! (`FsRead`/`FsWrite`/`OpenRead` are lowered as their own `Expr::
-//! FileOp`/`Expr::OpenFile` nodes, the same way `Connect`/`Bind` are,
-//! never reaching `Callee::Builtin` at all) -- none with a `benches/`
-//! program or `tests/accept/` fixture asking for it yet.
+//! `close`, left unfixed there and here for the same reason a program
+//! declaring the real libc signature for itself does not need this
+//! backend's own internal one. `a_program_outside_this_backend_is_
+//! refused_not_panicked`/`a_program_outside_this_backend_is_refused_
+//! through_the_cli` now check that collision directly, in place of the
+//! unbuilt-`Expr` refusal both used to name -- there being no unbuilt
+//! `Expr` left to name.
 //!
-//! This backend is intentionally partial. Everything it does not yet lower
-//! is refused with a [`CodegenError`], never a panic: unlike
-//! `lex-sys-codegen`, whose `unreachable!`s state an invariant the checker
-//! already guarantees, an unsupported node here is an ordinary gap in an
-//! opt-in, unfinished backend, and a program hitting one deserves the same
-//! located, non-crashing refusal `docs/internal-errors.md` promises
-//! everywhere else.
+//! This backend is intentionally partial in the sense that mattered when
+//! this module header was first written -- real programs it cannot yet
+//! run -- and, as of this slice, none are known. What remains is a single
+//! already-documented, already-accepted symbol collision, not a missing
+//! node. Everything this backend does not lower is still refused with a
+//! [`CodegenError`], never a panic, and for `Expr` that promise is no
+//! longer only this crate's convention to keep: unlike `lex-sys-codegen`,
+//! whose `unreachable!`s state an invariant the checker already
+//! guarantees, an unsupported node here used to be an ordinary gap in an
+//! opt-in, unfinished backend -- and now, for `Expr`, is instead a
+//! compile error in this crate itself, caught before any program reaches
+//! it.
 
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};

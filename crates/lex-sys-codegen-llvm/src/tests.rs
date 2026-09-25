@@ -111,33 +111,114 @@ fn the_first_slice_builds_and_runs_the_smoke_fixture() {
 /// `alloc[a]`/`box`/`unbox` moved out once §7.15 landed; `Type::Float`
 /// moved out once §7.17 landed; matching through a reference moved out
 /// once §7.19 landed; a foreign call moved out once §7.23 landed; `Fs`
-/// moved out once §7.24 landed. `Expr::Static` (`docs/compile-time-
-/// data.md`, `tests/accept/static_data.ls`) -- found the same way `Fs`
-/// was, by checking a real fixture rather than assuming this backend's
-/// own `Expr` match was exhaustive -- is the boundary this moves to.
+/// moved out once §7.24 landed; `Expr::Static` and `Expr::BitNot` moved
+/// out once §7.25 landed -- and with them, every `Expr` variant.
+/// `body/expr.rs`'s own `expr` match has no wildcard arm any more, so
+/// the compiler itself now enforces that this test's title stays true
+/// for `Expr`: a variant this backend does not lower is a build failure
+/// here, not a runtime refusal to go looking for. There is no longer a
+/// real `tests/accept`/`examples` fixture that reaches an unbuilt `Expr`
+/// or `Builtin` for this test to name -- checked directly, by building
+/// every fixture in both directories against `--backend llvm` in this
+/// slice's own session, and the only one that still refuses is the
+/// already-documented, already-accepted `socket`/`bind`/`connect`/etc.
+/// symbol collision (§7.23, `docs/ROADMAP.md` #92): a program's own
+/// `extern fn socket` disagreeing with this backend's internal
+/// declaration for the same libc symbol. So this test now names that
+/// refusal instead -- still refused, still not panicked, just no longer
+/// "unbuilt".
 #[test]
 fn a_program_outside_this_backend_is_refused_not_panicked() {
-    // Self-contained, unlike `tests/accept/static_data.ls` itself: that
-    // fixture imports `std.io`, which `compiled`'s bare `lex_sys_ir::
-    // lower` cannot resolve (no `--std` source injection at this level,
-    // §7.17's own note). One element is enough to reach `Expr::Static`.
     let source = "\
-static answer: [int] {
-    let table = alloc_slice[static](1, 42);
+extern fn socket[&f](ffi: &f Ffi(\"libc\"), domain: int, kind: int, protocol: int) \
+    -> [ffi(\"libc\")] int;
+
+fn main(world: World) -> [] int {
+    let Split { io, ffi, fs, heap, args } = split(world);
+    release(args); release(heap); release(fs); release(io); release(ffi);
+    return 0;
+}
+";
+    let ast = parse(source).expect("parses");
+    let program = lex_sys_ir::lower(&ast).expect("type-checks");
+    let error = compile_object(&program, "main")
+        .expect_err("a colliding `extern fn socket` should still be refused, not silently linked");
+    assert!(
+        error.message.to_lowercase().contains("socket"),
+        "the refusal should name the symbol it collided on: {}",
+        error.message
+    );
+}
+
+/// §7.25: `Expr::Static`, closed -- checked directly rather than only
+/// through the CLI-level `static_data.ls` fixture (`backends.rs`), the
+/// same way `extern_fn_labs_computes_the_real_answer` checks `Ffi`
+/// directly rather than relying only on `bytes_to_c.ls`. A loop-built
+/// table, matching `docs/compile-time-data.md` §2's own `decode_table`
+/// shape, read back and summed in `main` with no helper function in
+/// between -- if the module-level global `emit_module` writes and the
+/// per-occurrence reference `Expr::Static` emits ever disagreed on the
+/// symbol name or the byte layout, this would link wrong or read wrong
+/// silently rather than refuse, which is exactly what a numeric check
+/// and not just "it built" is for.
+#[test]
+fn a_static_table_is_built_at_compile_time_and_reads_back_correctly() {
+    let source = "\
+static squares: [int] {
+    let table = alloc_slice[static](4, 0);
+    var i = 0;
+    while i < 4 {
+        table[i] = i * i;
+        i = i + 1;
+    }
     return table;
 }
 
 fn main(world: World) -> [] int {
     let Split { io, ffi, fs, heap, args } = split(world);
     release(args); release(heap); release(fs); release(ffi); release(io);
-    return answer[0];
+    return squares[0] + squares[1] + squares[2] + squares[3] - 14;
 }
 ";
-    let ast = parse(source).expect("parses");
-    let program = lex_sys_ir::lower(&ast).expect("type-checks");
-    let error = compile_object(&program, "main")
-        .expect_err("`Expr::Static` is not part of this backend yet");
-    assert!(error.message.contains("Static"), "{}", error.message);
+    let object = compiled(source, "main");
+    let output = run(&object, "static-table");
+    assert_eq!(output.status.code(), Some(0), "0 + 1 + 4 + 9 - 14 should be 0");
+}
+
+/// §7.25: `Expr::BitNot`, closed -- found while surveying this backend's
+/// `Expr` match for the exhaustiveness `a_program_outside_this_backend_
+/// is_refused_not_panicked`'s doc comment now claims, the same way `Fs`
+/// was found while building `extern fn` (§7.24). `tests/accept/
+/// bitwise.ls` already exercises `~0`, but every operand there is a
+/// literal the checker folds away before codegen ever sees a `BitNot`
+/// node -- this backend's own `expr` match had no arm for it at all,
+/// silently unreachable rather than silently wrong, and nothing caught
+/// it because nothing in this document's suite applied `~` to a value
+/// the checker could not fold. `x` here is `putchar`'s own echo, real at
+/// run time and not a literal. `~5` is `-6`, checked against `Not`'s own
+/// "flip the low bit" shape (which would give `4`, not `-6`) rather than
+/// only against "it did not crash".
+#[test]
+fn bitnot_flips_every_bit_not_just_the_low_one() {
+    let source = "\
+fn probe[&i](io: &!i Io) -> [io_write] int {
+    return putchar(io, 5);
+}
+
+fn main(world: World) -> [] int {
+    let Split { io, ffi, fs, heap, args } = split(world);
+    release(args); release(heap); release(fs); release(ffi);
+    var x = 0;
+    borrow mut io as &!i in {
+        x = probe(i);
+    }
+    release(io);
+    return (~x) - (0 - 6);
+}
+";
+    let object = compiled(source, "main");
+    let output = run(&object, "bitnot");
+    assert_eq!(output.status.code(), Some(0), "~5 - (-6) should be 0, not 4 - (-6) = 10");
 }
 
 /// §7.23: a foreign call, closed -- the gap the test above used to name.
