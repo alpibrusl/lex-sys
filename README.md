@@ -435,7 +435,25 @@ version it has not reached
 
 So **a vectoriser, or a backend with one, is the single largest open
 item**, and it is the answer to the number above rather than a
-performance nicety. It is not next; `ROADMAP.md` says what is.
+performance nicety.
+
+**It was picked up, and it is no longer hypothetical.** `lex-sys-
+codegen-llvm`, behind an additive `--backend cranelift|llvm` flag
+(default: `cranelift`), is real and partially built —
+[`llvm-backend.md`](docs/llvm-backend.md) tracks each slice. Measured,
+not assumed: on `mandelbrot.ls`, `--backend llvm` is statistically
+indistinguishable from C (**0.96×–1.00×**), where `--backend cranelift`
+still reproduces the **1.6×–1.8×** gap above almost exactly — and
+`objdump`, not the wall clock, confirms why on several kernels: once a
+loop's trap comes out (`wrapping_add`/`sub`/`mul` in place of `+`/`-`/
+`*`), `--backend llvm` actually vectorises it, where the checked twin,
+otherwise identical, compiles to zero SIMD instructions. Eleven of
+`benches/`'s programs build through it today; it is **not** a complete
+backend — matching through a reference, writing through one
+(`Place::Field`/`Place::Deref`), `Ffi`/`extern fn`, `Net` and `float`
+arithmetic are among what it still refuses, deliberately, as an
+opt-in and partial backend rather than a finished second one.
+[`ROADMAP.md`](docs/ROADMAP.md) says what's next.
 
 ---
 
@@ -454,9 +472,9 @@ quietly rotting.
 ### The compiler's whole surface
 
 ```sh
-lex-sys build <file.ls>... [-o <output>] [--emit exe|obj] [--std]
-lex-sys check <file.ls>... [--std] [--output json]   # refuse, or say nothing
-lex-sys run   <file.ls>... [--std]    # build, run, exit with the program's status
+lex-sys build <file.ls>... [-o <output>] [--emit exe|obj] [--std] [--backend cranelift|llvm]
+lex-sys check <file.ls>... [--std] [--output json] [--backend cranelift|llvm]   # refuse, or say nothing
+lex-sys run   <file.ls>... [--std] [--backend cranelift|llvm]   # build, run, exit with the program's status
 lex-sys ids   <file.ls>... [--std]    # each declaration's content hash
 lex-sys authority <file.ls>... [--std] [--output json]  # what it can reach
 lex-sys layout    <file.ls>... [--std]  # what every leaf costs, and what packing would save
