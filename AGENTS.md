@@ -290,11 +290,14 @@ fn main(world: World) -> [] int {
 
 `std.bytes`, `std.io`, `std.math`, `std.buffer`, `std.option`,
 `std.result`, `std.list`, `std.vec`, `std.fmt`, `std.bignum`,
-`std.utf8`. Pass `--std` and write the `import` — there is no prelude.
+`std.utf8`, `std.flags`, `std.crypto`. Pass `--std` and write the
+`import` — there is no prelude.
 
 **A function earns its way into `std` by a program asking for it**, and
-that is how the last nine arrived. If you need something that is not
-there, write it in your program first; it moves into the library when a
+that is how most of these arrived — `std.crypto` is named as the one
+exception in `docs/crypto.md`'s own header. If you need something that
+is not there, write it in your program first; it moves into the library
+when a
 *second* program needs it.
 
 ---

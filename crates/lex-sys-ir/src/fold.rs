@@ -459,6 +459,200 @@ fn fold_in(e: &mut Expr, program: &Program, tally: &mut Tally) {
     }
 }
 
+/// Every `Expr::Static` index reachable from `body`, inserted into `out`
+/// (`docs/crypto.md` §4's own finding: an unused `static` was reaching
+/// the output of every program that merely `import`ed the module it was
+/// declared in).
+///
+/// Exhaustive, on purpose, with no wildcard arm: pruning an unused
+/// `static` out of `Program::statics` (`lib.rs`'s own caller) depends on
+/// seeing *every* reference, so a future `Expr` variant with no arm here
+/// is a compile error rather than a static this pass silently drops
+/// while something still reads it.
+pub(crate) fn collect_static_refs(e: &Expr, out: &mut std::collections::BTreeSet<u32>) {
+    match e {
+        Expr::Static(index) => {
+            out.insert(*index);
+        }
+        Expr::Int(_) | Expr::Bool(_) | Expr::Float(_) | Expr::Load(_) | Expr::Bytes(_) => {}
+        Expr::FieldRef { base, .. }
+        | Expr::FieldAddr { base, .. }
+        | Expr::Field { base, .. }
+        | Expr::TupleField { base, .. }
+        | Expr::TupleFieldRef { base, .. }
+        | Expr::TupleFieldAddr { base, .. }
+        | Expr::Len(base)
+        | Expr::Neg(base)
+        | Expr::Not(base)
+        | Expr::BitNot(base)
+        | Expr::Deref { value: base, .. }
+        | Expr::Boxed { value: base, .. }
+        | Expr::Unboxed { value: base, .. }
+        | Expr::Contents { value: base, .. }
+        | Expr::UnboxedSlice { value: base }
+        | Expr::Alloc { value: base, .. } => collect_static_refs(base, out),
+        Expr::Index { base, index, .. } => {
+            collect_static_refs(base, out);
+            collect_static_refs(index, out);
+        }
+        Expr::Subslice { base, start, end, .. } => {
+            collect_static_refs(base, out);
+            collect_static_refs(start, out);
+            collect_static_refs(end, out);
+        }
+        Expr::AllocSlice { count, fill, .. } | Expr::BoxedSlice { count, fill, .. } => {
+            collect_static_refs(count, out);
+            collect_static_refs(fill, out);
+        }
+        Expr::Struct { fields, .. }
+        | Expr::Tuple { parts: fields }
+        | Expr::Enum { payload: fields, .. } => {
+            for f in fields {
+                collect_static_refs(f, out);
+            }
+        }
+        Expr::Bin { lhs, rhs, .. } => {
+            collect_static_refs(lhs, out);
+            collect_static_refs(rhs, out);
+        }
+        Expr::Call { args, .. }
+        | Expr::FileOp { args, .. }
+        | Expr::OpenFile { args, .. }
+        | Expr::Connect { args, .. }
+        | Expr::Bind { args, .. } => {
+            for a in args {
+                collect_static_refs(a, out);
+            }
+        }
+    }
+}
+
+/// [`collect_static_refs`], over every expression a function body holds --
+/// the same statement shape [`fold_body`] walks, but read-only and
+/// exhaustive rather than bounded to what folding needs.
+pub(crate) fn collect_static_refs_body(body: &[Stmt], out: &mut std::collections::BTreeSet<u32>) {
+    for stmt in body {
+        match stmt {
+            Stmt::Store { value, .. } | Stmt::Eval(value) | Stmt::Return(value) => {
+                collect_static_refs(value, out)
+            }
+            Stmt::If { cond, then_body, else_body } => {
+                collect_static_refs(cond, out);
+                collect_static_refs_body(then_body, out);
+                collect_static_refs_body(else_body, out);
+            }
+            Stmt::While { cond, body } => {
+                collect_static_refs(cond, out);
+                collect_static_refs_body(body, out);
+            }
+            Stmt::Borrow { body, .. } | Stmt::Region { body, .. } => {
+                collect_static_refs_body(body, out)
+            }
+            Stmt::Match { scrutinee, arms, .. } => {
+                collect_static_refs(scrutinee, out);
+                for arm in arms {
+                    collect_static_refs_body(&arm.body, out);
+                }
+            }
+        }
+    }
+}
+
+/// Rewrite every `Expr::Static` index `remap` names, in place -- the
+/// mutating counterpart of [`collect_static_refs`], over the same
+/// exhaustive match for the same reason: a variant this one does not
+/// also update is a static reference silently left pointing at the index
+/// it had before `Program::statics` was compacted.
+pub(crate) fn remap_static_refs(e: &mut Expr, remap: &std::collections::BTreeMap<u32, u32>) {
+    match e {
+        Expr::Static(index) => {
+            *index = remap[index];
+        }
+        Expr::Int(_) | Expr::Bool(_) | Expr::Float(_) | Expr::Load(_) | Expr::Bytes(_) => {}
+        Expr::FieldRef { base, .. }
+        | Expr::FieldAddr { base, .. }
+        | Expr::Field { base, .. }
+        | Expr::TupleField { base, .. }
+        | Expr::TupleFieldRef { base, .. }
+        | Expr::TupleFieldAddr { base, .. }
+        | Expr::Len(base)
+        | Expr::Neg(base)
+        | Expr::Not(base)
+        | Expr::BitNot(base)
+        | Expr::Deref { value: base, .. }
+        | Expr::Boxed { value: base, .. }
+        | Expr::Unboxed { value: base, .. }
+        | Expr::Contents { value: base, .. }
+        | Expr::UnboxedSlice { value: base }
+        | Expr::Alloc { value: base, .. } => remap_static_refs(base, remap),
+        Expr::Index { base, index, .. } => {
+            remap_static_refs(base, remap);
+            remap_static_refs(index, remap);
+        }
+        Expr::Subslice { base, start, end, .. } => {
+            remap_static_refs(base, remap);
+            remap_static_refs(start, remap);
+            remap_static_refs(end, remap);
+        }
+        Expr::AllocSlice { count, fill, .. } | Expr::BoxedSlice { count, fill, .. } => {
+            remap_static_refs(count, remap);
+            remap_static_refs(fill, remap);
+        }
+        Expr::Struct { fields, .. }
+        | Expr::Tuple { parts: fields }
+        | Expr::Enum { payload: fields, .. } => {
+            for f in fields {
+                remap_static_refs(f, remap);
+            }
+        }
+        Expr::Bin { lhs, rhs, .. } => {
+            remap_static_refs(lhs, remap);
+            remap_static_refs(rhs, remap);
+        }
+        Expr::Call { args, .. }
+        | Expr::FileOp { args, .. }
+        | Expr::OpenFile { args, .. }
+        | Expr::Connect { args, .. }
+        | Expr::Bind { args, .. } => {
+            for a in args {
+                remap_static_refs(a, remap);
+            }
+        }
+    }
+}
+
+/// [`remap_static_refs`], over every expression a function body holds.
+pub(crate) fn remap_static_refs_body(
+    body: &mut [Stmt],
+    remap: &std::collections::BTreeMap<u32, u32>,
+) {
+    for stmt in body {
+        match stmt {
+            Stmt::Store { value, .. } | Stmt::Eval(value) | Stmt::Return(value) => {
+                remap_static_refs(value, remap)
+            }
+            Stmt::If { cond, then_body, else_body } => {
+                remap_static_refs(cond, remap);
+                remap_static_refs_body(then_body, remap);
+                remap_static_refs_body(else_body, remap);
+            }
+            Stmt::While { cond, body } => {
+                remap_static_refs(cond, remap);
+                remap_static_refs_body(body, remap);
+            }
+            Stmt::Borrow { body, .. } | Stmt::Region { body, .. } => {
+                remap_static_refs_body(body, remap)
+            }
+            Stmt::Match { scrutinee, arms, .. } => {
+                remap_static_refs(scrutinee, remap);
+                for arm in arms {
+                    remap_static_refs_body(&mut arm.body, remap);
+                }
+            }
+        }
+    }
+}
+
 impl Machine<'_> {
     fn spend(&mut self) -> bool {
         match self.fuel.checked_sub(1) {

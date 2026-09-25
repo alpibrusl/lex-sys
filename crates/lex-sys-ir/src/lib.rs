@@ -604,19 +604,62 @@ fn lower_inner(ast: &Ast, rest: &mut Vec<Diagnostic>) -> Result<Program, Diagnos
     program.folded_calls = tally.calls;
     program.folded_late = tally.operators;
 
+    // `docs/crypto.md` §4's own finding: unlike a function, a `static`
+    // was never gated by `mono`'s reachability worklist above -- every
+    // `static` a program declared was evaluated and pushed into
+    // `Program::statics` whether or not anything ever read it, so
+    // `std.crypto`'s round-constant tables reached the object file of
+    // any program that merely `import`ed the module, exactly the cost
+    // `AGENTS.md` §7 promises an unused declaration never has.
+    //
+    // The fix walks `program.funcs` -- already pruned to what `main`
+    // actually reaches -- for every `Expr::Static` it contains, then
+    // closes over statics reading other, earlier statics (the only
+    // direction `docs/compile-time-data.md` §2's ordering rule allows,
+    // so this terminates in at most one pass per used static). What
+    // survives is renumbered into a compact `0..n`, and every reference
+    // -- in `program.funcs` and in a kept static's own body alike -- is
+    // rewritten to match before anything is evaluated, so `evaluate_
+    // static`'s own `evaluated: &[Vec<i64>]` lookup (by this same
+    // index) still lines up.
+    let mut used: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
+    for func in &program.funcs {
+        fold::collect_static_refs_body(&func.body, &mut used);
+    }
+    let mut frontier: Vec<u32> = used.iter().copied().collect();
+    while let Some(index) = frontier.pop() {
+        let mut found = std::collections::BTreeSet::new();
+        fold::collect_static_refs_body(&static_bodies[index as usize].body, &mut found);
+        for reached in found {
+            if used.insert(reached) {
+                frontier.push(reached);
+            }
+        }
+    }
+    let remap: std::collections::BTreeMap<u32, u32> =
+        used.iter().enumerate().map(|(new, &old)| (old, new as u32)).collect();
+    for func in &mut program.funcs {
+        fold::remap_static_refs_body(&mut func.body, &remap);
+    }
+
     // `docs/compile-time-data.md` §3. Last, because a `static` body may
     // call any pure function in the program and those have to be lowered
     // and folded first — and in declaration order, because a `static` may
-    // read one declared before it.
+    // read one declared before it. Only a *used* static's body is run,
+    // and only after its own `Expr::Static` references are renumbered
+    // the same way `program.funcs`'s were, just above.
     //
     // The bodies themselves were lowered before the worklist was drained,
     // above; this is only the running of them.
     let mut evaluated: Vec<Vec<i64>> = Vec::new();
-    for (index, def) in statics.iter().enumerate() {
+    for index in used {
+        let index = index as usize;
+        let def = &statics[index];
         let item = static_items[index];
-        let body = &static_bodies[index];
+        let mut body = static_bodies[index].clone();
+        fold::remap_static_refs_body(&mut body.body, &remap);
         let name = ast.name_of(def.name).to_owned();
-        let values = fold::evaluate_static(&program, body, &evaluated).map_err(|why| {
+        let values = fold::evaluate_static(&program, &body, &evaluated).map_err(|why| {
             Diagnostic::new(
                 Rule::ConstantTraps,
                 format!("`static {name}` cannot be evaluated: {why}"),
