@@ -447,12 +447,14 @@ still reproduces the **1.6×–1.8×** gap above almost exactly — and
 `objdump`, not the wall clock, confirms why on several kernels: once a
 loop's trap comes out (`wrapping_add`/`sub`/`mul` in place of `+`/`-`/
 `*`), `--backend llvm` actually vectorises it, where the checked twin,
-otherwise identical, compiles to zero SIMD instructions. Eleven of
-`benches/`'s programs build through it today; it is **not** a complete
-backend — matching through a reference, writing through one
-(`Place::Field`/`Place::Deref`), `Ffi`/`extern fn`, `Net` and `float`
-arithmetic are among what it still refuses, deliberately, as an
-opt-in and partial backend rather than a finished second one.
+otherwise identical, compiles to zero SIMD instructions. Twelve of
+`benches/`'s programs build through it today, `revcomp.ls` — **42%–46%
+faster** on `--backend llvm` — the latest, once writing through a
+reference (`Place::Field`/`Place::Deref`) closed; it is **not** a
+complete backend — matching through a reference, `Ffi`/`extern fn`,
+`Net` and `float` arithmetic are among what it still refuses,
+deliberately, as an opt-in and partial backend rather than a finished
+second one.
 [`ROADMAP.md`](docs/ROADMAP.md) says what's next.
 
 ---
