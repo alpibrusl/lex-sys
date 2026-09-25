@@ -23,6 +23,13 @@ use lex_sys_ir::{Arm, BinOp, Builtin, Callee, Expr, Func, Place, Program, Slot, 
 use lex_sys_types::{DefId, Type};
 use target_lexicon::Triple;
 
+/// One arena's chunk, matching `lex-sys-codegen`'s own `abi::ARENA_CHUNK`
+/// exactly (§7.5): some `benches/` programs (`sieve_checked.ls`'s own
+/// header) size their allocation against this constant, so a mismatched
+/// chunk size would trap where the Cranelift build does not, or the
+/// reverse.
+const ARENA_CHUNK: i64 = 64 * 1024;
+
 /// The machine types a leaf may be. No `f64`: `Type::Float` is refused
 /// (§5's first slice has no arithmetic, and floats have none of it here).
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -129,6 +136,13 @@ pub(crate) fn emit_module(
     let mut text = String::new();
     text.push_str(&format!("target triple = \"{triple}\"\n\n"));
     text.push_str("declare i32 @putchar(i32)\n");
+    // `region`/`alloc_slice` (§7.5): one `malloc` per arena, one `free` on
+    // the way out -- `lex-sys-codegen`'s own `body/memory.rs` `libc_fn`
+    // declares these the same way, on first use rather than unconditionally
+    // there, but an unused `declare` here costs nothing, the same reasoning
+    // `putchar`'s own unconditional declaration already relies on.
+    text.push_str("declare ptr @malloc(i64)\n");
+    text.push_str("declare void @free(ptr)\n");
     // Checked arithmetic (§5's second slice): the three overflow-reporting
     // intrinsics `Expr::Bin`'s `Add`/`Sub`/`Mul` arms call. Declared
     // unconditionally, the same way `putchar` is -- an unused `declare`
@@ -213,6 +227,14 @@ struct FuncEmitter<'a> {
     /// in LLVM IR but reusing one counter for both would still be correct;
     /// two counters just read clearer in the emitted text.
     blocks: u32,
+    /// Per open arena, the two `ptr`-typed `alloca` cells holding its base
+    /// and its bump pointer (§7.5) -- `lex-sys-codegen`'s own `arenas:
+    /// Vec<Option<(Variable, Variable)>>` (`body/memory.rs`), the same
+    /// shape read through this backend's own memory-not-`Variable` idiom.
+    /// Indexed by arena number, which `lex-sys-ir` assigns positionally
+    /// (`docs/llvm-backend.md` §7.5), so a sibling region after an earlier
+    /// one closed may need the vector grown rather than pushed to.
+    arenas: Vec<Option<(String, String)>>,
 }
 
 impl<'a> FuncEmitter<'a> {
@@ -235,6 +257,7 @@ impl<'a> FuncEmitter<'a> {
             out: String::new(),
             temp: 0,
             blocks: 0,
+            arenas: Vec::new(),
         })
     }
 
@@ -638,13 +661,10 @@ impl<'a> FuncEmitter<'a> {
                         return Ok(true);
                     }
                 }
-                Stmt::Region { .. } => {
-                    return Err(
-                        "`region` is not part of the LLVM backend yet -- it needs the arena \
-                         allocation this backend does not lower (docs/llvm-backend.md §5); \
-                         `--backend cranelift` builds this program"
-                            .to_owned(),
-                    );
+                Stmt::Region { arena, body } => {
+                    if self.region_stmt(*arena, body)? {
+                        return Ok(true);
+                    }
                 }
             }
         }
@@ -698,6 +718,171 @@ impl<'a> FuncEmitter<'a> {
             }
         }
         Ok(terminated)
+    }
+
+    /// `region a { .. }` -- one `malloc` in, one `free` out (§7.5), the
+    /// same shape `lex-sys-codegen`'s own `region_stmt` has
+    /// (`body/memory.rs`): between them the arena is two pointers, where
+    /// the next allocation goes and where the chunk ends, and the end is
+    /// never stored because it is the base plus `ARENA_CHUNK`, a constant.
+    fn region_stmt(&mut self, arena: u32, body: &[Stmt]) -> Result<bool, String> {
+        let base = self.fresh();
+        self.out.push_str(&format!("  {base} = call ptr @malloc(i64 {ARENA_CHUNK})\n"));
+        // Out of memory is a trap, not a null pointer wandering into a
+        // store -- the language has no undefined behaviour to fall back
+        // on, the same reasoning `box`/`box_slice` already trap on here.
+        let is_null = self.fresh();
+        self.out.push_str(&format!("  {is_null} = icmp eq ptr {base}, null\n"));
+        self.trap_if(&is_null)?;
+
+        let base_cell = self.fresh();
+        self.out.push_str(&format!("  {base_cell} = alloca ptr\n"));
+        self.out.push_str(&format!("  store ptr {base}, ptr {base_cell}\n"));
+        let bump_cell = self.fresh();
+        self.out.push_str(&format!("  {bump_cell} = alloca ptr\n"));
+        self.out.push_str(&format!("  store ptr {base}, ptr {bump_cell}\n"));
+
+        // Grow to fit rather than push: a sibling `region` carries a
+        // higher number than one already closed (`lex-sys-ir` assigns
+        // arena numbers positionally), so this slot may be past the
+        // vector's current end.
+        if self.arenas.len() <= arena as usize {
+            self.arenas.resize(arena as usize + 1, None);
+        }
+        self.arenas[arena as usize] = Some((base_cell.clone(), bump_cell));
+
+        let terminated = self.stmts(body)?;
+
+        // Skipped when the body returned: the `Stmt::Return` arm above
+        // this arena's `free` would need has already run, and there is
+        // no block left here to put a second call in.
+        if !terminated {
+            let held = self.fresh();
+            self.out.push_str(&format!("  {held} = load ptr, ptr {base_cell}\n"));
+            self.out.push_str(&format!("  call void @free(ptr {held})\n"));
+        }
+        self.arenas[arena as usize] = None;
+        Ok(terminated)
+    }
+
+    /// Take `bytes` from an arena, trapping if the chunk cannot spare
+    /// them -- `lex-sys-codegen`'s own `bump` (`body/memory.rs`), kept in
+    /// `ptr` arithmetic throughout rather than round-tripping through
+    /// `ptrtoint`: `getelementptr`/`icmp` both work directly on `ptr`.
+    fn bump(&mut self, arena: u32, bytes: &LValue) -> Result<LValue, String> {
+        let (base_cell, bump_cell) = self
+            .arenas
+            .get(arena as usize)
+            .cloned()
+            .flatten()
+            .ok_or_else(|| format!("arena {arena} is not open here"))?;
+
+        let at = self.fresh();
+        self.out.push_str(&format!("  {at} = load ptr, ptr {bump_cell}\n"));
+        let next = self.fresh();
+        self.out
+            .push_str(&format!("  {next} = getelementptr i8, ptr {at}, i64 {}\n", operand(bytes)));
+
+        let base = self.fresh();
+        self.out.push_str(&format!("  {base} = load ptr, ptr {base_cell}\n"));
+        let end = self.fresh();
+        self.out.push_str(&format!("  {end} = getelementptr i8, ptr {base}, i64 {ARENA_CHUNK}\n"));
+
+        // Two ways to be past the end, and a slice can hit either: the sum
+        // overshoots the chunk, or the size computation itself wrapped and
+        // the sum came out *before* where it started -- the same two
+        // comparisons `lex-sys-codegen`'s own `bump` makes.
+        let over = self.fresh();
+        self.out.push_str(&format!("  {over} = icmp ugt ptr {next}, {end}\n"));
+        let wrapped = self.fresh();
+        self.out.push_str(&format!("  {wrapped} = icmp ult ptr {next}, {at}\n"));
+        let bad = self.fresh();
+        self.out.push_str(&format!("  {bad} = or i1 {over}, {wrapped}\n"));
+        self.trap_if(&bad)?;
+
+        self.out.push_str(&format!("  store ptr {next}, ptr {bump_cell}\n"));
+        Ok(LValue::Reg(at))
+    }
+
+    /// Write `values` into every element of a freshly reserved run -- a
+    /// real loop, not unrolled, because `count` is a runtime value, the
+    /// same reason `lex-sys-codegen`'s own `fill_slice` is one
+    /// (`body/memory.rs`). `values` are computed once by the caller and
+    /// written unchanged into every element, matching that function
+    /// exactly.
+    fn fill_slice(
+        &mut self,
+        start: &LValue,
+        count: &LValue,
+        stride: i64,
+        kinds: &[LKind],
+        values: &[LValue],
+    ) -> Result<(), String> {
+        let n = self.blocks;
+        self.blocks += 1;
+        let (head, body_label, done) =
+            (format!("fillhead{n}"), format!("fillbody{n}"), format!("filldone{n}"));
+
+        let cursor = self.fresh();
+        self.out.push_str(&format!("  {cursor} = alloca i64\n"));
+        self.out.push_str(&format!("  store i64 0, ptr {cursor}\n"));
+        self.out.push_str(&format!("  br label %{head}\n"));
+
+        self.out.push_str(&format!("{head}:\n"));
+        let i = self.fresh();
+        self.out.push_str(&format!("  {i} = load i64, ptr {cursor}\n"));
+        let more = self.fresh();
+        self.out.push_str(&format!("  {more} = icmp slt i64 {i}, {}\n", operand(count)));
+        self.out.push_str(&format!("  br i1 {more}, label %{body_label}, label %{done}\n"));
+
+        self.out.push_str(&format!("{body_label}:\n"));
+        let offset = self.fresh();
+        self.out.push_str(&format!("  {offset} = mul i64 {i}, {stride}\n"));
+        let addr = self.fresh();
+        self.out.push_str(&format!(
+            "  {addr} = getelementptr i8, ptr {}, i64 {offset}\n",
+            operand(start)
+        ));
+        self.store_leaves(&addr, kinds, values);
+        let next = self.fresh();
+        self.out.push_str(&format!("  {next} = add i64 {i}, 1\n"));
+        self.out.push_str(&format!("  store i64 {next}, ptr {cursor}\n"));
+        self.out.push_str(&format!("  br label %{head}\n"));
+
+        self.out.push_str(&format!("{done}:\n"));
+        Ok(())
+    }
+
+    /// `alloc_slice[a](count, fill)` -- `count` copies of `fill`,
+    /// contiguous (`lex-sys-codegen`'s own `alloc_slice`, `body/
+    /// memory.rs`). A negative count traps ahead of the multiply, and the
+    /// multiply itself is `checked_arith`'s own `smul` -- the intrinsic
+    /// `lex-sys-codegen`'s `slice_bytes` reaches for by a different name
+    /// (`smul_overflow`) for the identical reason: a length that overflows
+    /// the byte count would ask for less memory than is about to be
+    /// written.
+    fn alloc_slice(
+        &mut self,
+        arena: u32,
+        element: &Type,
+        count: &Expr,
+        fill: &Expr,
+    ) -> Result<Vec<LValue>, String> {
+        let count = self.scalar(count)?;
+        let values = self.expr(fill)?;
+        let stride = self.stride_of(element)?;
+
+        let negative = self.fresh();
+        self.out.push_str(&format!("  {negative} = icmp slt i64 {}, 0\n", operand(&count)));
+        self.trap_if(&negative)?;
+
+        let bytes = self.checked_arith("smul", count.clone(), LValue::Const(stride))?;
+        let bytes = bytes.into_iter().next().expect("`checked_arith` returns exactly one value");
+
+        let start = self.bump(arena, &bytes)?;
+        let kinds = leaves_of(element, self.program)?;
+        self.fill_slice(&start, &count, stride, &kinds, &values)?;
+        Ok(vec![start, count])
     }
 
     /// `if`/`else`. Returns whether *both* arms terminate -- the checker's
@@ -1061,6 +1246,18 @@ impl<'a> FuncEmitter<'a> {
                 let kinds = leaves_of(element, self.program)?;
                 Ok(self.load_leaves(&addr, &kinds))
             }
+            Expr::AllocSlice { arena, element, count, fill } => {
+                self.alloc_slice(*arena, element, count, fill)
+            }
+            // `!b`: a `bool` leaf is 0 or 1, so flipping the low bit is
+            // the negation -- `lex-sys-codegen`'s own `Expr::Not` arm
+            // (`body/expr.rs`), one instruction and never trapping.
+            Expr::Not(inner) => {
+                let v = self.scalar(inner)?;
+                let flipped = self.fresh();
+                self.out.push_str(&format!("  {flipped} = xor i8 {}, 1\n", operand(&v)));
+                Ok(vec![LValue::Reg(flipped)])
+            }
             other => Err(format!(
                 "`{other:?}` is not part of the LLVM backend yet (docs/llvm-backend.md §5)"
             )),
@@ -1184,6 +1381,26 @@ impl<'a> FuncEmitter<'a> {
                 let widened = self.fresh();
                 self.out.push_str(&format!("  {widened} = zext i8 {} to i64\n", operand(&byte)));
                 Ok(vec![LValue::Reg(widened)])
+            }
+            // `byte_of(n: int) -> byte`: narrow or trap (§7.5, `docs/
+            // strings.md` §2) -- truncation is the silently wrong answer
+            // `docs/defined-behaviour.md` §2.1 already refuses. One
+            // unsigned comparison covers both ends, the same trick
+            // `element_address`'s own bounds check already uses: a
+            // negative `int` read as unsigned is far past 255.
+            Callee::Builtin(Builtin::ByteOf) => {
+                let n = evaluated
+                    .into_iter()
+                    .flatten()
+                    .next()
+                    .ok_or_else(|| "`byte_of` needs an int argument".to_owned())?;
+                let out_of_range = self.fresh();
+                self.out
+                    .push_str(&format!("  {out_of_range} = icmp ugt i64 {}, 255\n", operand(&n)));
+                self.trap_if(&out_of_range)?;
+                let narrowed = self.fresh();
+                self.out.push_str(&format!("  {narrowed} = trunc i64 {} to i8\n", operand(&n)));
+                Ok(vec![LValue::Reg(narrowed)])
             }
             Callee::Fn(id) => {
                 let target = self.program.func(*id);

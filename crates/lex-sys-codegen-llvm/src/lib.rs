@@ -22,19 +22,28 @@
 //! closed: `wrapping_add`/`wrapping_sub`/`wrapping_mul` are LLVM's own
 //! `add`/`sub`/`mul`, already two's-complement wraparound with no
 //! `nsw`/`nuw` requested, so unlike `binop`'s checked forms these need no
-//! overflow check at all. Every checked-vs-wrapping pair in `benches/`
-//! that does not also need `region`/`box_slice` now builds on
-//! `--backend llvm`.
+//! overflow check at all.
+//!
+//! §7.5 closed the next-named row: `Stmt::Region`/`Expr::AllocSlice` --
+//! one `malloc` in, one `free` out, a bump pointer kept in two
+//! `ptr`-typed `alloca` cells rather than in an SSA value, the same
+//! arena `lex-sys-codegen`'s own `body/memory.rs` builds -- plus
+//! `byte_of` and `Expr::Not`, the two smaller gaps actually standing
+//! between this and `sieve`/`scan` building. Every `benches/` program
+//! behind only those gaps now builds on `--backend llvm`.
 //!
 //! Still refused: matching *through* a reference (only an owned
 //! scrutinee's tag and payload are read directly; `docs/reading-
 //! references.md`'s address-only binding mode has no counterpart here
 //! yet), `Place::Field`/`Place::Deref` (writing through a reference
 //! needs pointer arithmetic into a referent this backend has not built),
-//! `Stmt::Region` (arena allocation), heap boxing (`box`/`box_slice`),
-//! `arg_count`, `Type::Float`, `Ffi`/`extern fn`, `Net`, and every other
+//! bare `Expr::Alloc` (a single-value arena allocation -- `alloc_slice`'s
+//! bump-and-fill covers the shape a slice needs, but handing back a
+//! unique reference to one value is its own small gap, not yet built),
+//! heap boxing (`box`/`box_slice`), `arg_count`, `Type::Float`,
+//! `getchar`/`io_read`, `Ffi`/`extern fn`, `Net`, and every other
 //! `Builtin` beyond `PutChar`/`Split`/`Release`/`Narrow`/`IntOf`/
-//! `WrappingAdd`/`WrappingSub`/`WrappingMul`.
+//! `ByteOf`/`WrappingAdd`/`WrappingSub`/`WrappingMul`.
 //!
 //! This backend is intentionally partial. Everything it does not yet lower
 //! is refused with a [`CodegenError`], never a panic: unlike
