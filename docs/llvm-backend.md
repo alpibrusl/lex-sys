@@ -60,7 +60,11 @@
 > `region`/`alloc_slice` — the biggest remaining gap — and found the
 > first real vectorisation in this document: the wrapping halves of
 > `sieve`/`scan` compile to hundreds of SIMD instructions where their
-> checked twins, otherwise identical, compile to none.
+> checked twins, otherwise identical, compile to none. §7.7 closed heap
+> boxing and, underneath it, a second gap nothing had tried to lift
+> since the first slice: a function could not return more than one
+> leaf. `reduce_checked.ls` — `docs/gpu.md`'s own kernel — needed both,
+> and confirms the same vectorisation split a fourth time.
 
 ---
 
@@ -670,7 +674,7 @@ inspecting `emit.rs` and guessing:
 | ~~`region`/`alloc_slice` (arena allocation, `Stmt::Region`)~~ | **Closed, §7.5**: `sieve_*.ls`, `scan_*.ls`, `benches/three/sieve.ls` now build (`fasta.ls`/`revcomp.ls` still refuse, on `Type::Float` and `getchar` respectively — their own rows below) | §5's "later slices" list, already named |
 | ~~`wrapping_add`/`wrapping_sub`/`wrapping_mul`~~ | **Closed, §7.4**: every `_wrapping.ls` half of a `benches/` pair and `benches/three/purity.ls` now build on `--backend llvm` | Implicit in §5's "every `Builtin` beyond `PutChar`/`Split`/`Release`/`Narrow`/`IntOf`"; not previously named on its own |
 | Bare `Expr::Alloc` (single-value arena allocation) | `tests/accept/arena_roundtrip.ls` — this backend's own "outside the boundary" fixture, not a `benches/` program | Not previously named on its own; distinguished from `alloc_slice` only once §7.5 closed the latter |
-| Heap boxing (`box`, `box_slice`, `Contents`, `unbox`, `unbox_slice` — `Type::Box`/`BoxedSlice`) | `reduce_*.ls`, every `benches/layout/*.ls` file | Same bucket as above; not previously named on its own |
+| ~~`box_slice`/`Contents`/`unbox_slice`~~ | **Closed, §7.7**: `reduce_*.ls`, every `benches/layout/*.ls` file now build (bare `box`/`unbox`, a single-value box, stay refused — nothing in `benches/` asks for one) | Same bucket as above; not previously named on its own |
 | `arg_count` (and argument reading generally) | `benches/game/binarytrees.ls`, `benches/game/fannkuch.ls` | Same bucket |
 | `Type::Float` and float arithmetic | `benches/game/spectral.ls`, `benches/game/fasta.ls` (two `alloc_slice` fills) | `emit.rs`'s own `LKind` doc comment already says floats are refused; not previously named as a *benchmark*-blocking gap |
 | `getchar`/`io_read` | `benches/game/revcomp.ls` | Found trying to build `revcomp.ls` once §7.5 closed `region`; not previously named |
@@ -681,15 +685,18 @@ check's own cost (`docs/overflow-cost.md`'s question) measurable on
 this backend for the first time. **Arenas next** (§7.5) — the biggest
 single gap by program count, and building against the real targets
 found two smaller gaps (`byte_of`, `Expr::Not`) sitting in front of it
-that no inspection of `emit.rs` alone would have named. What is left —
-heap boxing, bare `alloc`, `arg_count`, float, `getchar` — is five
-smaller pockets, each behind its own single gap, none bundled with
-anything else in `benches/` (§7.6 has the current, complete list).
+that no inspection of `emit.rs` alone would have named. **Heap boxing
+after that** (§7.7) — the next-biggest pocket, and building
+`reduce_checked.ls` against it found a second, unrelated gap
+underneath: multi-leaf function returns, closed the same session. What
+is left — bare `alloc`, `arg_count`, float, `getchar` — is four smaller
+pockets, each behind its own single gap, none bundled with anything
+else in `benches/` (§7.8 has the current, complete list).
 
 | Bench | |
 |---|---|
-| `scripts/backend_compare.py` | Interleaved cranelift-vs-llvm timing on the kernels that build on both, today nine; `--with-c` adds a three-way leg for `mandelbrot.ls` against `mandelbrot.c` |
-| `crates/lex-sys/tests/conformance/backends.rs` | `the_two_backends_agree_on_{sum_checked,fib_checked,mandelbrot,sum_wrapping,fib_wrapping,purity,sieve_checked,sieve_wrapping,scan_checked,scan_wrapping,the_three_language_sieve}` — not a timing gate, for the reason `every_benchmark_pair_agrees` gives |
+| `scripts/backend_compare.py` | Interleaved cranelift-vs-llvm timing on the kernels that build on both, today eleven; `--with-c` adds a three-way leg for `mandelbrot.ls` against `mandelbrot.c` |
+| `crates/lex-sys/tests/conformance/backends.rs` | `the_two_backends_agree_on_{sum_checked,fib_checked,mandelbrot,sum_wrapping,fib_wrapping,purity,sieve_checked,sieve_wrapping,scan_checked,scan_wrapping,the_three_language_sieve,reduce_checked,reduce_wrapping,layout_aos,layout_soa,layout_ints,layout_rgb}` — not a timing gate, for the reason `every_benchmark_pair_agrees` gives |
 | `crates/lex-sys-codegen-llvm/src/tests.rs` | `allocating_past_an_arenas_chunk_traps_with_sigill` — the arena-exhaustion trap, checked by signal the same way every other trap here is |
 
 ### 7.4 `wrapping_add`/`sub`/`mul`, closed — and what removing a trap buys an optimiser
@@ -823,17 +830,77 @@ unit, which is a harder shape to vectorise regardless of trapping, and
 untangling how much of the gap is that versus something else is its own
 question this document is not answering today.
 
-### 7.6 What still blocks the rest of `benches/`, updated
+### 7.7 Heap boxing, closed — and a gap that turned out to be two
 
-`region`/`alloc_slice`/`byte_of`/`Expr::Not` move out of §7.3's table.
-What is left: heap boxing (`box`/`box_slice` — `reduce_*.ls`, `benches/
-layout/*.ls`), bare `Expr::Alloc` (a single-value arena allocation —
-`tests/accept/arena_roundtrip.ls`, not a `benches/` program but this
-backend's own "outside the boundary" fixture now that `alloc_slice`
-lowers), `arg_count` (`benches/game/{binarytrees,fannkuch}.ls`),
-`Type::Float` (`benches/game/spectral.ls`, and now also `fasta.ls`'s
-two `float`-filled `alloc_slice` calls), and `getchar`/`io_read`
-(`benches/game/revcomp.ls`, `fasta.ls`'s own read side has none to
-need it). Heap boxing is the largest remaining pocket by program count;
-`getchar` is the smallest gap still blocking a real target, one read
-primitive rather than a family of builtins.
+§7.6's largest remaining pocket: `box_slice`/`contents`/`unbox_slice`
+(`Expr::BoxedSlice`/`Expr::Contents`/`Expr::UnboxedSlice`), needed by
+`reduce_*.ls` and every `benches/layout/*.ls` file. Built the same
+shape `alloc_slice` already is — `boxed_slice` shares `alloc_slice`'s
+own `slice_bytes` helper (factored out once there were two callers) for
+the checked-multiply sizing, and reaches for `malloc`/a null trap
+instead of `bump`/an arena chunk; `contents` and `unbox_slice` are each
+one load and one `free` respectively, matching `lex-sys-codegen`'s own
+`body/memory.rs` exactly. Bare `Boxed`/`Unboxed` (a single-value box,
+not a slice) stay refused — nothing in `benches/` asks for one.
+
+**Building `reduce_checked.ls` against this found a second, unrelated
+gap sitting underneath it: multi-leaf function returns.** `fill`, the
+helper that builds `reduce_checked.ls`'s array, returns `Box[[int]]` —
+two leaves, a pointer and a length (`docs/boxed-slices.md` §2) — and
+`emit`/`call` had refused any function return past one leaf since the
+first slice, a restriction nothing had tried to lift because nothing
+had needed to yet. Closed the same way LLVM's own multi-result
+intrinsics already read back in this file: a multi-leaf return packs
+into one anonymous struct (`{ptr, i64}` for a boxed slice, via
+`insertvalue`, mirroring how `checked_arith` already unpacks `{i64,
+i1}` out of `@llvm.sadd.with.overflow.i64` with `extractvalue`), and a
+call site unpacks the same way. Not scoped to two leaves specifically —
+`struct_ty`/`pack_struct` take any number of kinds, so a three-field
+struct return works the same way, untested only because nothing in
+`benches/` needs one yet.
+
+Every program behind only these gaps now builds on `--backend llvm`:
+`reduce_checked.ls`, `reduce_wrapping.ls`, and all four `benches/
+layout/*.ls` files (`aos.ls`, `soa.ls`, `ints.ls`, `rgb.ls`) — six
+differential tests join the eleven already in `backends.rs`, all
+checked byte-for-byte (or exit-code-for-exit-code) against Cranelift;
+the existing seventeen `lex-sys-codegen-llvm` unit tests, exercising
+every earlier slice's own return path, still pass unchanged.
+
+**Measured, `--rounds 20`, minimum of each interleaved half:**
+
+```
+program            cranelift        llvm      llvm/cranelift
+reduce_checked        0.248s       0.096s            -61%
+reduce_wrapping       0.100s       0.068s            -32%
+```
+
+`reduce_checked.ls` is `docs/gpu.md`'s own kernel — "the shape a GPU
+runs," its own header says — and the first time it has been measured
+llvm-vs-cranelift rather than only cranelift-vs-C/Rust. **Checked with
+`objdump`, once more before trusting it**: `reduce_checked.ls` has
+**zero** SIMD instructions and `reduce_wrapping.ls` has **54**, the
+same pattern §7.5 found in `sieve`/`scan` and §7.2/§7.4 found in
+`sum`/`mandelbrot` — an observable trap blocks vectorisation, on a
+fourth and different kind of kernel now (a boxed-slice reduction,
+after arithmetic, recursion, and a bounds-checked memory scan).
+
+The four layout kernels were not separately timed here — `scripts/
+backend_compare.py` stays scoped to `benches/`'s own checked/wrapping
+pairs, which `benches/layout/` is not shaped as (each file is its own
+point, not a pair), consistent with `scripts/three.py`/`scripts/
+game.py` already existing as the tools for differently-shaped suites
+rather than folding every kind of benchmark into one script.
+
+### 7.8 What still blocks the rest of `benches/`, updated
+
+`box_slice`/`contents`/`unbox_slice` and multi-leaf returns move out of
+§7.6's table. What is left: bare `Expr::Alloc` (a single-value arena
+allocation — `tests/accept/arena_roundtrip.ls`, not a `benches/`
+program but this backend's own "outside the boundary" fixture),
+`arg_count` (`benches/game/{binarytrees,fannkuch}.ls`), `Type::Float`
+(`benches/game/spectral.ls`, and `fasta.ls`'s two `float`-filled
+`alloc_slice` calls), and `getchar`/`io_read` (`benches/game/
+revcomp.ls`). Four gaps, each its own single pocket, none bundled with
+anything else in `benches/` — the same shape §7.6 described, one
+row shorter.

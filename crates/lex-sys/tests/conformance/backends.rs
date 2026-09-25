@@ -180,6 +180,40 @@ fn the_two_backends_agree_on_the_three_language_sieve() {
     assert_backends_agree("backends-sieve-three", "benches/three/sieve.ls", "6057\n");
 }
 
+/// `docs/llvm-backend.md` §7.7: heap boxing (`box_slice`/`contents`/
+/// `unbox_slice`) closed, plus multi-leaf returns -- `fill` in
+/// `reduce_checked.ls` returns `Box[[int]]`, two leaves, which the LLVM
+/// backend could not hand back out of a call at all until this slice.
+#[test]
+fn the_two_backends_agree_on_reduce_checked() {
+    assert_backends_agree("backends-reduce-checked", "benches/reduce_checked.ls", "");
+}
+
+#[test]
+fn the_two_backends_agree_on_reduce_wrapping() {
+    assert_backends_agree("backends-reduce-wrapping", "benches/reduce_wrapping.ls", "");
+}
+
+#[test]
+fn the_two_backends_agree_on_layout_aos() {
+    assert_backends_agree("backends-layout-aos", "benches/layout/aos.ls", "32000000\n");
+}
+
+#[test]
+fn the_two_backends_agree_on_layout_soa() {
+    assert_backends_agree("backends-layout-soa", "benches/layout/soa.ls", "32000000\n");
+}
+
+#[test]
+fn the_two_backends_agree_on_layout_ints() {
+    assert_backends_agree("backends-layout-ints", "benches/layout/ints.ls", "192000000\n");
+}
+
+#[test]
+fn the_two_backends_agree_on_layout_rgb() {
+    assert_backends_agree("backends-layout-rgb", "benches/layout/rgb.ls", "192000000\n");
+}
+
 /// The boundary this slice draws is a located refusal, not a crash or a
 /// silent wrong answer: `region`/`alloc_slice` moved out of this list
 /// once §7.5 landed; `arena_roundtrip.ls` now refuses on bare `alloc[a]`
