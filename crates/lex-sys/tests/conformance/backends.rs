@@ -614,3 +614,17 @@ fn a_program_outside_this_backend_is_refused_through_the_cli() {
     let message = String::from_utf8_lossy(&build.stderr).to_lowercase();
     assert!(message.contains("foreign"), "the refusal should name the boundary it hit: {message}");
 }
+
+/// `docs/llvm-backend.md` §7.20: `listen`/`accept`, closed -- the first
+/// crack in `Net` itself, not only in the foreign calls a program might
+/// use to reach a socket. `tests/accept/listen_accept_bad_fd.ls` calls
+/// both against a deliberately invalid fd, so the two backends agree
+/// without either one needing a real socket.
+#[test]
+fn the_two_backends_agree_on_listen_and_accept_on_a_bad_fd() {
+    assert_backends_agree(
+        "backends-listen-accept-bad-fd",
+        "tests/accept/listen_accept_bad_fd.ls",
+        "",
+    );
+}

@@ -1362,3 +1362,57 @@ today; closing any of them is a future slice with no forcing function
 behind it yet, the same position bare `alloc`/`Type::Float`/matching-
 through-a-reference each held before something connected them to a
 real target.
+
+### 7.20 `listen`/`accept`, closed — the first crack in `Net` itself
+
+Not a `benches/`-driven slice like every one before it: nothing in
+`benches/` or `tests/accept/` asked for `Net`, so this one was scoped
+directly instead, smallest sub-piece first, ahead of `connect`/`bind`
+rather than after them.
+
+`docs/listen.md` §6 is why `listen`/`accept` are the smallest piece of
+the four: neither one takes a capability. A fd's authority is proved
+once, at `bind` (`net_in`'s bound is checked by equality against the
+capability's own bound before the syscall runs); `listen`, `accept`,
+and every later `read`/`write`/`close` on the same fd take a plain
+`int` and nothing else — the same reasoning `docs/net.md` §4.1 already
+gives for why the resolver is a builtin rather than a lex-os facility.
+That makes both ordinary fixed-signature `libc` calls, no different in
+shape from `Sqrt`: narrow the `int` argument(s) to `i32`, `call`,
+`sext` the `i32` result back to `i64`. `emit.rs` gained two
+unconditional `declare`s (`declare i32 @listen(i32, i32)` and
+`declare i32 @accept(i32, ptr, ptr)`, the trailing `ptr null, ptr null`
+the same "the peer address is ignored" choice `examples/serve/serve.ls`
+already made by hand); `body/expr.rs` gained the two match arms,
+mirroring `lex-sys-codegen`'s own `body/expr.rs` arms line for line.
+
+**What this slice did not build, and could not have without building
+far more first:** a *real* bound fd. `bind` is a dedicated `Expr::Bind`
+IR node (not a `Callee::Builtin` call), and this backend still refuses
+it outright — confirmed empirically, not assumed: pointing a real
+`edition 2;` program's `bind(n, port)` at `--backend llvm` produces the
+documented "not part of the LLVM backend yet" refusal, naming `Bind`
+specifically, while the same source runs to completion on
+`--backend cranelift`. `Ffi`/`extern fn` is refused too (§7.19's own
+finding), so there is no back door to a real socket either —
+`examples/serve/serve.ls`'s own hand-rolled `socket`+`bind`+`listen`+
+`accept` sequence, which is how a real fd gets tested against
+Cranelift, is not reachable from this backend at all yet.
+
+**Tested the other side instead.** `tests/accept/
+listen_accept_bad_fd.ls` calls `listen(999, 16)` and `accept(999)`
+against a deliberately invalid fd — never opened by anything — which
+fails the same way, `EBADF`, on any host, with no real socket and no
+live connection required. Both backends agree (`backends.rs`); the
+LLVM path also gets its own self-contained crate-level test
+(`crates/lex-sys-codegen-llvm/src/tests.rs`), the same "fixture plus
+differential plus crate-level" trio every earlier slice left behind.
+
+**Still refused:** `connect`, `bind`, and `Ffi`/`extern fn` — three of
+`Net`'s four builtins, and the only way to obtain a real fd at all, so
+`listen`/`accept` remain untestable here against a real, successful
+accept until at least one of the other two lands. `bind` is next,
+smallest-first (`connect`'s `getaddrinfo`-based host resolution is the
+larger of the two remaining pieces, per `docs/connect.md` and
+`crates/lex-sys-codegen/src/body/net.rs`'s own ~150 lines); no forcing
+function names an order beyond that.

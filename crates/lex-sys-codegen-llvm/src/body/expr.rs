@@ -505,6 +505,48 @@ impl<'a> FuncEmitter<'a> {
                 ));
                 Ok(vec![LValue::Reg(result)])
             }
+            // `listen(fd: int, backlog: int) -> int`: neither takes a
+            // capability (`docs/listen.md` §6 -- the port was already
+            // bound at `bind`), so this is an ordinary fixed-signature
+            // `libc` call, narrowed to `i32` and widened back the same
+            // way `lex-sys-codegen`'s own arm does.
+            Callee::Builtin(Builtin::Listen) => {
+                let mut args = evaluated.into_iter().flatten();
+                let fd = args.next().ok_or_else(|| "`listen` needs an fd argument".to_owned())?;
+                let backlog =
+                    args.next().ok_or_else(|| "`listen` needs a backlog argument".to_owned())?;
+                let fd32 = self.fresh();
+                self.out.push_str(&format!("  {fd32} = trunc i64 {} to i32\n", operand(&fd)));
+                let backlog32 = self.fresh();
+                self.out
+                    .push_str(&format!("  {backlog32} = trunc i64 {} to i32\n", operand(&backlog)));
+                let result = self.fresh();
+                self.out.push_str(&format!(
+                    "  {result} = call i32 @listen(i32 {fd32}, i32 {backlog32})\n"
+                ));
+                let widened = self.fresh();
+                self.out.push_str(&format!("  {widened} = sext i32 {result} to i64\n"));
+                Ok(vec![LValue::Reg(widened)])
+            }
+            // `accept(fd: int) -> int`: the peer address is ignored --
+            // `NULL, NULL` -- the same as `examples/serve/`'s own
+            // hand-written call and Cranelift's arm.
+            Callee::Builtin(Builtin::Accept) => {
+                let fd = evaluated
+                    .into_iter()
+                    .flatten()
+                    .next()
+                    .ok_or_else(|| "`accept` needs an fd argument".to_owned())?;
+                let fd32 = self.fresh();
+                self.out.push_str(&format!("  {fd32} = trunc i64 {} to i32\n", operand(&fd)));
+                let result = self.fresh();
+                self.out.push_str(&format!(
+                    "  {result} = call i32 @accept(i32 {fd32}, ptr null, ptr null)\n"
+                ));
+                let widened = self.fresh();
+                self.out.push_str(&format!("  {widened} = sext i32 {result} to i64\n"));
+                Ok(vec![LValue::Reg(widened)])
+            }
             Callee::Fn(id) => {
                 let target = self.program.func(*id);
                 let param_kinds: Vec<LKind> = target.slots[..target.n_params as usize]

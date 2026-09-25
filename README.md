@@ -467,7 +467,11 @@ of the existing by-value binding path. **Every gap `llvm-backend.md`
 names a target for is now closed.** It is still **not** a complete
 backend — `Ffi`/`extern fn` and `Net` are what it refuses, with no
 `benches/` program or fixture asking for them yet, deliberately, as an
-opt-in and partial backend rather than a finished second one.
+opt-in and partial backend rather than a finished second one. `Net`
+has since been scoped directly rather than waiting on a `benches/`
+program: `listen`/`accept`, the two of its four builtins that take no
+capability, are closed — `connect`/`bind` and `Ffi`/`extern fn`, the
+only way to obtain a real fd, are still refused.
 [`ROADMAP.md`](docs/ROADMAP.md) says what's next.
 
 ---

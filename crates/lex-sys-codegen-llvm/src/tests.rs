@@ -553,3 +553,40 @@ fn subslicing_past_the_end_traps_with_sigill() {
 fn an_inverted_subslice_traps_with_sigill() {
     assert_subslicing_traps("2..0", "subslice-inverted");
 }
+
+/// `docs/llvm-backend.md` §7.20: `listen`/`accept`, closed. Neither
+/// builtin takes a capability -- the fd's authority was already proved
+/// at `bind`, which this backend still refuses (`Ffi`/`Net`'s other
+/// builtins are still outside this slice, so there is no way to get a
+/// *real* bound fd out of a `--backend llvm` program yet) -- so both
+/// are ordinary fixed-signature `libc` calls, checked here the same way
+/// `lex-sys-codegen`'s own arm is: a deliberately invalid fd (`999`,
+/// never opened) makes both calls fail the same way on any host,
+/// `EBADF`, without needing a real socket or a live connection.
+#[test]
+fn listen_and_accept_on_a_bad_fd_both_fail_matching_cranelift() {
+    let source = "\
+edition 2;
+
+fn main(world: World) -> [] int {
+    let Split { io, ffi, fs, heap, args, net } = split(world);
+    release(args); release(heap); release(fs); release(ffi); release(io); release(net);
+
+    let l = listen(999, 16);
+    let a = accept(999);
+    if l < 0 {
+        if a < 0 {
+            return 0;
+        }
+    }
+    return 1;
+}
+";
+    let object = compiled(source, "main");
+    let output = run(&object, "listen-accept-bad-fd");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "listen/accept on an invalid fd should both report failure, matching Cranelift"
+    );
+}
