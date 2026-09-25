@@ -128,9 +128,25 @@ programs nobody touched — thirty-five of them, at once, for one rename.
 That is not an argument against the design. It is an argument about
 **when**: the row's instinct to wait was right, and the thing to wait for
 is not a number but a *plateau* — a stretch of commits in which the
-effect vocabulary and the builtin surface do not move. This repository
-has not had one yet. The last four slices added `err_write`, `file_read`,
-three prelude types and three builtins.
+effect vocabulary and the builtin surface do not move. At the time this
+was written, this repository had not had one yet: the last four slices
+before it added `err_write`, `file_read`, three prelude types and three
+builtins.
+
+> **Corrected (`ROADMAP.md`'s `lex-vcs` row, current as of #119).** That
+> was true when written and is not any more. `builtin.rs` and `defs.rs`
+> — every builtin, every effect label, every prelude type's own row —
+> last changed at #92, the third `Net` slice. The 27 commits since
+> (#93 through #119, an entire second backend designed and built start
+> to finish) touch none of `crates/lex-sys-ir/`, `crates/lex-sys-types/`
+> or `crates/lex-sys-syntax/` at all — `git diff 52daddb..2999a7d --
+> crates/lex-sys-ir/ crates/lex-sys-types/ crates/lex-sys-syntax/` is
+> empty. The plateau this section said had not happened has now
+> happened, measured the same way §1 and §2 above were: by reading the
+> commit range rather than assuming it. Whether 27 commits is *long*
+> enough — long enough that a `lex-vcs` design written against it would
+> not immediately need revising — is a judgement call this section
+> leaves open rather than answers for it.
 
 ---
 
