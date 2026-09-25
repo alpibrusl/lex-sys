@@ -481,8 +481,16 @@ on which of three runtime paths ran rather than trapping or writing
 into an already-`alloca`'d `var`. A differential test now builds a
 listener on each backend, connects a real `TcpStream`, and checks
 both accept it — the first Net-capable program `--backend llvm` has
-ever actually run. `connect` and `Ffi`/`extern fn`, the only way to
-reach the network any other way, are still refused.
+ever actually run. `connect` closed next, the larger piece as
+predicted — a 256-byte stack buffer and a byte-by-byte prefix check
+against the capability's bound, this backend's first loop built for
+`Net`, then `getaddrinfo`, the same port patch `bind` already does,
+and `socket`/`connect`. An all-LLVM listener and client, built in the
+same session, talked to each other over real loopback — the first
+time two programs this backend built have ever talked to each other.
+**`Net` is now fully built on `--backend llvm`.** `Ffi`/`extern fn` is
+the only gap left — what a program needs to read or write what it
+accepted or connected to, not merely open the socket.
 [`ROADMAP.md`](docs/ROADMAP.md) says what's next.
 
 ---

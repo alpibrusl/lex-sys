@@ -226,11 +226,16 @@ impl<'a> FuncEmitter<'a> {
             // `bind(net, port)` (§7.21, `docs/listen.md` §6): the second
             // of `Net`'s four builtins this backend lowers, mirroring
             // `lex-sys-codegen`'s own `Expr::Bind` arm (`body/net.rs`).
-            // `connect` -- needing `getaddrinfo` host resolution -- is
-            // still outside this backend.
             Expr::Bind { bound, args } => {
                 let (bound, args) = (bound.clone(), args.clone());
                 self.bind(&bound, &args)
+            }
+            // `connect(net, name, port)` (§7.22, `docs/connect.md` §10):
+            // the last of `Net`'s four builtins, mirroring
+            // `lex-sys-codegen`'s own `Expr::Connect` arm (`body/net.rs`).
+            Expr::Connect { bound, args } => {
+                let (bound, args) = (bound.clone(), args.clone());
+                self.connect(&bound, &args)
             }
             other => Err(format!(
                 "`{other:?}` is not part of the LLVM backend yet (docs/llvm-backend.md §5)"

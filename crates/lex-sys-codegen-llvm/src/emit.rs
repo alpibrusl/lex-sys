@@ -244,7 +244,13 @@ pub(crate) fn emit_module(
     text.push_str("declare i32 @socket(i32, i32, i32)\n");
     text.push_str("declare i32 @setsockopt(i32, i32, i32, ptr, i32)\n");
     text.push_str("declare i32 @bind(i32, ptr, i32)\n");
-    text.push_str("declare i32 @close(i32)\n\n");
+    text.push_str("declare i32 @close(i32)\n");
+    // `connect` (§7.22, `docs/connect.md` §10): the last of `Net`'s four
+    // builtins, needing `getaddrinfo`/`freeaddrinfo` (host resolution)
+    // and `connect` itself alongside the `socket` already declared above.
+    text.push_str("declare i32 @getaddrinfo(ptr, ptr, ptr, ptr)\n");
+    text.push_str("declare void @freeaddrinfo(ptr)\n");
+    text.push_str("declare i32 @connect(i32, ptr, i32)\n\n");
 
     // `arg_count`/`arg` (§7.13, `docs/arguments.md` §3): `argc`/`argv` as
     // `main` was handed them, stashed once into module-local storage and

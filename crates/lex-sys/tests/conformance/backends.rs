@@ -724,3 +724,79 @@ fn the_two_backends_bind_and_accept_a_real_connection() {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+/// `docs/llvm-backend.md` §7.22: `connect`, closed -- the last of `Net`'s
+/// four builtins, and the last gap `docs/agent-tools.md`'s own "still
+/// refused" list named alongside `Ffi`/`extern fn`. A plain
+/// `std::net::TcpListener` stands in for the peer -- `connect` does not
+/// care what accepted it, only that something did -- so this isolates
+/// the half `connect` actually adds: host resolution
+/// (`getaddrinfo`/`freeaddrinfo`) and the connect call itself, not
+/// `bind`'s own machinery, already checked in
+/// `the_two_backends_bind_and_accept_a_real_connection`.
+#[test]
+fn the_two_backends_connect_to_a_real_listener() {
+    for backend in ["cranelift", "llvm"] {
+        let port = free_port();
+        let listener =
+            std::net::TcpListener::bind(("127.0.0.1", port)).expect("a free loopback port");
+
+        let dir = scratch(&format!("backends-connect-{backend}"));
+        let source = dir.join("client.ls");
+        std::fs::write(
+            &source,
+            format!(
+                "edition 2;\n\
+                 fn main(world: World) -> [] int {{\n\
+                     let Split {{ io, ffi, fs, heap, args, net }} = split(world);\n\
+                     release(io); release(fs); release(heap); release(args); release(ffi);\n\
+                     let bound = narrow(net, \"127.0.0.1:{port}\");\n\
+                     var fd = 0 - 1;\n\
+                     borrow bound as &n in {{\n\
+                         fd = connect(n, \"127.0.0.1\", {port});\n\
+                     }}\n\
+                     release(bound);\n\
+                     if fd >= 0 {{\n\
+                         return 0;\n\
+                     }}\n\
+                     return 1;\n\
+                 }}\n",
+            ),
+        )
+        .expect("a writable fixture");
+
+        let exe = dir.join("client");
+        let build = Command::new(BIN)
+            .args([
+                "build".as_ref(),
+                source.as_os_str(),
+                "--std".as_ref(),
+                "--backend".as_ref(),
+                backend.as_ref(),
+                "-o".as_ref(),
+                exe.as_os_str(),
+            ])
+            .output()
+            .expect("the compiler runs");
+        assert!(
+            build.status.success(),
+            "`--backend {backend}` should build the client, but said:\n{}",
+            String::from_utf8_lossy(&build.stderr)
+        );
+
+        // Accept on a thread: the client's `connect` and this process's
+        // `accept` are two sides of the same handshake, and either one
+        // blocking first for the other is a race, not a bug in either.
+        let accepted = std::thread::spawn(move || listener.accept());
+
+        let run = Command::new(&exe).output().expect("the client runs");
+        assert_eq!(
+            run.status.code(),
+            Some(0),
+            "`--backend {backend}`'s `connect` should reach the listener, but said:\n{}",
+            String::from_utf8_lossy(&run.stderr)
+        );
+        accepted.join().expect("the accept thread does not panic").expect("the peer connects");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
