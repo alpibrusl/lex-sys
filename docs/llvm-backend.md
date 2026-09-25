@@ -1127,3 +1127,57 @@ Two gaps with a `benches/` program behind them, one with none yet.
 bare `Expr::Alloc`/`Expr::Boxed`/`Expr::Unboxed` now blocks a real
 `benches/` program for the first time, not only this backend's own
 boundary fixture.
+
+### 7.15 Bare `Expr::Alloc`/`Expr::Boxed`/`Expr::Unboxed`, closed — `binarytrees.ls` builds too
+
+Single-value allocation, arena or heap: `alloc[a](value)` is `bump`
+plus one `store_leaves` call, the exact helper `alloc_slice` already
+opened (§7.5) minus its fill loop; `box(h, value)` is `boxed_slice`'s
+own `malloc`-and-null-check minus its fill loop; `unbox(h, b)` is one
+`load_leaves` followed by one `free`, the load ordered first because a
+freed pointer is not a valid read afterwards — `lex-sys-codegen`'s own
+`alloc`/`boxed`/`unboxed` (`body/memory.rs`) are the identical shape,
+each one a smaller version of a primitive this backend had already
+built for a slice's many elements. All three share one new
+`value_bytes` helper (`leaves_of(ty).len() * 8`), the whole-value
+counterpart of `stride_of`'s per-element version — a whole value is
+never a bare `byte` the way a slice's element can be, so it needs none
+of that function's special case.
+
+**`tests/accept/arena_roundtrip.ls`** (`alloc`) and **`tests/accept/
+box_roundtrip.ls`** (`box`/`unbox`) were both ready-made fixtures,
+checked against Cranelift byte-for-byte, each getting a crate-level
+test and a CLI differential test. **`binarytrees.ls` — §7.13's other
+named target, left refusing there on `build`'s own `box[h](Tree::Node
+{..})` — now builds too**, checked both with no argument (the fixture's
+own `//~ STDOUT` depth) and with a real one, matching Cranelift exactly
+in both cases and exercising `alloc`/`box`/`unbox` together with
+`arg_count`/`arg` rather than either capability alone. §7.13's own
+finding — a gap can block more than one program and close only some of
+them — resolves the other way this time: the *second*, deeper gap it
+found closes too, and both of its named targets now build.
+
+Not measured for performance: `binarytrees.ls` is allocation-and-
+freeing-bound rather than arithmetic- or memory-scan-bound, the kind of
+kernel this document has not yet built a `--with-malloc` comparison
+for, and `objdump`'s own SIMD count is not the interesting number for a
+kernel with no loop body to vectorise. A future slice measuring
+allocator-bound kernels specifically is left to `docs/llvm-backend.md`
+§6's own "Open" list rather than invented here.
+
+### 7.16 What still blocks the rest of `benches/`, updated again
+
+Bare `Expr::Alloc`/`Expr::Boxed`/`Expr::Unboxed` moves out of §7.14's
+table, closed — and unlike §7.13's `arg_count`/`arg`, this one takes
+both of its named `benches/` targets with it, not only one:
+
+| Gap | Blocks | Where it already shows up in this document |
+|---|---|---|
+| `Type::Float` | `benches/game/spectral.ls`, `fasta.ls`'s two `float`-filled `alloc_slice` calls | §7.3 |
+| Matching through a reference (`Stmt::Match`'s `by_reference`) | No `benches/` program reaches it yet | §5's fourth slice; named separately from field/deref access in §7.11 |
+
+One gap left with a `benches/` program behind it, one with none yet.
+`Type::Float` is now the only thing standing between this backend and
+the rest of the Benchmarks Game suite in `benches/game/` — closing it
+finishes both `spectral.ls` and `fasta.ls` at once, the same way
+`arg_count`/`arg` very nearly did with `fannkuch.ls`/`binarytrees.ls`.

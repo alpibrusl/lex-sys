@@ -1021,6 +1021,64 @@ impl<'a> FuncEmitter<'a> {
         Ok(vec![start, count])
     }
 
+    /// How many bytes one whole value of this type occupies -- every leaf
+    /// is 8 bytes here, the same stride every other slot in this backend
+    /// uses, matching `lex-sys-codegen`'s own `leaf_count(ty) *
+    /// RETURN_SLOT_STRIDE` (`body/memory.rs`). Unlike `stride_of`, which
+    /// special-cases a `[T]` element's own `byte` to 1, a whole value is
+    /// never a bare `byte` here -- `alloc`/`box`/`unbox` all take a
+    /// struct or scalar `Type`, not an element type.
+    fn value_bytes(&self, ty: &Type) -> Result<i64, String> {
+        Ok(leaves_of(ty, self.program)?.len() as i64 * 8)
+    }
+
+    /// `alloc[a](value)` -- bump-allocate and write the value there, the
+    /// same `bump` helper `alloc_slice` already opened (§7.5) --
+    /// `lex-sys-codegen`'s own `alloc` (`body/memory.rs`), one value
+    /// rather than a fill loop over many.
+    fn alloc(&mut self, arena: u32, ty: &Type, value: &Expr) -> Result<LValue, String> {
+        let values = self.expr(value)?;
+        let kinds = leaves_of(ty, self.program)?;
+        let bytes = LValue::Const(self.value_bytes(ty)?);
+        let at = self.bump(arena, &bytes)?;
+        self.store_leaves(&operand(&at), &kinds, &values);
+        Ok(at)
+    }
+
+    /// `box(h, value)` -- one `malloc`, trapping on exhaustion exactly as
+    /// an arena's own bump does, and the value written into it
+    /// (`lex-sys-codegen`'s own `boxed`, `body/memory.rs`) -- the same
+    /// sizing and null check `boxed_slice` already makes, minus its fill
+    /// loop: one value here, not `count` copies of one.
+    fn boxed(&mut self, ty: &Type, value: &Expr) -> Result<LValue, String> {
+        let values = self.expr(value)?;
+        let kinds = leaves_of(ty, self.program)?;
+        let bytes = self.value_bytes(ty)?;
+        let at = self.fresh();
+        self.out.push_str(&format!("  {at} = call ptr @malloc(i64 {bytes})\n"));
+        let is_null = self.fresh();
+        self.out.push_str(&format!("  {is_null} = icmp eq ptr {at}, null\n"));
+        self.trap_if(&is_null)?;
+        self.store_leaves(&at, &kinds, &values);
+        Ok(LValue::Reg(at))
+    }
+
+    /// `unbox(h, b)` -- read the value back, then one `free`. The load
+    /// has to happen before the free, the only ordering constraint here,
+    /// matching `lex-sys-codegen`'s own `unboxed` (`body/memory.rs`)
+    /// exactly, including why it is one function rather than two
+    /// composable ones.
+    fn unboxed(&mut self, ty: &Type, value: &Expr) -> Result<Vec<LValue>, String> {
+        let leaves = self.expr(value)?;
+        let [at] = leaves.as_slice() else {
+            return Err("`unbox`'s argument is not a box (expected 1 leaf: a pointer)".to_owned());
+        };
+        let kinds = leaves_of(ty, self.program)?;
+        let values = self.load_leaves(&operand(at), &kinds);
+        self.out.push_str(&format!("  call void @free(ptr {})\n", operand(at)));
+        Ok(values)
+    }
+
     /// `if`/`else`. Returns whether *both* arms terminate -- the checker's
     /// own `terminates()` rule, and the reason a terminating `if` is
     /// always a block's last statement: nothing here needs to merge a
@@ -1461,6 +1519,12 @@ impl<'a> FuncEmitter<'a> {
                 self.alloc_slice(*arena, element, count, fill)
             }
             Expr::BoxedSlice { element, count, fill } => self.boxed_slice(element, count, fill),
+            // §7.15: single-value allocation, arena or heap -- the same
+            // `bump`/`malloc` this backend already opened for a slice's
+            // many elements, minus the fill loop.
+            Expr::Alloc { arena, ty, value } => Ok(vec![self.alloc(*arena, ty, value)?]),
+            Expr::Boxed { ty, value } => Ok(vec![self.boxed(ty, value)?]),
+            Expr::Unboxed { ty, value } => self.unboxed(ty, value),
             // One `free`, and the element count back -- the pointer is
             // the first leaf and the length the second (`docs/boxed-
             // slices.md` §2), the same order `boxed_slice` returns them.
