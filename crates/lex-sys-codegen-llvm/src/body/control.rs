@@ -190,9 +190,15 @@ impl<'a> FuncEmitter<'a> {
     }
 
     /// Copy a matched variant's payload into the slots its pattern bound
-    /// -- the by-value half of `lex-sys-codegen`'s own `bind_payload`
-    /// (matching *through* a reference is not part of this backend yet,
-    /// so there is no address-only half to mirror here).
+    /// -- `lex-sys-codegen`'s own `bind_payload`, both halves. By value,
+    /// each bound leaf is copied out of `values` (already loaded by the
+    /// caller). By reference (`docs/reading-references.md` §2), nothing
+    /// is loaded at all: `values[0]` is the scrutinee's own pointer, and
+    /// a binding gets the *address* of its payload position --
+    /// `getelementptr`, the same idiom `Expr::FieldAddr` already uses --
+    /// stored into the one-leaf slot a reference always is. A `_`
+    /// binding still occupies its payload position either way; there is
+    /// simply nowhere to put the value (or the address).
     pub(crate) fn bind_payload(
         &mut self,
         def: DefId,
@@ -200,24 +206,43 @@ impl<'a> FuncEmitter<'a> {
         variant: u32,
         arm: &Arm,
         values: &[LValue],
+        by_reference: bool,
     ) -> Result<(), String> {
         let (offset, widths) = self.variant_layout(def, args, variant)?;
         let mut at = offset;
         for (binding, width) in arm.bindings.iter().zip(widths) {
             if let Some(slot) = binding {
-                let kinds = self.slot_kinds[slot.0 as usize].clone();
-                for index in 0..width {
-                    let value = values[at + index].clone();
+                if by_reference {
+                    if width != 1 {
+                        return Err(
+                            "matching through a reference cannot bind a payload wider than \
+                             one leaf"
+                                .to_owned(),
+                        );
+                    }
+                    let addr = self.fresh();
                     self.out.push_str(&format!(
-                        "  store {} {}, ptr {}\n",
-                        kinds[index].llvm(),
-                        operand(&value),
-                        Self::slot_reg(slot.0, index as u32)
+                        "  {addr} = getelementptr i8, ptr {}, i64 {}\n",
+                        operand(&values[0]),
+                        at as i64 * 8
                     ));
+                    self.out.push_str(&format!(
+                        "  store ptr {addr}, ptr {}\n",
+                        Self::slot_reg(slot.0, 0)
+                    ));
+                } else {
+                    let kinds = self.slot_kinds[slot.0 as usize].clone();
+                    for index in 0..width {
+                        let value = values[at + index].clone();
+                        self.out.push_str(&format!(
+                            "  store {} {}, ptr {}\n",
+                            kinds[index].llvm(),
+                            operand(&value),
+                            Self::slot_reg(slot.0, index as u32)
+                        ));
+                    }
                 }
             }
-            // A `_` binding still occupies its payload position; there is
-            // simply nowhere to put the value.
             at += width;
         }
         Ok(())
@@ -243,14 +268,22 @@ impl<'a> FuncEmitter<'a> {
         arms: &[Arm],
         by_reference: bool,
     ) -> Result<bool, String> {
-        if by_reference {
-            return Err("matching through a reference is not part of the LLVM backend yet \
-                 (docs/llvm-backend.md §5); `--backend cranelift` builds this program"
-                .to_owned());
-        }
+        // A reference is always one pointer leaf (`Type::Ref`'s own rule
+        // in `leaves_into`), whatever it refers to -- so `scrutinee`
+        // evaluates the same way in both modes, and only reading the tag
+        // out of it differs: by value it is already the tag, loaded;
+        // by reference it is the scrutinee's own address, and the tag is
+        // one more load away (`docs/reading-references.md` §2).
         let values = self.expr(scrutinee)?;
-        let Some(tag) = values.first().cloned() else {
+        let Some(first) = values.first().cloned() else {
             return Err("a match scrutinee must be an enum (at least one leaf: the tag)".to_owned());
+        };
+        let tag = if by_reference {
+            let loaded = self.fresh();
+            self.out.push_str(&format!("  {loaded} = load i64, ptr {}\n", operand(&first)));
+            LValue::Reg(loaded)
+        } else {
+            first
         };
 
         let n = self.blocks;
@@ -280,7 +313,7 @@ impl<'a> FuncEmitter<'a> {
                     ));
 
                     self.out.push_str(&format!("{body_label}:\n"));
-                    self.bind_payload(def, args, variant, arm, &values)?;
+                    self.bind_payload(def, args, variant, arm, &values, by_reference)?;
                     let returned = self.stmts(&arm.body)?;
                     if !returned {
                         self.out.push_str(&format!("  br label %{merge}\n"));

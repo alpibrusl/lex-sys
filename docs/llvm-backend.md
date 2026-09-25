@@ -1303,3 +1303,62 @@ binding mode), still its own address arithmetic over an enum's variant
 layout, not yet built. `tests/accept/match_a_reference.ls` is this
 backend's own boundary fixture for it now, the same role
 `arena_roundtrip.ls` and `floating_point.ls` each held in turn.
+
+### 7.19 Matching through a reference, closed — every documented gap is now closed
+
+Unlike every other slice in this document, this one was close to what
+it looked like on the surface — because the two slices that came
+before it had already built everything it needed. §7.11 built the
+`getelementptr`-address idiom (`Expr::FieldAddr`: compute an address,
+don't load); §5's fifth slice built `variant_layout` and the by-value
+half of `bind_payload`. Matching through a reference turned out to be
+those two facts composed, not a third thing.
+
+**The whole change is in `body/control.rs`.** A reference is always
+one pointer leaf (`Type::Ref`'s own rule in `leaves_into`), so the
+scrutinee evaluates identically in both modes — only reading the tag
+out of it differs: by value it is already the loaded tag; by reference
+it is the scrutinee's own address, and the tag is one more `load i64`
+away. `bind_payload` gained the mirror image: by value, each bound
+leaf is copied out of already-loaded values; by reference, a binding
+gets the *address* of its payload position instead —
+`variant_layout`'s own leaf-offset, scaled to bytes and added to the
+scrutinee's pointer via `getelementptr`, then that address (not a
+value) stored into the one-leaf slot a reference always occupies. A
+`_` binding still advances past its payload position in both modes;
+there is simply nowhere to put the value, or the address. One
+difference from Cranelift's own `debug_assert_eq!` on the "every
+by-reference binding is one leaf" invariant: this backend returns an
+`Err` instead, matching its own no-panic convention rather than a
+panic that would only fire in debug builds.
+
+**Both fixtures this document already knew about build and match
+Cranelift exactly.** `tests/accept/match_a_reference.ls` — read three
+times through a shared reference, freed once — matches byte for byte.
+`examples/tree.ls`, the richer target `docs/reading-references.md` §4
+names by name: a three-field variant (`Box[Tree]`, `int`, `Box[Tree]`)
+matched by reference three separate ways — `contains` binds and
+recurses through all three; `deepest` discards the first position with
+`_`, exercising the offset bookkeeping past a skipped payload with an
+asymmetric variant shape; `tally` binds and recurses through all
+three, folding the results into a multi-leaf `struct Walk` return —
+matches too. Neither fixture needed anything beyond what `bind_payload`
+and `match_stmt` already gained. A third case, a `&!` unique-reference
+match writing through a bound payload (`*n = *n + 1`), has no fixture
+in `tests/accept/` or `examples/` — the address arithmetic does not
+distinguish shared from unique, so this was checked by hand instead,
+in this slice's own session: it builds, runs, and matches Cranelift.
+
+**Every gap this document names a `benches/` or `tests/accept/` target
+for is now closed.** The "outside this backend" boundary fixture moves
+a fourth time: `tests/accept/bytes_to_c.ls`, refusing on a foreign
+call (`extern fn`) — `Ffi`/`extern fn` was always the next-named gap in
+`lib.rs`'s own module header, just never connected to a fixture until
+matching through a reference stopped being in the way of naming it.
+What remains unbuilt — `Ffi`/`extern fn`, `Net`, and the handful of
+builtins beyond the ones this document's fifteen slices have closed —
+has no `benches/` program or `tests/accept/` fixture asking for it
+today; closing any of them is a future slice with no forcing function
+behind it yet, the same position bare `alloc`/`Type::Float`/matching-
+through-a-reference each held before something connected them to a
+real target.

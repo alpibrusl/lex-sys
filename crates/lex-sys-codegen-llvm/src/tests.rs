@@ -109,42 +109,36 @@ fn the_first_slice_builds_and_runs_the_smoke_fixture() {
 /// is refused with a located `CodegenError`, never a panic. `region`/
 /// `alloc_slice` moved out of this list once §7.5 landed; bare
 /// `alloc[a]`/`box`/`unbox` moved out once §7.15 landed; `Type::Float`
-/// moved out once §7.17 landed. Matching *through* a reference is still
-/// such a gap -- `match`ing a `borrow`ed reference to an enum rather
-/// than an owned value, right inside `main` so this backend's own
-/// "emit only what `main` reaches" pruning does not skip it the way a
-/// separate, uncalled function would be.
+/// moved out once §7.17 landed; matching through a reference moved out
+/// once §7.19 landed -- every gap `docs/llvm-backend.md` names a
+/// `benches/`/`tests/accept/` target for is closed. A foreign call
+/// (`extern fn`, `docs/llvm-backend.md`'s own "not part of this slice"
+/// message) is still such a gap, with no fixture of its own to name.
 #[test]
 fn a_program_outside_this_backend_is_refused_not_panicked() {
     let source = "\
-enum E {
-    A,
-    B(int),
-}
+extern fn labs[&f](ffi: &f Ffi(\"libc\"), n: int) -> [ffi(\"libc\")] int;
 
 fn main(world: World) -> [] int {
     let Split { io, ffi, fs, heap, args } = split(world);
     release(args);
     release(fs);
-    release(ffi);
     release(io);
     release(heap);
-    let e = E::B(1);
     var result = 0;
-    borrow e as &r in {
-        match r {
-            E::A => { result = 0; }
-            E::B(n) => { result = *n; }
-        }
+    let libc = narrow(ffi, \"libc\");
+    borrow libc as &f in {
+        result = labs(f, 0 - 5);
     }
+    release(libc);
     return result;
 }
 ";
     let ast = parse(source).expect("parses");
     let program = lex_sys_ir::lower(&ast).expect("type-checks");
-    let error = compile_object(&program, "main")
-        .expect_err("matching through a reference is not part of this backend yet");
-    assert!(error.message.contains("reference"), "{}", error.message);
+    let error =
+        compile_object(&program, "main").expect_err("a foreign call is not part of this backend");
+    assert!(error.message.contains("foreign"), "{}", error.message);
 }
 
 /// §7.17: `Type::Float` closed. `tests/accept/floating_point.ls` itself
@@ -202,6 +196,31 @@ fn main(world: World) -> [] int {
         Some(0),
         "one of float_of/truncate/sqrt/bits_of/is_nan computed the wrong value"
     );
+}
+
+/// §7.19: matching through a reference, closed. `tests/accept/
+/// match_a_reference.ls` reads the same list three times through a
+/// shared reference (twice via `total`, once via `length`, one of
+/// them discarding a bound position with `_`) before consuming and
+/// freeing it once -- exactly the "read three times, freed once"
+/// claim the fixture's own header makes.
+#[test]
+fn matching_through_a_reference_builds_and_runs_the_match_a_reference_fixture() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("tests")
+        .join("accept")
+        .join("match_a_reference.ls");
+    let source = std::fs::read_to_string(&path).expect("the fixture exists");
+    let object = compiled(&source, "main");
+    let output = run(&object, "match-a-reference");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "10 3 10\nfreed 10\n",
+        "the LLVM backend computed the wrong values"
+    );
+    assert_eq!(output.status.code(), Some(0), "the LLVM backend exited wrongly");
 }
 
 /// `docs/llvm-backend.md` §5's second slice: `tests/accept/llvm_arith.ls`
