@@ -107,10 +107,10 @@ fn the_first_slice_builds_and_runs_the_smoke_fixture() {
 /// though its gaps are "not implemented yet" rather than "the checker
 /// should have refused this": a program outside what this backend lowers
 /// is refused with a located `CodegenError`, never a panic. `region`/
-/// `alloc_slice` moved out of this list once §7.5 landed; bare `alloc[a]`
-/// (a single-value arena allocation, handing back a unique reference) is
-/// still such a gap -- `arena_roundtrip.ls` needed it and nothing else to
-/// stay outside this backend once §7.5 closed `alloc_slice`.
+/// `alloc_slice` moved out of this list once §7.5 landed; bare
+/// `alloc[a]`/`box`/`unbox` moved out once §7.15 landed. `Type::Float`
+/// is still such a gap -- `tests/accept/floating_point.ls` needed it
+/// and nothing else to stay outside this backend.
 #[test]
 fn a_program_outside_this_backend_is_refused_not_panicked() {
     let source = "\
@@ -121,17 +121,15 @@ fn main(world: World) -> [] int {
     release(ffi);
     release(io);
     release(heap);
-    region r {
-        let p = alloc[r](0);
-        return 0;
-    }
+    let x = 1.0 / 2.0;
+    return 0;
 }
 ";
     let ast = parse(source).expect("parses");
     let program = lex_sys_ir::lower(&ast).expect("type-checks");
-    let error =
-        compile_object(&program, "main").expect_err("bare `alloc` is not part of this backend yet");
-    assert!(error.message.contains("Alloc"), "{}", error.message);
+    let error = compile_object(&program, "main")
+        .expect_err("`Type::Float` is not part of this backend yet");
+    assert!(error.message.contains("Float"), "{}", error.message);
 }
 
 /// `docs/llvm-backend.md` §5's second slice: `tests/accept/llvm_arith.ls`
@@ -321,6 +319,51 @@ fn arg_count_and_arg_build_and_run_the_arguments_fixture() {
         String::from_utf8_lossy(&output.stdout),
         "1\nnamed: 1\n",
         "the LLVM backend computed the wrong argc/argv"
+    );
+    assert_eq!(output.status.code(), Some(0), "the LLVM backend exited wrongly");
+}
+
+/// `tests/accept/arena_roundtrip.ls`: `alloc[a](value)`, single-value
+/// bump allocation -- the same `bump` helper `alloc_slice` already
+/// opened (§7.5), minus its fill loop.
+#[test]
+fn alloc_builds_and_runs_the_arena_roundtrip_fixture() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("tests")
+        .join("accept")
+        .join("arena_roundtrip.ls");
+    let source = std::fs::read_to_string(&path).expect("the fixture exists");
+    let object = compiled(&source, "main");
+    let output = run(&object, "arena-roundtrip");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "0 1 4 9 16 25 36 49 = 140\nnested: 7\n",
+        "the LLVM backend computed the wrong values"
+    );
+    assert_eq!(output.status.code(), Some(0), "the LLVM backend exited wrongly");
+}
+
+/// `tests/accept/box_roundtrip.ls`: `box(h, value)`/`unbox(h, b)`, the
+/// heap-shaped twin of `alloc` above -- one `malloc`, trapping on
+/// exhaustion exactly as `boxed_slice` already does, and one `free` on
+/// the way out, the load happening first.
+#[test]
+fn box_and_unbox_build_and_run_the_box_roundtrip_fixture() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("tests")
+        .join("accept")
+        .join("box_roundtrip.ls");
+    let source = std::fs::read_to_string(&path).expect("the fixture exists");
+    let object = compiled(&source, "main");
+    let output = run(&object, "box-roundtrip");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "7\n10 4\n",
+        "the LLVM backend computed the wrong values"
     );
     assert_eq!(output.status.code(), Some(0), "the LLVM backend exited wrongly");
 }

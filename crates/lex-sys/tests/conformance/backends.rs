@@ -378,9 +378,9 @@ fn the_two_backends_agree_on_arguments() {
 /// this module actually given a real argument, exercising `arg`'s bounds
 /// check and `strlen` read together with `arg_count`'s own count rather
 /// than only the no-argument path `assert_backends_agree` covers.
-/// `binarytrees.ls` -- `arg_count`/`arg`'s other named target -- still
-/// refuses past this: it also needs bare `Expr::Boxed` (§7.12's other
-/// row), not scoped here.
+/// `binarytrees.ls` -- `arg_count`/`arg`'s other named target -- refused
+/// past this at the time (it also needed bare `Expr::Boxed`); §7.15
+/// closed that too, and it gets its own test below.
 #[test]
 fn the_two_backends_agree_on_fannkuch() {
     for backend in ["cranelift", "llvm"] {
@@ -416,19 +416,83 @@ fn the_two_backends_agree_on_fannkuch() {
     }
 }
 
+/// `docs/llvm-backend.md` §7.15: bare `Expr::Alloc`/`Expr::Boxed`/
+/// `Expr::Unboxed` closed -- single-value allocation, arena or heap,
+/// the same `bump`/`malloc` this backend already opened for a slice's
+/// many elements, minus the fill loop. `tests/accept/arena_roundtrip.ls`
+/// and `tests/accept/box_roundtrip.ls` were the two ready-made fixtures
+/// exercising `alloc`/`box`+`unbox` respectively.
+#[test]
+fn the_two_backends_agree_on_arena_roundtrip() {
+    assert_backends_agree(
+        "backends-arena-roundtrip",
+        "tests/accept/arena_roundtrip.ls",
+        "0 1 4 9 16 25 36 49 = 140\nnested: 7\n",
+    );
+}
+
+#[test]
+fn the_two_backends_agree_on_box_roundtrip() {
+    assert_backends_agree("backends-box-roundtrip", "tests/accept/box_roundtrip.ls", "7\n10 4\n");
+}
+
+/// `binarytrees.ls` itself, past `arg_count`/`arg` and now past bare
+/// `Expr::Boxed` too: `build`'s own `box[h](Tree::Node {..})` was the
+/// gap §7.13 found and did not close. Given a real depth the same way
+/// `the_two_backends_agree_on_fannkuch` is, exercising `alloc`/`box`/
+/// `unbox` together with `arg_count`/`arg` rather than either alone.
+#[test]
+fn the_two_backends_agree_on_binarytrees() {
+    for backend in ["cranelift", "llvm"] {
+        let dir = scratch(&format!("backends-binarytrees-{backend}"));
+        let exe = dir.join("out");
+        let build = Command::new(BIN)
+            .args([
+                "build".as_ref(),
+                repo_root().join("benches/game/binarytrees.ls").as_os_str(),
+                "--std".as_ref(),
+                "--backend".as_ref(),
+                backend.as_ref(),
+                "-o".as_ref(),
+                exe.as_os_str(),
+            ])
+            .output()
+            .expect("the compiler runs");
+        assert!(
+            build.status.success(),
+            "`--backend {backend}` should build `binarytrees.ls`, but said:\n{}",
+            String::from_utf8_lossy(&build.stderr)
+        );
+
+        let output = Command::new(&exe).arg("8").output().expect("the program runs");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(output.status.code(), Some(0), "`--backend {backend}` should exit 0");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "stretch tree of depth 9\t check: 1023\n\
+             256\t trees of depth 4\t check: 7936\n\
+             64\t trees of depth 6\t check: 8128\n\
+             16\t trees of depth 8\t check: 8176\n\
+             long lived tree of depth 8\t check: 511\n",
+            "`--backend {backend}` printed the wrong thing"
+        );
+    }
+}
+
 /// The boundary this slice draws is a located refusal, not a crash or a
 /// silent wrong answer: `region`/`alloc_slice` moved out of this list
-/// once §7.5 landed; `arena_roundtrip.ls` now refuses on bare `alloc[a]`
-/// instead (a single-value arena allocation handing back a unique
-/// reference, still not part of this backend).
+/// once §7.5 landed; bare `alloc[a]`/`box`/`unbox` moved out once §7.15
+/// landed. `floating_point.ls` now refuses on `Type::Float` instead,
+/// still not part of this backend.
 #[test]
 fn a_program_outside_this_backend_is_refused_through_the_cli() {
-    let dir = scratch("backends-llvm-arena");
+    let dir = scratch("backends-llvm-float");
     let exe = dir.join("out");
     let build = Command::new(BIN)
         .args([
             "build".as_ref(),
-            repo_root().join("tests/accept/arena_roundtrip.ls").as_os_str(),
+            repo_root().join("tests/accept/floating_point.ls").as_os_str(),
             "--std".as_ref(),
             "--backend".as_ref(),
             "llvm".as_ref(),
@@ -441,9 +505,9 @@ fn a_program_outside_this_backend_is_refused_through_the_cli() {
 
     assert!(
         !build.status.success(),
-        "`arena_roundtrip.ls` is outside this backend and should refuse"
+        "`floating_point.ls` is outside this backend and should refuse"
     );
     assert_eq!(build.status.code(), Some(1), "an unsupported program is rule `internal`, exit 1");
     let message = String::from_utf8_lossy(&build.stderr).to_lowercase();
-    assert!(message.contains("alloc"), "the refusal should name the boundary it hit: {message}");
+    assert!(message.contains("float"), "the refusal should name the boundary it hit: {message}");
 }

@@ -60,9 +60,16 @@
 //! module-local storage by `@main`, mirroring `lex-sys-codegen`'s own
 //! `emit_c_main`, `arg`'s bounds check the same `icmp uge` shape every
 //! other indexing operation here already uses. Only one of the two
-//! named targets builds past it: `fannkuch.ls` does, checked against a
-//! real argument and not only the no-argument fallback; `binarytrees.ls`
-//! reaches bare `Expr::Boxed` instead, one row lower in the same table.
+//! named targets built past it at the time: `fannkuch.ls`, checked
+//! against a real argument and not only the no-argument fallback;
+//! `binarytrees.ls` reached bare `Expr::Boxed` instead.
+//!
+//! §7.15 closed that too: single-value allocation, arena (`alloc`) or
+//! heap (`box`/`unbox`), each one a smaller version of a primitive this
+//! backend had already built for a slice's many elements --
+//! `alloc_slice`'s own `bump`, `boxed_slice`'s own `malloc`-and-null-
+//! check, both minus their fill loop. `binarytrees.ls` builds too now,
+//! taking both of §7.13's named targets with it rather than only one.
 //! Every `benches/` program behind only the gaps closed so far now
 //! builds on `--backend llvm`.
 //!
@@ -70,13 +77,12 @@
 //! scrutinee's tag and payload are read directly; `docs/reading-
 //! references.md`'s address-only binding mode has no counterpart here
 //! yet -- a different feature from the field/deref access §7.11
-//! closed, not yet connected to a `benches/` program), bare `Expr::
-//! Alloc`/`Expr::Boxed`/`Expr::Unboxed` (a single-value allocation,
-//! arena or heap -- blocks `binarytrees.ls` now, not only this
-//! backend's own boundary fixture), `Type::Float`, `Ffi`/`extern fn`,
-//! `Net`, and every other `Builtin` beyond `PutChar`/`GetChar`/
-//! `ArgCount`/`Arg`/`Split`/`Release`/`Narrow`/`IntOf`/`ByteOf`/
-//! `WrappingAdd`/`WrappingSub`/`WrappingMul`/`Write`/`WriteErr`.
+//! closed, not yet connected to a `benches/` program), `Type::Float`
+//! (the only gap left blocking more than one `benches/` program --
+//! `spectral.ls` and `fasta.ls` both), `Ffi`/`extern fn`, `Net`, and
+//! every other `Builtin` beyond `PutChar`/`GetChar`/`ArgCount`/`Arg`/
+//! `Split`/`Release`/`Narrow`/`IntOf`/`ByteOf`/`WrappingAdd`/
+//! `WrappingSub`/`WrappingMul`/`Write`/`WriteErr`.
 //!
 //! This backend is intentionally partial. Everything it does not yet lower
 //! is refused with a [`CodegenError`], never a panic: unlike
