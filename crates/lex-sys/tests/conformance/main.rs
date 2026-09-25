@@ -34,6 +34,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+mod agent_tools;
 mod arguments;
 mod authority;
 mod backends;

@@ -39,6 +39,7 @@ fn printing_preserves_every_identity_and_is_idempotent() {
         "benches",
         "examples/base64",
         "examples/sort",
+        "examples/seek",
         "benches/three",
         // The standard library is code, and gets the same contract every
         // other file here gets: printed, reparsed, identical hashes, and
