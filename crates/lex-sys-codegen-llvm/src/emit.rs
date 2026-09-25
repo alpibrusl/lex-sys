@@ -193,6 +193,17 @@ pub(crate) fn emit_module(
     text.push_str("declare {i64, i1} @llvm.ssub.with.overflow.i64(i64, i64)\n");
     text.push_str("declare {i64, i1} @llvm.smul.with.overflow.i64(i64, i64)\n\n");
 
+    // `arg_count`/`arg` (§7.13, `docs/arguments.md` §3): `argc`/`argv` as
+    // `main` was handed them, stashed once into module-local storage and
+    // never written again -- `lex-sys-codegen`'s own `ARGC_GLOBAL`/
+    // `ARGV_GLOBAL` (`abi.rs`), the same reasoning applied to `internal
+    // global` here instead of a `Linkage::Local` data object. `arg` reads
+    // a NUL-terminated C string back from `argv`, so its length needs
+    // libc's own `strlen` the way `docs/arguments.md` §3.2 describes.
+    text.push_str("declare i64 @strlen(ptr)\n");
+    text.push_str("@lexs_argc = internal global i64 0\n");
+    text.push_str("@lexs_argv = internal global ptr null\n\n");
+
     // Every string literal's bytes (§5's fourth slice) become one global
     // constant, named as it is met rather than once per unique text --
     // `docs/strings.md` §8 leaves interning an open question, so two
@@ -230,6 +241,12 @@ pub(crate) fn emit_module(
     }
     text.push_str("define i32 @main(i32 %argc, ptr %argv) {\n");
     text.push_str("entry:\n");
+    // `docs/arguments.md` §3: written exactly once, before any lex-sys
+    // code runs, and never again -- `lex-sys-codegen`'s own `emit_c_main`
+    // stashes the same two values the same way, at the same point.
+    text.push_str("  %argc64 = sext i32 %argc to i64\n");
+    text.push_str("  store i64 %argc64, ptr @lexs_argc\n");
+    text.push_str("  store ptr %argv, ptr @lexs_argv\n");
     match ret.first() {
         Some(LKind::I64) => {
             text.push_str(&format!("  %r = call i64 @lexs_{entry}()\n"));
@@ -1741,6 +1758,47 @@ impl<'a> FuncEmitter<'a> {
                     operand(len)
                 ));
                 Ok(vec![LValue::Reg(result)])
+            }
+            // `docs/arguments.md` §3: `argc`, exactly as `main` was
+            // handed it and stashed into `@lexs_argc` before this
+            // function's own body could run.
+            Callee::Builtin(Builtin::ArgCount) => {
+                let count = self.fresh();
+                self.out.push_str(&format!("  {count} = load i64, ptr @lexs_argc\n"));
+                Ok(vec![LValue::Reg(count)])
+            }
+            // One argument, as a pointer and a length (§3, same section):
+            // an index outside `0 .. argc` traps, the same mistake and
+            // the same answer as indexing past a slice, then `argv[n]` is
+            // read back and its NUL-terminated length computed with
+            // `strlen` -- the terminator is an artifact of the C
+            // interface, not part of the value handed back.
+            Callee::Builtin(Builtin::Arg) => {
+                let skip = Builtin::Arg.erased_args();
+                let index = evaluated
+                    .into_iter()
+                    .skip(skip)
+                    .flatten()
+                    .next()
+                    .ok_or_else(|| "`arg` needs an index argument".to_owned())?;
+                let count = self.fresh();
+                self.out.push_str(&format!("  {count} = load i64, ptr @lexs_argc\n"));
+                let past = self.fresh();
+                self.out
+                    .push_str(&format!("  {past} = icmp uge i64 {}, {count}\n", operand(&index)));
+                self.trap_if(&past)?;
+                let argv = self.fresh();
+                self.out.push_str(&format!("  {argv} = load ptr, ptr @lexs_argv\n"));
+                let slot = self.fresh();
+                self.out.push_str(&format!(
+                    "  {slot} = getelementptr ptr, ptr {argv}, i64 {}\n",
+                    operand(&index)
+                ));
+                let text = self.fresh();
+                self.out.push_str(&format!("  {text} = load ptr, ptr {slot}\n"));
+                let length = self.fresh();
+                self.out.push_str(&format!("  {length} = call i64 @strlen(ptr {text})\n"));
+                Ok(vec![LValue::Reg(text), LValue::Reg(length)])
             }
             // `int_of(b: byte) -> int` widens, always defined: every
             // `byte` is 0..255, so zero-extension is exact -- the direct

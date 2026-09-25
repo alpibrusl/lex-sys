@@ -360,6 +360,62 @@ fn the_two_backends_agree_on_revcomp() {
     }
 }
 
+/// `docs/llvm-backend.md` §7.13: `arg_count`/`arg` closed, `argc`/`argv`
+/// stashed once into module-local storage by `@main` before the entry
+/// function's own body runs (`docs/arguments.md` §3). No arguments are
+/// passed here -- `assert_backends_agree` never does -- so this only
+/// exercises the "one argument, its own name" path; `arg(a, 0)` and the
+/// bounds trap are `arg_count_and_arg_build_and_run_the_arguments_fixture`'s
+/// job in the crate's own suite, and real arguments are what
+/// `the_two_backends_agree_on_fannkuch`, below, passes.
+#[test]
+fn the_two_backends_agree_on_arguments() {
+    assert_backends_agree("backends-arguments", "tests/accept/arguments.ls", "1\nnamed: 1\n");
+}
+
+/// `fannkuch.ls` itself, past `arg_count`/`arg`: the boundary #106 traced
+/// for `revcomp.ls` also applied here, and this is the first program in
+/// this module actually given a real argument, exercising `arg`'s bounds
+/// check and `strlen` read together with `arg_count`'s own count rather
+/// than only the no-argument path `assert_backends_agree` covers.
+/// `binarytrees.ls` -- `arg_count`/`arg`'s other named target -- still
+/// refuses past this: it also needs bare `Expr::Boxed` (§7.12's other
+/// row), not scoped here.
+#[test]
+fn the_two_backends_agree_on_fannkuch() {
+    for backend in ["cranelift", "llvm"] {
+        let dir = scratch(&format!("backends-fannkuch-{backend}"));
+        let exe = dir.join("out");
+        let build = Command::new(BIN)
+            .args([
+                "build".as_ref(),
+                repo_root().join("benches/game/fannkuch.ls").as_os_str(),
+                "--std".as_ref(),
+                "--backend".as_ref(),
+                backend.as_ref(),
+                "-o".as_ref(),
+                exe.as_os_str(),
+            ])
+            .output()
+            .expect("the compiler runs");
+        assert!(
+            build.status.success(),
+            "`--backend {backend}` should build `fannkuch.ls`, but said:\n{}",
+            String::from_utf8_lossy(&build.stderr)
+        );
+
+        let output = Command::new(&exe).arg("8").output().expect("the program runs");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(output.status.code(), Some(0), "`--backend {backend}` should exit 0");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "1616\nPfannkuchen(8) = 22\n",
+            "`--backend {backend}` printed the wrong thing"
+        );
+    }
+}
+
 /// The boundary this slice draws is a located refusal, not a crash or a
 /// silent wrong answer: `region`/`alloc_slice` moved out of this list
 /// once §7.5 landed; `arena_roundtrip.ls` now refuses on bare `alloc[a]`

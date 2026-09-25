@@ -1066,3 +1066,64 @@ with none yet. `Type::Float` is now the only row blocking more than one
 program (`spectral.ls` and `fasta.ls` both); `arg_count` blocks two of
 its own. Closing either finishes a `benches/` program outright, the
 same way §7.9 and §7.11 each did.
+
+### 7.13 `arg_count`/`arg`, closed — and `fannkuch.ls` builds, `binarytrees.ls` does not
+
+`argc`/`argv` as `main` was handed them, stashed once into module-local
+storage (`@lexs_argc`, `@lexs_argv`, both `internal global`) before the
+entry function's own body runs — `lex-sys-codegen`'s own `emit_c_main`
+does the identical thing a globals-table-and-`Linkage::Local` step
+apart (`docs/arguments.md` §3). `arg_count` is a load; `arg` is the
+same bounds check every other indexing operation in this backend
+already makes (`index >= argc` traps, one `icmp uge` covering both a
+negative index and one past the end), then `argv[n]` read back and its
+length computed with libc's own `strlen` — the C interface's NUL is not
+part of the value this backend hands back, matching `docs/
+arguments.md` §3.2.
+
+**Both of §7.12's named targets were tried, and only one of them
+builds.** `fannkuch.ls` builds, runs, and matches Cranelift exactly,
+both with no argument (the fallback path) and with one (`arg_count`
+and `arg` together, checked against a real `8`, not only assumed from
+reading the code). `binarytrees.ls` still refuses — past `arg_count`/
+`arg` it reaches `build`'s own `box[h](Tree::Node { .. })`, bare
+`Expr::Boxed`, §7.12's other still-open row and not touched here. The
+same shape §7.9 found with `revcomp.ls` and §7.6/§7.8 already named for
+this one: a gap can block more than one program and close only some of
+them, and the table has to say which.
+
+`tests/accept/arguments.ls` — a ready-made fixture, never built
+through this backend before — gets a crate-level test (no arguments,
+its own contract) and a CLI differential test (also no arguments, the
+"one argument, its own name" path). `fannkuch.ls` gets its own CLI
+differential test passing a real `8`, the first test in this module to
+give a compiled program an actual argument rather than only piped
+stdin or none at all.
+
+**Measured** (`fannkuch(11)`, two runs): `--backend llvm` is
+**22%–28% faster** than Cranelift, in the same range every other
+kernel in this document has landed in. `objdump` finds 16 SIMD
+instructions in the object — fannkuch's own array rotation is not the
+loop shape `scan`/`sieve` vectorise on, so this is a smaller number
+than those, consistent with §7.11's own reading of `revcomp.ls`'s
+similarly modest count: how much a kernel vectorises depends on its
+own loop shape, not only on whether its traps are observable.
+
+### 7.14 What still blocks the rest of `benches/`, updated again
+
+`arg_count`/`arg` moves out of §7.12's table, closed — but
+`binarytrees.ls` does not move with it, since bare `Expr::Boxed` was
+always the bigger of the two gaps standing between it and this
+backend, `arg_count`/`arg` merely the first one reached:
+
+| Gap | Blocks | Where it already shows up in this document |
+|---|---|---|
+| Bare `Expr::Alloc`/`Expr::Boxed`/`Expr::Unboxed` (single-value allocation, arena or heap) | `tests/accept/arena_roundtrip.ls`, `benches/game/binarytrees.ls` (`build`'s own `box[h](Tree::Node {..})`, found in §7.13) | §7.6, §7.8, §7.13 |
+| `Type::Float` | `benches/game/spectral.ls`, `fasta.ls`'s two `float`-filled `alloc_slice` calls | §7.3 |
+| Matching through a reference (`Stmt::Match`'s `by_reference`) | No `benches/` program reaches it yet | §5's fourth slice; named separately from field/deref access in §7.11 |
+
+Two gaps with a `benches/` program behind them, one with none yet.
+`Type::Float` is still the only row blocking more than one program;
+bare `Expr::Alloc`/`Expr::Boxed`/`Expr::Unboxed` now blocks a real
+`benches/` program for the first time, not only this backend's own
+boundary fixture.
