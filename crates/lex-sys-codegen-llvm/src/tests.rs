@@ -335,3 +335,38 @@ fn main(world: World) -> [] int {
          (docs/llvm-backend.md §3.2)"
     );
 }
+
+/// `docs/slicing.md`, `docs/llvm-backend.md` §7.9: `s[a..b]` traps
+/// rather than yielding a silently wrong answer, on either of its two
+/// bad shapes -- past the slice's own length, or inverted (`start >
+/// end`) -- matching `lex-sys-codegen`'s own `subslice`.
+fn assert_subslicing_traps(range: &str, tag: &str) {
+    let source = format!(
+        "fn main(world: World) -> [] int {{\n\
+             let Split {{ io, ffi, fs, heap, args }} = split(world);\n\
+             release(args); release(heap); release(fs); release(ffi); release(io);\n\
+             let s = \"abc\";\n\
+             let t = s[{range}];\n\
+             return len(t);\n\
+         }}\n"
+    );
+    let object = compiled(&source, "main");
+    let output = run(&object, tag);
+    assert_eq!(output.status.code(), None, "`s[{range}]` should be killed by a signal, not exit");
+    assert_eq!(
+        output.status.signal(),
+        Some(4),
+        "`s[{range}]` should trap with SIGILL, matching Cranelift's own signal for a bad \
+         subslice (docs/llvm-backend.md §3.2)"
+    );
+}
+
+#[test]
+fn subslicing_past_the_end_traps_with_sigill() {
+    assert_subslicing_traps("0..5", "subslice-past");
+}
+
+#[test]
+fn an_inverted_subslice_traps_with_sigill() {
+    assert_subslicing_traps("2..0", "subslice-inverted");
+}

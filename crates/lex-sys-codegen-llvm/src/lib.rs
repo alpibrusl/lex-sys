@@ -38,19 +38,27 @@
 //! since the first slice: a function could not return more than one
 //! leaf. `struct_ty`/`pack_struct` close it in general, not just for a
 //! boxed slice's two leaves, the same shape `checked_arith`'s own
-//! `{i64, i1}` intrinsic reads already are. Every `benches/` program
-//! behind only these gaps now builds on `--backend llvm`.
+//! `{i64, i1}` intrinsic reads already are.
+//!
+//! §7.9 closed `getchar` (the mirror of `putchar`) and, found sitting
+//! in front of `revcomp.ls`, `Expr::Subslice` (`s[a..b]`) -- the same
+//! two bounds checks `element_address` already makes, over a range
+//! rather than one element. `revcomp.ls` itself needs a third,
+//! materially bigger gap past both: `Place::Field`/`Place::Deref`,
+//! named since §5 and not closed here. Every `benches/` program behind
+//! only the gaps closed so far now builds on `--backend llvm`.
 //!
 //! Still refused: matching *through* a reference (only an owned
 //! scrutinee's tag and payload are read directly; `docs/reading-
 //! references.md`'s address-only binding mode has no counterpart here
 //! yet), `Place::Field`/`Place::Deref` (writing through a reference
-//! needs pointer arithmetic into a referent this backend has not built),
-//! bare `Expr::Alloc`/`Expr::Boxed`/`Expr::Unboxed` (a single-value
-//! allocation, arena or heap -- nothing in `benches/` asks for one),
-//! `arg_count`, `Type::Float`, `getchar`/`io_read`, `Ffi`/`extern fn`,
-//! `Net`, and every other `Builtin` beyond `PutChar`/`Split`/`Release`/
-//! `Narrow`/`IntOf`/`ByteOf`/`WrappingAdd`/`WrappingSub`/`WrappingMul`.
+//! needs pointer arithmetic into a referent this backend has not built
+//! -- `revcomp.ls`'s own boundary now), bare `Expr::Alloc`/`Expr::
+//! Boxed`/`Expr::Unboxed` (a single-value allocation, arena or heap --
+//! nothing in `benches/` asks for one), `arg_count`, `Type::Float`,
+//! `Ffi`/`extern fn`, `Net`, and every other `Builtin` beyond
+//! `PutChar`/`GetChar`/`Split`/`Release`/`Narrow`/`IntOf`/`ByteOf`/
+//! `WrappingAdd`/`WrappingSub`/`WrappingMul`.
 //!
 //! This backend is intentionally partial. Everything it does not yet lower
 //! is refused with a [`CodegenError`], never a panic: unlike

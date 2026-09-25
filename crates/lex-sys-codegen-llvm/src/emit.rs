@@ -160,6 +160,11 @@ pub(crate) fn emit_module(
     let mut text = String::new();
     text.push_str(&format!("target triple = \"{triple}\"\n\n"));
     text.push_str("declare i32 @putchar(i32)\n");
+    // `docs/standard-input.md` §3 (§7.9): the mirror. `int getchar(void)`
+    // -- no parameter, and the same `i32` result sign-extended at the
+    // edge, which is what carries `EOF`'s `-1` back as `-1` rather than
+    // as a very large unsigned number were it zero-extended instead.
+    text.push_str("declare i32 @getchar()\n");
     // `region`/`alloc_slice` (§7.5): one `malloc` per arena, one `free` on
     // the way out -- `lex-sys-codegen`'s own `body/memory.rs` `libc_fn`
     // declares these the same way, on first use rather than unconditionally
@@ -1330,6 +1335,9 @@ impl<'a> FuncEmitter<'a> {
                 let kinds = leaves_of(element, self.program)?;
                 Ok(self.load_leaves(&addr, &kinds))
             }
+            Expr::Subslice { base, start, end, element } => {
+                self.subslice(base, start, end, element)
+            }
             Expr::AllocSlice { arena, element, count, fill } => {
                 self.alloc_slice(*arena, element, count, fill)
             }
@@ -1462,6 +1470,61 @@ impl<'a> FuncEmitter<'a> {
         Ok(addr)
     }
 
+    /// `s[a..b]` -- a half-open run (`docs/slicing.md`, §7.9). The same
+    /// two comparisons an index does, against the same length already in
+    /// the slice's second leaf, and then the arithmetic that makes a
+    /// slice: a pointer and a length. Nothing is copied and nothing is
+    /// allocated -- `lex-sys-codegen`'s own `subslice`, `body/memory.rs`.
+    /// `a > b` traps rather than yielding empty (`docs/defined-
+    /// behaviour.md` §2.1): an inverted range is a bug in the program
+    /// that wrote it.
+    fn subslice(
+        &mut self,
+        base: &Expr,
+        start: &Expr,
+        end: &Expr,
+        element: &Type,
+    ) -> Result<Vec<LValue>, String> {
+        let values = self.expr(base)?;
+        if values.len() != 2 {
+            return Err("slicing needs a slice (expected 2 leaves: pointer and length)".to_owned());
+        }
+        let (ptr, len) = (values[0].clone(), values[1].clone());
+        let start = self.scalar(start)?;
+        let end = self.scalar(end)?;
+
+        let past = self.fresh();
+        self.out.push_str(&format!(
+            "  {past} = icmp ugt i64 {}, {}\n",
+            operand(&end),
+            operand(&len)
+        ));
+        self.trap_if(&past)?;
+        let inverted = self.fresh();
+        self.out.push_str(&format!(
+            "  {inverted} = icmp ugt i64 {}, {}\n",
+            operand(&start),
+            operand(&end)
+        ));
+        self.trap_if(&inverted)?;
+
+        let stride = self.stride_of(element)?;
+        let offset = self.fresh();
+        self.out.push_str(&format!("  {offset} = mul i64 {}, {stride}\n", operand(&start)));
+        let addr = self.fresh();
+        self.out.push_str(&format!(
+            "  {addr} = getelementptr i8, ptr {}, i64 {offset}\n",
+            operand(&ptr)
+        ));
+        let length = self.fresh();
+        self.out.push_str(&format!(
+            "  {length} = sub i64 {}, {}\n",
+            operand(&end),
+            operand(&start)
+        ));
+        Ok(vec![LValue::Reg(addr), LValue::Reg(length)])
+    }
+
     fn call(&mut self, callee: &Callee, args: &[Expr]) -> Result<Vec<LValue>, String> {
         let evaluated: Vec<Vec<LValue>> =
             args.iter().map(|a| self.expr(a)).collect::<Result<_, _>>()?;
@@ -1489,6 +1552,19 @@ impl<'a> FuncEmitter<'a> {
                 self.out.push_str(&format!("  {narrowed} = trunc i64 {} to i32\n", operand(&c)));
                 let result = self.fresh();
                 self.out.push_str(&format!("  {result} = call i32 @putchar(i32 {narrowed})\n"));
+                let widened = self.fresh();
+                self.out.push_str(&format!("  {widened} = sext i32 {result} to i64\n"));
+                Ok(vec![LValue::Reg(widened)])
+            }
+            // `docs/standard-input.md` §3: the mirror of `putchar`, no
+            // argument to erase or narrow -- `getchar`'s own `io: &!i Io`
+            // is already zero leaves. Sign-extended, not zero-extended:
+            // `EOF` is `-1`, and zero-extending would hand the program
+            // 4294967295, which is a byte-range check that silently
+            // never fires.
+            Callee::Builtin(Builtin::GetChar) => {
+                let result = self.fresh();
+                self.out.push_str(&format!("  {result} = call i32 @getchar()\n"));
                 let widened = self.fresh();
                 self.out.push_str(&format!("  {widened} = sext i32 {result} to i64\n"));
                 Ok(vec![LValue::Reg(widened)])
