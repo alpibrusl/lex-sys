@@ -259,6 +259,7 @@ const STD: &[(&str, &str)] = &[
     ("<std>/fmt.ls", include_str!("../../../std/fmt.ls")),
     ("<std>/utf8.ls", include_str!("../../../std/utf8.ls")),
     ("<std>/flags.ls", include_str!("../../../std/flags.ls")),
+    ("<std>/crypto.ls", include_str!("../../../std/crypto.ls")),
 ];
 
 /// What a command line asked for.

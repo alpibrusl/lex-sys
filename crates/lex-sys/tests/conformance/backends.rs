@@ -878,3 +878,19 @@ fn the_two_backends_connect_to_a_real_listener() {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+/// `docs/crypto.md`: `std.crypto`'s first slice, SHA-256, checked against
+/// the system `sha256sum` on both backends -- the same reference this
+/// module's own design doc computed its vectors against rather than
+/// trusting either backend's arithmetic to agree with a memorised digest.
+#[test]
+fn the_two_backends_agree_on_sha256() {
+    assert_backends_agree(
+        "backends-sha256",
+        "tests/accept/sha256.ls",
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\n\
+         ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\n\
+         248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1\n\
+         d7a8fbb307d7809469ca9abcb0082e4f8d5651e46d3cdb762d02d0bf37c9e592\n",
+    );
+}
