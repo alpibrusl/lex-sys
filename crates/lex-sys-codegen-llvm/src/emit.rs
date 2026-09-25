@@ -12,6 +12,12 @@
 //! A failure returns `(Option<usize>, String)` -- the function index and a
 //! message -- exactly the shape [`lex_sys_codegen::CodegenError`] wants,
 //! without this crate depending on Cranelift to build it.
+//!
+//! `mem2reg` is not automatic: it runs as part of `clang`'s standard `-O1+`
+//! pipeline, not at the default `-O0` (`docs/llvm-backend.md` §7 measured
+//! the difference and corrected the earlier "mandatory" claim). `lib.rs`'s
+//! `run_clang` always passes `-O2` for exactly this reason -- without it,
+//! every leaf here stays a real stack slot.
 
 use lex_sys_ir::{Arm, BinOp, Builtin, Callee, Expr, Func, Place, Program, Slot, Stmt};
 use lex_sys_types::{DefId, Type};

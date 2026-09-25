@@ -19,6 +19,13 @@
 > Cranelift generated* — 1.17× where the program is mostly inside
 > `malloc`, 2.58× in a tight float loop — which is the same conclusion
 > this document reaches, with a shape instead of a point.
+>
+> **§2's own falsifier is now answered.** `docs/llvm-backend.md` §7
+> measured `mandelbrot.ls` through `--backend llvm` against `mandelbrot.c`:
+> **0.999×**, not 1.786×. The gap was Cranelift, exactly as claimed, and
+> switching backends on this one kernel closed it. Most of `benches/`
+> still can't build on `--backend llvm` (§7.3's own gap list), so this is
+> one point re-measured, not the whole range collapsing — yet.
 
 ---
 
@@ -99,6 +106,21 @@ implementation maturity, not language design."*
 That claim was an assertion when it was written. It now has a number
 attached and a falsifier: if an LLVM backend lands and the gap stays at
 1.6×, the claim was wrong.
+
+**The falsifier is answered: the gap did not stay.** `docs/llvm-backend.md`
+§7 landed a working (if partial) LLVM backend and measured this exact
+kernel, `benches/three/mandelbrot.ls`, against `mandelbrot.c` on the same
+host, same rounds, randomised (not merely interleaved) run order:
+lex-sys through `--backend llvm` is **0.999×** C — indistinguishable —
+against lex-sys through `--backend cranelift`'s **1.786×**, the same
+figure this document's own 1.69× already said, within this host's noise.
+The gap was Cranelift against LLVM, and closing it took switching
+backends, not touching the language. This is one kernel, not the whole
+range `benchmarks-game.md` widened to — most of `benches/`, including
+every program that range is drawn from, does not build on `--backend
+llvm` yet (`docs/llvm-backend.md` §7.3 has the inventory) — but it is the
+same kernel this document's own headline number came from, and on it the
+claim holds exactly.
 
 **Rust beat C on the sieve, which is a warning about this whole
 document.** 0.80× is not a language result; it is two implementations of

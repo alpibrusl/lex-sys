@@ -104,6 +104,30 @@ fn the_two_backends_agree_on_the_enums_fixture() {
     assert_backends_agree("backends-enums", "tests/accept/enums.ls", "001220069901\n");
 }
 
+/// `docs/llvm-backend.md` §7: three of `benches/`' loop-heavy kernels
+/// build on both backends already -- `sum_checked.ls` (tight checked
+/// arithmetic, no memory traffic), `fib_checked.ls` (recursion, so the
+/// cost is calls rather than arithmetic) and `benches/three/mandelbrot.ls`
+/// (Q16.16 fixed-point compute, `docs/against-c-and-rust.md`'s own
+/// kernel). Both communicate correctness through their exit code
+/// (`result - expected`, zero when right) rather than `stdout`, except
+/// `mandelbrot.ls`, which prints a checksum -- `scripts/backend_compare.py`
+/// is where the timing comes from; this is only agreement.
+#[test]
+fn the_two_backends_agree_on_sum_checked() {
+    assert_backends_agree("backends-sum", "benches/sum_checked.ls", "");
+}
+
+#[test]
+fn the_two_backends_agree_on_fib_checked() {
+    assert_backends_agree("backends-fib", "benches/fib_checked.ls", "");
+}
+
+#[test]
+fn the_two_backends_agree_on_mandelbrot() {
+    assert_backends_agree("backends-mandelbrot", "benches/three/mandelbrot.ls", "39690297\n");
+}
+
 /// The boundary this slice draws is a located refusal, not a crash or a
 /// silent wrong answer: `region`/`alloc_slice` need the arena allocation
 /// this backend does not lower yet (`docs/llvm-backend.md` §5).
