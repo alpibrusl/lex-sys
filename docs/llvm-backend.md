@@ -1416,3 +1416,55 @@ smallest-first (`connect`'s `getaddrinfo`-based host resolution is the
 larger of the two remaining pieces, per `docs/connect.md` and
 `crates/lex-sys-codegen/src/body/net.rs`'s own ~150 lines); no forcing
 function names an order beyond that.
+
+### 7.21 `bind`, closed — a real fd, and the first slice with no `phi`-free shortcut
+
+`bind` folds `socket`, `setsockopt(SO_REUSEADDR)` and `bind` into one
+call, building the same `struct sockaddr_in` `lex-sys-codegen`'s own
+`bind` builds by hand and `examples/serve/serve.ls` builds by hand
+again — family bytes (`2, 0`, the same "BSD reads family `0` as
+`AF_INET` too" fact `docs/connect.md` §3 already measured, so no
+platform branch is needed here either), the port big-endian, then
+`INADDR_ANY`. `emit.rs` gained four more unconditional `declare`s
+(`socket`, `setsockopt`, `bind`, `close`); the byte-store loop reuses
+the same `getelementptr i8`/`store i8` idiom `Expr::Bytes` and the
+arena code already established.
+
+**The one genuinely new shape:** `socket`/`bind` can each fail, and a
+failure returns `-1` rather than trapping — only a bound mismatch
+traps, checked first, before any syscall runs, the same order
+`lex-sys-codegen`'s own `bind` checks it in. Every slice before this
+one that needed a value conditional on a runtime test either trapped
+(never returning, so nothing to merge) or was a `Stmt`-level `if`
+writing into an already-`alloca`'d `var`. `bind` is the first
+*expression* needing a value that depends on which of three paths ran
+— `body/net.rs`'s new `store_byte` plus a plain `alloca i64` result
+cell, written in each of the three blocks and loaded once at the
+merge label, following the same "no `phi`, a local is already memory"
+rule `if_stmt`/`while_stmt` established rather than introducing a new
+one.
+
+**Checked against a real accepted connection, not only against a
+description of one.** `crates/lex-sys/tests/conformance/backends.rs`
+gained `the_two_backends_bind_and_accept_a_real_connection`: for each
+backend, build a listener that binds a free loopback port, `listen`s,
+and `accept`s, spawn it, connect a real `TcpStream` from the test
+process, and check the process exits `0`. `--backend llvm` could not
+have passed this before this slice — there was no way to get a real
+fd out of it at all, `Ffi`/`extern fn` and `connect` both still being
+refused — so this is the first Net-capable program this backend has
+ever actually run, not a bad-fd stand-in like §7.20's own fixture.
+`read`/`write` on the accepted connection are left out on purpose:
+covering them needs `extern fn`, and adding it here would test a
+boundary this slice does not touch. The wrong-port trap
+(`docs/listen.md` §6.1) is checked at the crate level instead
+(`binding_the_wrong_port_traps_with_sigill`), by signal rather than
+only by `status.code() == None`, the same discipline every other trap
+test here already follows — Cranelift and this backend agree,
+`SIGILL` both times.
+
+**Still refused: `connect` and `Ffi`/`extern fn`.** `connect` needs
+`getaddrinfo`-based host resolution, genuinely larger than anything
+`bind` needed; `Ffi`/`extern fn` remains the boundary named since
+§7.19. Both are what stand between this backend and a program that
+reads or writes what it accepts, not only accepts it.

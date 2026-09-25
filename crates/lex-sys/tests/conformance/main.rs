@@ -63,6 +63,17 @@ fn repo_root() -> PathBuf {
         .expect("the workspace root is two levels above this crate")
 }
 
+/// A loopback port the operating system says is free right now -- shared
+/// by `net.rs` and `backends.rs`, both of which bind a real socket to a
+/// port CI cannot be trusted to leave idle at a hard-coded number.
+fn free_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("a free loopback port")
+        .local_addr()
+        .expect("a bound address")
+        .port()
+}
+
 fn scratch(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("lex-sys-conformance-{tag}"));
     let _ = std::fs::remove_dir_all(&dir);

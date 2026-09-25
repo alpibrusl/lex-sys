@@ -11,6 +11,7 @@ mod arith;
 mod control;
 mod expr;
 mod memory;
+mod net;
 
 pub(crate) struct FuncEmitter<'a> {
     pub(crate) program: &'a Program,

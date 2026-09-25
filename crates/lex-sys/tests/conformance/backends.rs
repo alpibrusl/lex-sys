@@ -628,3 +628,99 @@ fn the_two_backends_agree_on_listen_and_accept_on_a_bad_fd() {
         "",
     );
 }
+
+/// `docs/llvm-backend.md` §7.21: `bind`, closed -- the second of `Net`'s
+/// four builtins, after `listen`/`accept` (§7.20). Unlike the bad-fd
+/// fixture above, this reaches a *real* fd through `bind` itself, the
+/// milestone this slice actually delivers: `--backend llvm` had no way to
+/// obtain one before `bind` lowered (`Ffi`/`extern fn` and `connect` are
+/// both still refused). `assert_backends_agree` cannot be reused here --
+/// it runs a build to completion, and `accept` blocks until a peer
+/// connects -- so each backend is built and spawned directly, with a real
+/// `TcpStream` from this process supplying the connection, the same shape
+/// `crates/lex-sys/tests/conformance/net.rs`'s own
+/// `a_lex_sys_listener_accepts_a_real_connection` uses for Cranelift
+/// alone. `read`/`write` on the accepted connection are left out --
+/// that needs `extern fn`, still outside this backend -- so this checks
+/// only that both backends bind the port and accept the connection.
+#[test]
+fn the_two_backends_bind_and_accept_a_real_connection() {
+    use std::io::Write as _;
+    use std::net::TcpStream;
+    use std::time::{Duration, Instant};
+
+    for backend in ["cranelift", "llvm"] {
+        let port = free_port();
+        let dir = scratch(&format!("backends-bind-accept-{backend}"));
+        let source = dir.join("listener.ls");
+        std::fs::write(
+            &source,
+            format!(
+                "edition 2;\n\
+                 fn main(world: World) -> [] int {{\n\
+                     let Split {{ io, ffi, fs, heap, args, net }} = split(world);\n\
+                     release(io); release(fs); release(heap); release(args); release(ffi);\n\
+                     let bound = narrow(net, \"{port}\");\n\
+                     var status = 1;\n\
+                     borrow bound as &n in {{\n\
+                         let listener = bind(n, {port});\n\
+                         if listener >= 0 {{\n\
+                             listen(listener, 1);\n\
+                             let conn = accept(listener);\n\
+                             if conn >= 0 {{\n\
+                                 status = 0;\n\
+                             }}\n\
+                         }}\n\
+                     }}\n\
+                     release(bound);\n\
+                     return status;\n\
+                 }}\n",
+            ),
+        )
+        .expect("a writable fixture");
+
+        let exe = dir.join("listener");
+        let build = Command::new(BIN)
+            .args([
+                "build".as_ref(),
+                source.as_os_str(),
+                "--std".as_ref(),
+                "--backend".as_ref(),
+                backend.as_ref(),
+                "-o".as_ref(),
+                exe.as_os_str(),
+            ])
+            .output()
+            .expect("the compiler runs");
+        assert!(
+            build.status.success(),
+            "`--backend {backend}` should build the listener, but said:\n{}",
+            String::from_utf8_lossy(&build.stderr)
+        );
+
+        let mut child = Command::new(&exe).spawn().expect("the listener runs");
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut stream = loop {
+            match TcpStream::connect(("127.0.0.1", port)) {
+                Ok(stream) => break stream,
+                Err(_) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(e) => {
+                    panic!("`--backend {backend}` could not connect within the deadline: {e}")
+                }
+            }
+        };
+        stream.write_all(b"ping").expect("the write succeeds");
+        drop(stream);
+
+        let run = child.wait().expect("the listener exits");
+        assert_eq!(
+            run.code(),
+            Some(0),
+            "`--backend {backend}` should accept the connection and report success"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
