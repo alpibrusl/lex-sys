@@ -157,6 +157,17 @@ fn leaves_into(ty: &Type, program: &Program, out: &mut Vec<LKind>) -> Result<(),
                 leaves_into(part, program, out)?;
             }
         }
+        // `docs/file-handles.md`: a handle at run time is a descriptor
+        // and nothing else -- one leaf, where the six capabilities are
+        // zero. Matches `lex-sys-codegen`'s own `abi::leaves_into`
+        // exactly; `File` is a prelude type, not an ordinary struct
+        // `program.type_info` would scalarise correctly on its own --
+        // `Opened`/`Read` are ordinary prelude *enums* instead, and
+        // fall through to the general `TypeInfo::Enum` arm below
+        // unaided, the same way they do for Cranelift.
+        Type::Named(def, _) if def.0 as usize == lex_sys_ir::PRELUDE_FILE => {
+            out.push(LKind::I64);
+        }
         // `docs/heap.md` §3: a box at run time is a pointer and nothing
         // else -- no header, no refcount, no tag -- except a box of an
         // *unsized* referent, which carries the length too, because
@@ -265,6 +276,40 @@ pub(crate) fn emit_module(
     text.push_str("declare i32 @getaddrinfo(ptr, ptr, ptr, ptr)\n");
     text.push_str("declare void @freeaddrinfo(ptr)\n");
     text.push_str("declare i32 @connect(i32, ptr, i32)\n\n");
+
+    // `Fs` (§7.24, `docs/filesystem.md` §3-4, `docs/file-handles.md`):
+    // `fs_read`/`fs_write` (`creat`/`open` then `read`/`write` then
+    // `close`), `open_read` (`open`, descriptor kept), `file_read`
+    // (`read`) and `file_close` (`close`, already declared above for
+    // `bind`'s own use). `errno`'s accessor is a *function* in every
+    // modern libc -- `__errno_location` on glibc, `__error` on Darwin --
+    // both answering a pointer to a thread-local `int`, the same split
+    // `lex-sys-codegen`'s own `errno` already makes.
+    //
+    // `read`/`write` are guarded, unlike every other declare here: they
+    // are also the two libc symbols a foreign-call program is likeliest
+    // to declare for itself (`tests/accept/bytes_to_c.ls`'s own `extern
+    // fn write`, found breaking exactly that fixture this slice's own
+    // session) -- lex-sys's own `int` crosses `extern fn` at `i64`
+    // (`docs/reach.md` §3), never libc's true 32-bit `fd`, so the two
+    // declarations disagree whenever both exist. A program naming
+    // either symbol itself is trusted to have declared the signature it
+    // actually needs; this backend does not also insist on its own.
+    text.push_str("declare i32 @creat(ptr, i32)\n");
+    text.push_str("declare i32 @open(ptr, i32)\n");
+    let extern_symbols: std::collections::BTreeSet<&str> =
+        program.externs.iter().map(|e| e.symbol.as_str()).collect();
+    if !extern_symbols.contains("read") {
+        text.push_str("declare i64 @read(i32, ptr, i64)\n");
+    }
+    if !extern_symbols.contains("write") {
+        text.push_str("declare i64 @write(i32, ptr, i64)\n");
+    }
+    let errno_symbol = match triple.operating_system {
+        target_lexicon::OperatingSystem::Darwin(_) => "__error",
+        _ => "__errno_location",
+    };
+    text.push_str(&format!("declare ptr @{errno_symbol}()\n\n"));
 
     // `extern fn` (§7.23, §8.4): an import under the symbol the
     // declaration named. A capability parameter carries no data and

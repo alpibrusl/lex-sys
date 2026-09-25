@@ -1612,3 +1612,82 @@ own `examples/seek/` is closer to portable across both backends than it
 was, but `Fs` is what actually stands between it and `--backend llvm`
 today — not `Ffi`, which this document spent three slices calling the
 last gap before checking.
+
+### 7.24 `Fs`, closed — and a comparison bug three slices had never reached
+
+`checked_path` (mirroring `lex-sys-codegen`'s own function of the same
+name) is `checked_host`'s loop with two things added: a `/`-boundary
+check on the way out (`/tmp` does not contain `/tmpevil`) and a `..`-
+traversal refusal inside the loop, both built the same "no `phi`,
+`trap_if` on the escape" shape `connect`'s own loop already established
+— not a new mechanism, one loop body slightly larger than the last.
+`file_op` (`fs_read`/`fs_write`) and `open_file` (`open_read`) both
+reuse it; `read_file` (`file_read`) loads the handle's one leaf and
+calls `read`. `errno` — a *function* in every modern libc, because it
+has to be per-thread — is one more platform-symbol split
+(`__errno_location` on glibc, `__error` on Darwin), the same shape
+`stdout`/`stderr`'s own split already is. `emit.rs` gained a new
+`Type::Named(def, _) if def.0 as usize == PRELUDE_FILE` arm: a file
+handle is one `i64` leaf and nothing else, the same special case `Box`
+already has, needed because `File` is an opaque prelude type
+`program.type_info` has no entry for — `Opened`/`Read` need no such
+arm, being ordinary prelude *enums* the general `TypeInfo::Enum` case
+already scalarises correctly.
+
+**Checked against `tests/accept/file_handle.ls`, the boundary fixture
+itself.** Unmodified, it now builds and runs on `--backend llvm`,
+matching its own `//~ STDOUT` directives exactly: `fs_write` writes a
+file, `open_read` opens it, `file_read` reads it twice — once for the
+twelve bytes, once past the end, proving `Read::End` answers `End`
+*again* rather than repeating the last byte count — and `file_close`
+ends it. `backends.rs`'s new `the_two_backends_agree_on_file_handle`
+checks both backends against it.
+
+**One collision found immediately, and fixed rather than added to the
+known-exposure list.** `read`/`write`, declared unconditionally for
+`Fs`'s own use, broke `tests/accept/bytes_to_c.ls` — the very fixture
+§7.23 had just proven — because that program declares its own `extern
+fn write`, crossing every `int` at `i64`, where `Fs`'s own `write` call
+needs libc's true 32-bit `fd`. Unlike `socket`/`bind`/`connect`'s own
+already-documented exposure (§7.23, `docs/ROADMAP.md` #92), this one
+regressed a program that had been *working* a slice ago, not one that
+had never worked — so `read`/`write` are now declared only when
+`program.externs` does not already claim the symbol, letting a
+program's own declaration stand in for this backend's internal one.
+`open`/`creat` are not guarded: no example declares either for itself,
+so there is nothing yet to collide with, and guarding everything
+unconditionally would be the cross-cutting fix `docs/ROADMAP.md` #92
+already declined to make, not this slice's to make unasked.
+
+**The second finding is not about `Fs` at all.** Building
+`examples/cut/` and `examples/seek/` against this slice — both reach
+`Fs` only incidentally, through `std.flags`'s own argument parsing —
+found `clang` refusing the emitted module with an ill-typed comparison:
+`%t20` (an `i8`) compared as `i64`. `compare` had always hardcoded
+`icmp {cc} i64` regardless of what its operands actually are, silently
+correct for `int` — already `i64` — and silently wrong for `byte`/
+`bool` (`i8`), and nothing had caught it in eighteen prior slices
+because nothing this document tracks compares a raw `byte`:
+`std.bytes.compare` converts through `int_of` first, `sieve`/`scan`/
+`fannkuch` compare `int`s throughout, and `match`'s own tag comparisons
+are already `i64`. `std.bytes.find`'s `text[at + i] != needle[i]` —
+called by `std.flags.named`, called by both `cut.ls` and `seek.ls` — is
+the first comparison this document's own suite reaches that is not.
+Fixed by threading `binop`'s already-computed `lhs_kind` through to
+`compare`, the same value `float_binop` was already being dispatched on
+one line above it. `tests/accept/bytes_to_c.ls` did not trip this only
+because a `&r [byte]` crossing to C never compares its bytes to
+anything; `examples/cut/`/`examples/seek/` compare them constantly.
+Checked directly: `byte_comparison_uses_the_right_width`
+(`crates/lex-sys-codegen-llvm/src/tests.rs`), `!=` and `==` on two
+runtime `byte`s an `int` literal cannot fold away.
+
+**The "outside this backend" boundary fixture moves a seventh time**,
+from `tests/accept/bytes_to_c.ls` (now inside, since §7.23) to
+`tests/accept/static_data.ls`, refusing on `Expr::Static` — found the
+same way `Fs` was, by checking whether this backend's own `Expr` match
+was actually exhaustive rather than assuming it, once every named gap
+this document had tracked was closed. `docs/compile-time-data.md`'s
+whole feature — a `static` block evaluated at compile time, its result
+read as ordinary data — has no `--backend llvm` support yet, and no
+slice before this one had tried a program that used one.

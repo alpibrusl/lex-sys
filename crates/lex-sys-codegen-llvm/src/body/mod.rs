@@ -10,6 +10,7 @@ use crate::*;
 mod arith;
 mod control;
 mod expr;
+mod fs;
 mod memory;
 mod net;
 

@@ -162,22 +162,52 @@
 //! (a `&r [byte]`-crossing `write`, unmodified for this slice) and a
 //! fresh `labs(-5) == 5` check on both backends.
 //!
-//! Still refused: `Fs` (`fs_read`/`fs_write`/`open_read`/`file_read`),
-//! the boundary fixture having moved to `tests/accept/file_handle.ls`;
-//! a user-declared `extern fn` that names a symbol this backend already
-//! declares unconditionally for `Net` (`socket`/`bind`/`connect`/
-//! `listen`/`accept`/`setsockopt`/`close`) at a different width, which
-//! `clang` correctly refuses to link rather than silently miscompiling
-//! -- not a new bug, the same exposure `docs/ROADMAP.md`'s #92 entry
-//! already recorded on Cranelift for `close`, now visible here too, and
-//! left unfixed for the same reason: none of `examples/serve/`/
-//! `fetch/`/`report/`/`collect/` needs a socket call this backend does
-//! not already have one for. And every other `Builtin` beyond
-//! `PutChar`/`GetChar`/`ArgCount`/`Arg`/`Split`/`Release`/`Narrow`/
-//! `IntOf`/`ByteOf`/`WrappingAdd`/`WrappingSub`/`WrappingMul`/`Write`/
-//! `WriteErr`/`FloatOf`/`Truncate`/`BitsOf`/`IsNan`/`Sqrt`/`Listen`/
-//! `Accept`/`Connect`/`Bind` -- none with a `benches/` program or
-//! `tests/accept/` fixture asking for it yet.
+//! §7.24 closed `Fs`: `checked_path` is `checked_host`'s loop plus a
+//! `..`-traversal refusal and a `/`-boundary check, reused by `file_op`
+//! (`fs_read`/`fs_write`) and `open_file` (`open_read`); `read_file`
+//! (`file_read`) and `errno` (a per-thread libc accessor, one more
+//! `__errno_location`/`__error` platform split) round it out.
+//! `leaves_into` gained a `PRELUDE_FILE` arm -- a handle is one `i64`
+//! leaf, the same special case `Box` already has.
+//!
+//! Checking it against real programs found two things. `read`/`write`,
+//! declared unconditionally for `Fs`'s own use, broke `tests/accept/
+//! bytes_to_c.ls` -- a program §7.23 had just proven working, not one
+//! that had never worked, so unlike `socket`/`bind`/`connect`'s already-
+//! documented exposure this one is fixed: both are now declared only
+//! when `program.externs` does not already claim the symbol. And
+//! `compare` had always hardcoded `icmp {cc} i64` regardless of its
+//! operands' real type -- silently correct for `int`, silently
+//! **ill-typed** for `byte`/`bool` -- caught only once `examples/cut/`/
+//! `examples/seek/` (both reaching `Fs` only incidentally, through
+//! `std.flags`) exercised `std.bytes.find`'s raw `byte` comparison,
+//! which nothing in eighteen prior slices had. Fixed by threading
+//! `binop`'s already-computed `lhs_kind` through to `compare`.
+//!
+//! The boundary fixture moves a seventh time, from `tests/accept/
+//! bytes_to_c.ls` (inside since §7.23) to `tests/accept/
+//! static_data.ls`, refusing on `Expr::Static` -- `docs/compile-time-
+//! data.md`'s whole feature, found unbuilt the same way `Fs` was, by
+//! checking rather than assuming this backend's `Expr` match was
+//! exhaustive.
+//!
+//! Still refused: `Expr::Static`; a user-declared `extern fn` that
+//! names a symbol this backend still declares unconditionally for `Net`
+//! (`socket`/`bind`/`connect`/`listen`/`accept`/`setsockopt`/`close`) at
+//! a different width, which `clang` correctly refuses to link rather
+//! than silently miscompiling -- not a new bug, the same exposure
+//! `docs/ROADMAP.md`'s #92 entry already recorded on Cranelift for
+//! `close`, left unfixed here for the same reason: none of
+//! `examples/serve/`/`fetch/`/`report/`/`collect/` needs a socket call
+//! this backend does not already have one for. And every other
+//! `Builtin` beyond `PutChar`/`GetChar`/`ArgCount`/`Arg`/`Split`/
+//! `Release`/`Narrow`/`IntOf`/`ByteOf`/`WrappingAdd`/`WrappingSub`/
+//! `WrappingMul`/`Write`/`WriteErr`/`FloatOf`/`Truncate`/`BitsOf`/
+//! `IsNan`/`Sqrt`/`Listen`/`Accept`/`Connect`/`Bind`/`ReadFile`/`Close`
+//! (`FsRead`/`FsWrite`/`OpenRead` are lowered as their own `Expr::
+//! FileOp`/`Expr::OpenFile` nodes, the same way `Connect`/`Bind` are,
+//! never reaching `Callee::Builtin` at all) -- none with a `benches/`
+//! program or `tests/accept/` fixture asking for it yet.
 //!
 //! This backend is intentionally partial. Everything it does not yet lower
 //! is refused with a [`CodegenError`], never a panic: unlike
