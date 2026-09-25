@@ -13,7 +13,7 @@
 //! message -- exactly the shape [`lex_sys_codegen::CodegenError`] wants,
 //! without this crate depending on Cranelift to build it.
 
-use lex_sys_ir::{Builtin, Callee, Expr, Func, Place, Program, Slot, Stmt};
+use lex_sys_ir::{BinOp, Builtin, Callee, Expr, Func, Place, Program, Slot, Stmt};
 use lex_sys_types::Type;
 use target_lexicon::Triple;
 
@@ -114,10 +114,17 @@ pub(crate) fn emit_module(
 ) -> Result<String, (Option<usize>, String)> {
     let mut text = String::new();
     text.push_str(&format!("target triple = \"{triple}\"\n\n"));
-    text.push_str("declare i32 @putchar(i32)\n\n");
+    text.push_str("declare i32 @putchar(i32)\n");
+    // Checked arithmetic (§5's second slice): the three overflow-reporting
+    // intrinsics `Expr::Bin`'s `Add`/`Sub`/`Mul` arms call. Declared
+    // unconditionally, the same way `putchar` is -- an unused `declare`
+    // costs nothing, and every function in the module shares one `.ll`.
+    text.push_str("declare {i64, i1} @llvm.sadd.with.overflow.i64(i64, i64)\n");
+    text.push_str("declare {i64, i1} @llvm.ssub.with.overflow.i64(i64, i64)\n");
+    text.push_str("declare {i64, i1} @llvm.smul.with.overflow.i64(i64, i64)\n\n");
 
     for (index, func) in program.funcs.iter().enumerate() {
-        let body = FuncEmitter::new(program, func)
+        let body = FuncEmitter::new(program, func, triple)
             .and_then(|mut fe| fe.emit())
             .map_err(|message| (Some(index), message))?;
         text.push_str(&body);
@@ -156,21 +163,210 @@ struct FuncEmitter<'a> {
     func: &'a Func,
     /// Per slot, the LLVM type of each of its leaves.
     slot_kinds: Vec<Vec<LKind>>,
+    triple: &'a Triple,
     out: String,
     temp: u32,
+    /// Numbers each `trap`/`ok` block pair a checked operator opens
+    /// (§5's second slice) -- distinct from `temp`, which numbers SSA
+    /// registers, because a block label and a register share no namespace
+    /// in LLVM IR but reusing one counter for both would still be correct;
+    /// two counters just read clearer in the emitted text.
+    blocks: u32,
 }
 
 impl<'a> FuncEmitter<'a> {
-    fn new(program: &'a Program, func: &'a Func) -> Result<Self, String> {
+    fn new(program: &'a Program, func: &'a Func, triple: &'a Triple) -> Result<Self, String> {
         let slot_kinds =
             func.slots.iter().map(|ty| leaves_of(ty, program)).collect::<Result<Vec<_>, _>>()?;
-        Ok(FuncEmitter { program, func, slot_kinds, out: String::new(), temp: 0 })
+        Ok(FuncEmitter {
+            program,
+            func,
+            slot_kinds,
+            triple,
+            out: String::new(),
+            temp: 0,
+            blocks: 0,
+        })
     }
 
     fn fresh(&mut self) -> String {
         let name = format!("%t{}", self.temp);
         self.temp += 1;
         name
+    }
+
+    /// The instruction that raises the same signal Cranelift's own trap
+    /// does on this target (`docs/llvm-backend.md` §3.2, §3.3): `ud2` on
+    /// x86-64, measured in this slice's own session to assemble to
+    /// Cranelift's exact two bytes and exit `SIGILL` every time; `udf
+    /// #0xc11f` on aarch64, measured in the design doc's session the same
+    /// way. Trap **codegen** is not generic between targets -- only the
+    /// checker's decision to trap is (§3.2) -- so a target this match does
+    /// not name is refused rather than guessed at.
+    fn trap_asm(&self) -> Result<&'static str, String> {
+        match self.triple.architecture {
+            target_lexicon::Architecture::X86_64 => Ok("ud2"),
+            target_lexicon::Architecture::Aarch64(_) => Ok("udf #0xc11f"),
+            other => Err(format!(
+                "the LLVM backend's checked arithmetic has no measured trap instruction for \
+                 `{other}` -- only x86-64 and aarch64 are measured (docs/llvm-backend.md §3.2, §3.3)"
+            )),
+        }
+    }
+
+    /// Open a `trapN`/`okN` pair: the caller emits its overflow condition,
+    /// branches here, fills `trapN` with the target's trap instruction
+    /// (always `unreachable` afterwards -- a trap never returns), and
+    /// keeps emitting into `okN`, which this function leaves open.
+    fn trap_if(&mut self, condition: &str) -> Result<(), String> {
+        let n = self.blocks;
+        self.blocks += 1;
+        let (trap, ok) = (format!("trap{n}"), format!("ok{n}"));
+        self.out.push_str(&format!("  br i1 {condition}, label %{trap}, label %{ok}\n"));
+        self.out.push_str(&format!("{trap}:\n"));
+        self.out
+            .push_str(&format!("  call void asm sideeffect \"{}\", \"\"()\n", self.trap_asm()?));
+        self.out.push_str("  unreachable\n");
+        self.out.push_str(&format!("{ok}:\n"));
+        Ok(())
+    }
+
+    /// An expression whose value is exactly one leaf -- every `int`/`bool`
+    /// operand a `BinOp` takes.
+    fn scalar(&mut self, expr: &Expr) -> Result<LValue, String> {
+        let mut values = self.expr(expr)?;
+        if values.len() != 1 {
+            return Err(format!(
+                "expected a single-leaf `int`/`bool` value here, got {} leaves",
+                values.len()
+            ));
+        }
+        Ok(values.remove(0))
+    }
+
+    /// `docs/llvm-backend.md` §5's second slice: every `BinOp` except the
+    /// two short-circuit logical operators, which lower as control flow
+    /// (a real merge between two live values) rather than as an
+    /// instruction -- the same reason `Stmt::If`/`Stmt::While` are still
+    /// outside this backend.
+    fn binop(&mut self, op: BinOp, lhs: &Expr, rhs: &Expr) -> Result<Vec<LValue>, String> {
+        if op.is_short_circuit() {
+            return Err(format!(
+                "`{op:?}` short-circuits, which needs the control flow this backend does not \
+                 lower yet (docs/llvm-backend.md §5)"
+            ));
+        }
+        let a = self.scalar(lhs)?;
+        let b = self.scalar(rhs)?;
+        match op {
+            BinOp::Add => self.checked_arith("sadd", a, b),
+            BinOp::Sub => self.checked_arith("ssub", a, b),
+            BinOp::Mul => self.checked_arith("smul", a, b),
+            BinOp::Div => self.checked_div(a, b, false),
+            BinOp::Rem => self.checked_div(a, b, true),
+            BinOp::Shl | BinOp::Shr => self.checked_shift(op, a, b),
+            BinOp::BitAnd => Ok(vec![self.plain("and", a, b)]),
+            BinOp::BitOr => Ok(vec![self.plain("or", a, b)]),
+            BinOp::BitXor => Ok(vec![self.plain("xor", a, b)]),
+            BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
+                Ok(vec![self.compare(op, a, b)])
+            }
+            BinOp::And | BinOp::Or => unreachable!("refused above"),
+        }
+    }
+
+    /// `Add`/`Sub`/`Mul`: LLVM's own overflow-reporting intrinsics, the
+    /// direct counterpart of Cranelift's `sadd_overflow`/`ssub_overflow`/
+    /// `smul_overflow` -- checked against a real `clang` in this slice's
+    /// own session (`docs/llvm-backend.md` §5).
+    fn checked_arith(&mut self, op: &str, a: LValue, b: LValue) -> Result<Vec<LValue>, String> {
+        let pair = self.fresh();
+        self.out.push_str(&format!(
+            "  {pair} = call {{i64, i1}} @llvm.{op}.with.overflow.i64(i64 {}, i64 {})\n",
+            operand(&a),
+            operand(&b)
+        ));
+        let value = self.fresh();
+        self.out.push_str(&format!("  {value} = extractvalue {{i64, i1}} {pair}, 0\n"));
+        let overflowed = self.fresh();
+        self.out.push_str(&format!("  {overflowed} = extractvalue {{i64, i1}} {pair}, 1\n"));
+        self.trap_if(&overflowed)?;
+        Ok(vec![LValue::Reg(value)])
+    }
+
+    /// `Div`/`Rem`: LLVM's `sdiv`/`srem` are **undefined**, not trapping,
+    /// on a zero divisor or on `int::MIN / -1` -- unlike Cranelift's,
+    /// which trap on both (`docs/defined-behaviour.md`). So both checks
+    /// this backend needs are explicit, ahead of the instruction, rather
+    /// than inherited from the instruction the way `checked_arith`'s is.
+    fn checked_div(
+        &mut self,
+        a: LValue,
+        b: LValue,
+        remainder: bool,
+    ) -> Result<Vec<LValue>, String> {
+        let (a_op, b_op) = (operand(&a), operand(&b));
+        let zero = self.fresh();
+        self.out.push_str(&format!("  {zero} = icmp eq i64 {b_op}, 0\n"));
+        self.trap_if(&zero)?;
+        let is_min = self.fresh();
+        self.out.push_str(&format!("  {is_min} = icmp eq i64 {a_op}, -9223372036854775808\n"));
+        let is_neg1 = self.fresh();
+        self.out.push_str(&format!("  {is_neg1} = icmp eq i64 {b_op}, -1\n"));
+        let both = self.fresh();
+        self.out.push_str(&format!("  {both} = and i1 {is_min}, {is_neg1}\n"));
+        self.trap_if(&both)?;
+        let result = self.fresh();
+        let instr = if remainder { "srem" } else { "sdiv" };
+        self.out.push_str(&format!("  {result} = {instr} i64 {a_op}, {b_op}\n"));
+        Ok(vec![LValue::Reg(result)])
+    }
+
+    /// `Shl`/`Shr`: an amount outside `0..64` traps (`docs/bitwise.md`
+    /// §3) rather than being masked the way LLVM's `shl`/`ashr` would
+    /// silently do it. `uge` catches a negative amount the same way
+    /// Cranelift's `UnsignedGreaterThanOrEqual` does: reinterpreted as
+    /// unsigned, a negative `i64` is far past 64.
+    fn checked_shift(&mut self, op: BinOp, a: LValue, b: LValue) -> Result<Vec<LValue>, String> {
+        let (a_op, b_op) = (operand(&a), operand(&b));
+        let out_of_range = self.fresh();
+        self.out.push_str(&format!("  {out_of_range} = icmp uge i64 {b_op}, 64\n"));
+        self.trap_if(&out_of_range)?;
+        let result = self.fresh();
+        // `ashr`, not `lshr`: `int` is signed (`docs/bitwise.md` §2), the
+        // same reason Cranelift's `Shr` lowers to `sshr`.
+        let instr = if op == BinOp::Shl { "shl" } else { "ashr" };
+        self.out.push_str(&format!("  {result} = {instr} i64 {a_op}, {b_op}\n"));
+        Ok(vec![LValue::Reg(result)])
+    }
+
+    /// `BitAnd`/`BitOr`/`BitXor`: none of the three can overflow
+    /// (`docs/bitwise.md` §4), so unlike `checked_arith` there is nothing
+    /// to check.
+    fn plain(&mut self, instr: &str, a: LValue, b: LValue) -> LValue {
+        let result = self.fresh();
+        self.out.push_str(&format!("  {result} = {instr} i64 {}, {}\n", operand(&a), operand(&b)));
+        LValue::Reg(result)
+    }
+
+    /// The six comparisons. `icmp` yields `i1`; `zext`ed to `i8` because
+    /// that is this backend's `bool` leaf, the same widening Cranelift's
+    /// `icmp` needs none of (its `i8` result already is one).
+    fn compare(&mut self, op: BinOp, a: LValue, b: LValue) -> LValue {
+        let cc = match op {
+            BinOp::Eq => "eq",
+            BinOp::Ne => "ne",
+            BinOp::Lt => "slt",
+            BinOp::Le => "sle",
+            BinOp::Gt => "sgt",
+            BinOp::Ge => "sge",
+            other => unreachable!("`{other:?}` is not a comparison"),
+        };
+        let cmp = self.fresh();
+        self.out.push_str(&format!("  {cmp} = icmp {cc} i64 {}, {}\n", operand(&a), operand(&b)));
+        let widened = self.fresh();
+        self.out.push_str(&format!("  {widened} = zext i1 {cmp} to i8\n"));
+        LValue::Reg(widened)
     }
 
     fn slot_reg(slot: u32, leaf: u32) -> String {
@@ -424,6 +620,7 @@ impl<'a> FuncEmitter<'a> {
                 Ok(values[start..start + len].to_vec())
             }
             Expr::Call { callee, args } => self.call(callee, args),
+            Expr::Bin { op, lhs, rhs } => self.binop(*op, lhs, rhs),
             other => Err(format!(
                 "`{other:?}` is not part of the LLVM backend's first slice (docs/llvm-backend.md §5)"
             )),
