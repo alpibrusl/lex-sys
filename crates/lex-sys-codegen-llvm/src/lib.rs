@@ -18,13 +18,23 @@
 //! fields' leaves concatenated, an enum's are a tag followed by *every*
 //! variant's payload (`tests/accept/enums.ls`).
 //!
+//! `docs/llvm-backend.md` §7.3's own gap inventory, first-named row
+//! closed: `wrapping_add`/`wrapping_sub`/`wrapping_mul` are LLVM's own
+//! `add`/`sub`/`mul`, already two's-complement wraparound with no
+//! `nsw`/`nuw` requested, so unlike `binop`'s checked forms these need no
+//! overflow check at all. Every checked-vs-wrapping pair in `benches/`
+//! that does not also need `region`/`box_slice` now builds on
+//! `--backend llvm`.
+//!
 //! Still refused: matching *through* a reference (only an owned
 //! scrutinee's tag and payload are read directly; `docs/reading-
 //! references.md`'s address-only binding mode has no counterpart here
 //! yet), `Place::Field`/`Place::Deref` (writing through a reference
 //! needs pointer arithmetic into a referent this backend has not built),
-//! `Stmt::Region` (arena allocation), `Ffi`/`extern fn`, `Net`, and every
-//! `Builtin` beyond `PutChar`/`Split`/`Release`/`Narrow`/`IntOf`.
+//! `Stmt::Region` (arena allocation), heap boxing (`box`/`box_slice`),
+//! `arg_count`, `Type::Float`, `Ffi`/`extern fn`, `Net`, and every other
+//! `Builtin` beyond `PutChar`/`Split`/`Release`/`Narrow`/`IntOf`/
+//! `WrappingAdd`/`WrappingSub`/`WrappingMul`.
 //!
 //! This backend is intentionally partial. Everything it does not yet lower
 //! is refused with a [`CodegenError`], never a panic: unlike

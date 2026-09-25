@@ -8,13 +8,17 @@ backend, this compares one *source program* through two backends --
 `--backend cranelift` (the default) against `--backend llvm`
 (`docs/llvm-backend.md` §4).
 
-Only three of `benches/`'s programs build on both backends today: most of
+Five of `benches/`'s programs build on both backends today: the rest of
 the suite still needs `region`/`alloc_slice` (arenas), `box_slice`
-(heap-boxed slices) or `wrapping_add`/`sub`/`mul`, none of which the LLVM
-backend lowers yet (§5's "later slices" list, §7's own gap inventory).
-`sum_checked.ls` and `fib_checked.ls` communicate correctness through
-their exit code (`result - expected`, zero when right); `mandelbrot.ls`
-also prints a checksum, which is compared as well as timed.
+(heap-boxed slices) or `arg_count`/`Type::Float`, none of which the LLVM
+backend lowers yet (§7.4's gap inventory; `wrapping_add`/`sub`/`mul`
+closed in §7.4 itself). `sum_checked.ls`/`sum_wrapping.ls` and
+`fib_checked.ls`/`fib_wrapping.ls` communicate correctness through their
+exit code (`result - expected`, zero when right); `mandelbrot.ls` also
+prints a checksum, which is compared as well as timed. The checked/
+wrapping pairs are also `docs/overflow-cost.md`'s own question --
+`scripts/bench.py` measures it under Cranelift; this is the first
+measurement of it under `--backend llvm`.
 
 Runs are **interleaved** (cranelift, llvm, cranelift, llvm, ...) so that
 thermal drift and scheduler noise land on both halves, and the reported
@@ -45,7 +49,9 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 # (label, source path relative to ROOT, expected stdout or None)
 PROGRAMS = [
     ("sum_checked", "benches/sum_checked.ls", None),
+    ("sum_wrapping", "benches/sum_wrapping.ls", None),
     ("fib_checked", "benches/fib_checked.ls", None),
+    ("fib_wrapping", "benches/fib_wrapping.ls", None),
     ("mandelbrot", "benches/three/mandelbrot.ls", "39690297"),
 ]
 
@@ -143,7 +149,7 @@ def main() -> None:
 
         print()
         print(f"{len(PROGRAMS)} of `benches/`'s programs build on both backends today;")
-        print("the rest need `region`, `box_slice` or `wrapping_*` (docs/llvm-backend.md §7).")
+        print("the rest need `region`, `box_slice`, `arg_count` or `Type::Float` (docs/llvm-backend.md §7.4).")
 
         if args.with_c:
             wanted = (args.cc,) if args.cc else ("clang", "gcc")
