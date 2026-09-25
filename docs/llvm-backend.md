@@ -64,7 +64,11 @@
 > boxing and, underneath it, a second gap nothing had tried to lift
 > since the first slice: a function could not return more than one
 > leaf. `reduce_checked.ls` — `docs/gpu.md`'s own kernel — needed both,
-> and confirms the same vectorisation split a fourth time.
+> and confirms the same vectorisation split a fourth time. §7.9 closed
+> `getchar` and `s[a..b]`, and found `revcomp.ls`'s own boundary sitting
+> one gap further out still: `Place::Field`/`Place::Deref`, named since
+> §5 and, until now, never connected to a program that actually needed
+> it.
 
 ---
 
@@ -677,7 +681,7 @@ inspecting `emit.rs` and guessing:
 | ~~`box_slice`/`Contents`/`unbox_slice`~~ | **Closed, §7.7**: `reduce_*.ls`, every `benches/layout/*.ls` file now build (bare `box`/`unbox`, a single-value box, stay refused — nothing in `benches/` asks for one) | Same bucket as above; not previously named on its own |
 | `arg_count` (and argument reading generally) | `benches/game/binarytrees.ls`, `benches/game/fannkuch.ls` | Same bucket |
 | `Type::Float` and float arithmetic | `benches/game/spectral.ls`, `benches/game/fasta.ls` (two `alloc_slice` fills) | `emit.rs`'s own `LKind` doc comment already says floats are refused; not previously named as a *benchmark*-blocking gap |
-| `getchar`/`io_read` | `benches/game/revcomp.ls` | Found trying to build `revcomp.ls` once §7.5 closed `region`; not previously named |
+| ~~`getchar`/`io_read`~~ | **Closed, §7.9** (`tests/accept/stdin_roundtrip.ls` is the fixture; `revcomp.ls` itself needs `Place::Field`/`Place::Deref` too, found the same slice — its own row above, not closed) | Found trying to build `revcomp.ls` once §7.5 closed `region`; not previously named |
 
 Ordered by what it would unblock, as each closed: **`wrapping_*` first**
 (§7.4) — smallest of the remaining gaps, and it made the overflow-
@@ -688,15 +692,19 @@ found two smaller gaps (`byte_of`, `Expr::Not`) sitting in front of it
 that no inspection of `emit.rs` alone would have named. **Heap boxing
 after that** (§7.7) — the next-biggest pocket, and building
 `reduce_checked.ls` against it found a second, unrelated gap
-underneath: multi-leaf function returns, closed the same session. What
-is left — bare `alloc`, `arg_count`, float, `getchar` — is four smaller
-pockets, each behind its own single gap, none bundled with anything
-else in `benches/` (§7.8 has the current, complete list).
+underneath: multi-leaf function returns, closed the same session.
+**`getchar` next** (§7.9) — smallest by design, and building `revcomp.ls`
+against it found `s[a..b]` in front, closed alongside it, and
+`Place::Field`/`Place::Deref` behind both, not closed. What is left —
+bare `alloc`, `Place::Field`/`Place::Deref`, `arg_count`, float — is
+four gaps, one of them (`Place::Field`/`Place::Deref`) larger than a
+single builtin or bounds check (§7.10 has the current, complete list).
 
 | Bench | |
 |---|---|
 | `scripts/backend_compare.py` | Interleaved cranelift-vs-llvm timing on the kernels that build on both, today eleven; `--with-c` adds a three-way leg for `mandelbrot.ls` against `mandelbrot.c` |
-| `crates/lex-sys/tests/conformance/backends.rs` | `the_two_backends_agree_on_{sum_checked,fib_checked,mandelbrot,sum_wrapping,fib_wrapping,purity,sieve_checked,sieve_wrapping,scan_checked,scan_wrapping,the_three_language_sieve,reduce_checked,reduce_wrapping,layout_aos,layout_soa,layout_ints,layout_rgb}` — not a timing gate, for the reason `every_benchmark_pair_agrees` gives |
+| `crates/lex-sys/tests/conformance/backends.rs` | `the_two_backends_agree_on_{sum_checked,fib_checked,mandelbrot,sum_wrapping,fib_wrapping,purity,sieve_checked,sieve_wrapping,scan_checked,scan_wrapping,the_three_language_sieve,reduce_checked,reduce_wrapping,layout_aos,layout_soa,layout_ints,layout_rgb,stdin_roundtrip}` — not a timing gate, for the reason `every_benchmark_pair_agrees` gives |
+| `crates/lex-sys-codegen-llvm/src/tests.rs` | `{subslicing_past_the_end,an_inverted_subslice}_traps_with_sigill` — the two ways `s[a..b]` can be wrong, checked by signal the same way every other trap here is |
 | `crates/lex-sys-codegen-llvm/src/tests.rs` | `allocating_past_an_arenas_chunk_traps_with_sigill` — the arena-exhaustion trap, checked by signal the same way every other trap here is |
 
 ### 7.4 `wrapping_add`/`sub`/`mul`, closed — and what removing a trap buys an optimiser
@@ -904,3 +912,60 @@ program but this backend's own "outside the boundary" fixture),
 revcomp.ls`). Four gaps, each its own single pocket, none bundled with
 anything else in `benches/` — the same shape §7.6 described, one
 row shorter.
+
+### 7.9 `getchar` and `s[a..b]`, closed — and `revcomp.ls`'s boundary moves past both
+
+`getchar`'s own row: the mirror of `putchar`, sign-extended the same
+way, no argument to erase or narrow since `io: &!i Io` is already zero
+leaves. Trying it against `revcomp.ls` immediately found a second gap
+sitting in front, the same way `sieve`/`scan` found `byte_of`/`Expr::
+Not` in §7.5: `s[a..b]` (`Expr::Subslice`), used by the buffer helpers
+`revcomp.ls` calls through `std.buffer`. Built the same shape
+`element_address` already is — the same two bounds checks
+`lex-sys-codegen`'s own `subslice` makes (past the end, or inverted),
+then a pointer-and-length pair rather than one element. Two new
+crate-level trap tests (`subslicing_past_the_end_traps_with_sigill`,
+`an_inverted_subslice_traps_with_sigill`) join the existing bounds-check
+pair.
+
+Neither gap had a `benches/` fixture of its own to build against, so
+`tests/accept/stdin_roundtrip.ls` — the repository's own first `//~
+STDIN` fixture — is what closes the loop this time: a `getchar`/
+`putchar` echo loop, piped `"hello\nworld\n"` and checked byte-for-byte
+against Cranelift's output, which needed its own comparison in
+`backends.rs` rather than reusing `assert_backends_agree` (nothing
+built here before piped a program's stdin).
+
+**`revcomp.ls` itself still refuses, and the boundary moved a second
+time in the same session — worth stating exactly, not left as "still
+blocked on `getchar`" now that it is not.** Past `getchar` and `s[a..b]`,
+it reaches `std.buffer`'s `Buffer.clear`, which writes a field through a
+reference (`b: &!b Buffer`) — `Place::Field`/`Place::Deref`, already
+named in §5's fourth slice as needing "pointer arithmetic into a
+referent this backend has not built" and never closed since. This is a
+materially bigger gap than either of this slice's two — general
+struct-field writes through any reference, not one more builtin or one
+more bounds check — and is not scoped here. `revcomp.ls` is removed
+from the gap table below on that basis: it is no longer blocked by
+`getchar`, but it is still blocked, by something this document already
+knew about and had not yet connected to this specific program.
+
+### 7.10 What still blocks the rest of `benches/`, updated again
+
+`getchar`/`io_read` moves out of §7.8's table, closed. `revcomp.ls`
+stays off the "now builds" list, moved instead under `Place::Field`/
+`Place::Deref` below, where it belongs now that `getchar` is not what
+stops it:
+
+| Gap | Blocks | Where it already shows up in this document |
+|---|---|---|
+| Bare `Expr::Alloc`/`Expr::Boxed`/`Expr::Unboxed` (single-value allocation, arena or heap) | `tests/accept/arena_roundtrip.ls` — this backend's own boundary fixture, no `benches/` program | §7.6, §7.8 |
+| `Place::Field`/`Place::Deref` (writing through a reference) | `benches/game/revcomp.ls` (`std.buffer`'s `Buffer.clear`) | §5's fourth slice, named and deferred there; not connected to a `benches/` program until §7.9 |
+| `arg_count` | `benches/game/{binarytrees,fannkuch}.ls` | §7.3 |
+| `Type::Float` | `benches/game/spectral.ls`, `fasta.ls`'s two `float`-filled `alloc_slice` calls | §7.3 |
+
+Four gaps, one of them (`Place::Field`/`Place::Deref`) larger than
+anything else left in this table — every other row is a builtin, a
+bounds check, or a single-value allocation shape; this one is general
+pointer arithmetic into an arbitrary referent, the same size of gap
+matching through a reference has been since §5.

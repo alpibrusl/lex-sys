@@ -214,6 +214,60 @@ fn the_two_backends_agree_on_layout_rgb() {
     assert_backends_agree("backends-layout-rgb", "benches/layout/rgb.ls", "192000000\n");
 }
 
+/// `docs/llvm-backend.md` §7.9: `getchar` closed (the mirror of
+/// `putchar`, sign-extended the same way), plus `s[a..b]`
+/// (`Expr::Subslice`) found sitting in front of `revcomp.ls` once it was
+/// tried against it. `tests/accept/stdin_roundtrip.ls` is the first
+/// fixture here needing piped input, so it gets its own comparison
+/// rather than reusing `assert_backends_agree`, which never pipes one.
+#[test]
+fn the_two_backends_agree_on_stdin_roundtrip() {
+    let stdin = "hello\nworld\n";
+    let expected = "hello\nworld\n12 bytes\n";
+    for backend in ["cranelift", "llvm"] {
+        let dir = scratch(&format!("backends-stdin-{backend}"));
+        let exe = dir.join("out");
+        let build = Command::new(BIN)
+            .args([
+                "build".as_ref(),
+                repo_root().join("tests/accept/stdin_roundtrip.ls").as_os_str(),
+                "--std".as_ref(),
+                "--backend".as_ref(),
+                backend.as_ref(),
+                "-o".as_ref(),
+                exe.as_os_str(),
+            ])
+            .output()
+            .expect("the compiler runs");
+        assert!(
+            build.status.success(),
+            "`--backend {backend}` should build `stdin_roundtrip.ls`, but said:\n{}",
+            String::from_utf8_lossy(&build.stderr)
+        );
+
+        let mut child = Command::new(&exe)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("the program runs");
+        child
+            .stdin
+            .take()
+            .expect("a piped stdin")
+            .write_all(stdin.as_bytes())
+            .expect("the program accepts its input");
+        let output = child.wait_with_output().expect("the program finishes");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(output.status.code(), Some(0), "`--backend {backend}` should exit 0");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            expected,
+            "`--backend {backend}` printed the wrong thing"
+        );
+    }
+}
+
 /// The boundary this slice draws is a located refusal, not a crash or a
 /// silent wrong answer: `region`/`alloc_slice` moved out of this list
 /// once §7.5 landed; `arena_roundtrip.ls` now refuses on bare `alloc[a]`
