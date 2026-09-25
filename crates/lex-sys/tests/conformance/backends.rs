@@ -480,19 +480,92 @@ fn the_two_backends_agree_on_binarytrees() {
     }
 }
 
+/// `docs/llvm-backend.md` §7.17: `Type::Float` closed -- literals,
+/// arithmetic, comparison, both conversions, `bits_of`/`is_nan`, and
+/// `sqrt`. `tests/accept/floating_point.ls` is the dedicated fixture,
+/// checked here through the CLI the way the crate's own suite cannot
+/// (it imports `std.io`, which `compile_object`'s bare `lower` has no
+/// `--std` source injection to resolve).
+#[test]
+fn the_two_backends_agree_on_floating_point() {
+    assert_backends_agree(
+        "backends-floating-point",
+        "tests/accept/floating_point.ls",
+        "sum 35\nhalf 5\nneg -27\nexponent 2\nnan-is-nan 1\nnan-equals-itself 0\n\
+         inf-beats-everything 1\ntoward-zero -2\nbits-of-one 4607182418800017408\n\
+         sign-of-minus-zero 1\nminus-zero-equals-zero 1\n",
+    );
+}
+
+/// `spectral.ls` itself: accumulation loops, `float_of`, and `sqrt`
+/// together, `Type::Float`'s first real `benches/` target -- no
+/// arguments needed, unlike `fasta.ls` below.
+#[test]
+fn the_two_backends_agree_on_spectral() {
+    assert_backends_agree("backends-spectral", "benches/game/spectral.ls", "1.274219991\n");
+}
+
+/// `fasta.ls`, `Type::Float`'s other named target: many-digit decimal
+/// literals not exactly representable in binary, and a real runtime
+/// float comparison (`cumulative[idx] < r`) picking which base to
+/// print, not just arithmetic. A small `n` keeps the expected output
+/// short; `benches/game/fasta-1000.txt` is where the Benchmarks Game's
+/// own published reference is checked, manually, against a much larger
+/// run (`docs/llvm-backend.md` §7.17).
+#[test]
+fn the_two_backends_agree_on_fasta() {
+    for backend in ["cranelift", "llvm"] {
+        let dir = scratch(&format!("backends-fasta-{backend}"));
+        let exe = dir.join("out");
+        let build = Command::new(BIN)
+            .args([
+                "build".as_ref(),
+                repo_root().join("benches/game/fasta.ls").as_os_str(),
+                "--std".as_ref(),
+                "--backend".as_ref(),
+                backend.as_ref(),
+                "-o".as_ref(),
+                exe.as_os_str(),
+            ])
+            .output()
+            .expect("the compiler runs");
+        assert!(
+            build.status.success(),
+            "`--backend {backend}` should build `fasta.ls`, but said:\n{}",
+            String::from_utf8_lossy(&build.stderr)
+        );
+
+        let output = Command::new(&exe).arg("10").output().expect("the program runs");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(output.status.code(), Some(0), "`--backend {backend}` should exit 0");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            ">ONE Homo sapiens alu\n\
+             GGCCGGGCGCGGTGGCTCAC\n\
+             >TWO IUB ambiguity codes\n\
+             cttBtatcatatgctaKggNcataaaSatg\n\
+             >THREE Homo sapiens frequency\n\
+             taaatcttgtgcttcgttagaagtctcgactacgtgtagcctagtgtttg\n",
+            "`--backend {backend}` printed the wrong thing"
+        );
+    }
+}
+
 /// The boundary this slice draws is a located refusal, not a crash or a
 /// silent wrong answer: `region`/`alloc_slice` moved out of this list
 /// once §7.5 landed; bare `alloc[a]`/`box`/`unbox` moved out once §7.15
-/// landed. `floating_point.ls` now refuses on `Type::Float` instead,
-/// still not part of this backend.
+/// landed; `Type::Float` moved out once §7.17 landed.
+/// `match_a_reference.ls` now refuses on matching through a reference
+/// instead, still not part of this backend.
 #[test]
 fn a_program_outside_this_backend_is_refused_through_the_cli() {
-    let dir = scratch("backends-llvm-float");
+    let dir = scratch("backends-llvm-match-reference");
     let exe = dir.join("out");
     let build = Command::new(BIN)
         .args([
             "build".as_ref(),
-            repo_root().join("tests/accept/floating_point.ls").as_os_str(),
+            repo_root().join("tests/accept/match_a_reference.ls").as_os_str(),
             "--std".as_ref(),
             "--backend".as_ref(),
             "llvm".as_ref(),
@@ -505,9 +578,12 @@ fn a_program_outside_this_backend_is_refused_through_the_cli() {
 
     assert!(
         !build.status.success(),
-        "`floating_point.ls` is outside this backend and should refuse"
+        "`match_a_reference.ls` is outside this backend and should refuse"
     );
     assert_eq!(build.status.code(), Some(1), "an unsupported program is rule `internal`, exit 1");
     let message = String::from_utf8_lossy(&build.stderr).to_lowercase();
-    assert!(message.contains("float"), "the refusal should name the boundary it hit: {message}");
+    assert!(
+        message.contains("reference"),
+        "the refusal should name the boundary it hit: {message}"
+    );
 }

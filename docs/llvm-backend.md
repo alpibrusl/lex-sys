@@ -1181,3 +1181,125 @@ One gap left with a `benches/` program behind it, one with none yet.
 the rest of the Benchmarks Game suite in `benches/game/` — closing it
 finishes both `spectral.ls` and `fasta.ls` at once, the same way
 `arg_count`/`arg` very nearly did with `fannkuch.ls`/`binarytrees.ls`.
+
+### 7.17 `Type::Float`, closed — and a structural gap the surface reading missed
+
+`float` is one leaf, `LKind::F64`, exactly like `int` — but the
+straightforward reading of that fact ("add an `F64` arm to a few
+matches") turned out to be wrong before any code was written. Cranelift
+knows an operand is a `float` **dynamically**, from the SSA `Value`
+itself (`self.builder.func.dfg.value_type(a) == types::F64`), because
+every Cranelift value is intrinsically typed. This backend's `LValue`
+is not: it is a bare `Const(i64) | Reg(String)`, with nowhere to keep a
+type tag, and `Expr::Bin`'s own IR node carries no type annotation
+either. `binop`/`compare` had no branch point to detect a `float`
+operand and take a different path at all.
+
+The fix is `scalar_kind`, a new structural helper: given an
+expression, it answers what `LKind` its value has **without evaluating
+it** — walking the same shape the type checker already agreed on
+(`Expr::Load` reads a slot's own kind, `Expr::Bin` recurses into `lhs`
+unless the operator is a comparison, `Expr::Call` reads a builtin's
+fixed return kind or a function's declared one, and so on), erring
+rather than guessing on anything it does not recognise. `binop` and
+`Expr::Neg` call it once, ahead of evaluating their operands, to
+choose between the checked-`int` path already built and the new
+unchecked-`float` one.
+
+**Once that existed, the rest was direct**, each piece checked against
+`docs/floating-point.md`'s own contract:
+
+- **Literals** (`Expr::Float(bits)`) are stored as bits already, so
+  `LValue` gets a new `FConst(u64)` variant printed in LLVM's hex float
+  syntax (`0x3FF0000000000000`, not `1.0`) — the constant this backend
+  emits is the bit pattern the parser read, never a decimal round-trip
+  through `f64`'s `Display`.
+- **Arithmetic** (`fadd`/`fsub`/`fmul`/`fdiv`) is never checked — a
+  `float` has no analogue of the traps `checked_arith`/`checked_div`
+  guard against, "the whole of §2.1's argument in code."
+- **Comparison** is the ordered `fcmp` predicates (`oeq`/`olt`/…),
+  false whenever either side is NaN, except `!=`, which is `une`
+  (unordered-or-not-equal) rather than the ordered `one` — the one
+  place `==`'s and `!=`'s IEEE semantics are not simple negations of
+  each other, the same riddle `is_nan`'s own `x != x` is named for.
+- **`float_of`** is `sitofp`, unchecked. **`truncate`** has no direct
+  LLVM counterpart — `fptosi` is *poison* on NaN/±inf/out-of-range,
+  unlike Cranelift's `fcvt_to_sint`, which traps in hardware, and
+  `llvm.fptosi.sat` is the saturating form the design doc already
+  calls the wrong, silently-incorrect answer — so `truncate` is three
+  explicit checks ahead of the instruction (NaN, `x ≥ 2^63`,
+  `x ≤ -2^63`, the second bound chosen to include exactly `-2^63`
+  even though it is representable, matching Cranelift's own reasoning
+  about `cvttsd2si`'s "integer indefinite" collision), the same
+  ahead-of-the-instruction shape `checked_div` already uses.
+- **`bits_of`** is `bitcast` plus a `select` over an `fcmp uno`
+  NaN-test, canonicalising every NaN to `0x7ff8000000000000` — x86-64
+  and aarch64 disagree on the sign bit `0.0 / 0.0` produces, so a bare
+  reinterpretation would be the one target-dependent value in the
+  language.
+- **`sqrt`** is one call to `@llvm.sqrt.f64`, correctly rounded by
+  construction, declared unconditionally in the module header
+  alongside the checked-arithmetic intrinsics.
+- **`Expr::Neg`**, found unhandled entirely while building this (it
+  fell into the catch-all refusal — nothing in the accepted-test suite
+  had exercised non-constant negation before now): `fneg` for `float`,
+  total including on NaN and on zero, where it produces `-0.0`; `0 -
+  x`, checked, for `int`, the one place integer negation overflows.
+  Unrelated to floats themselves, but the same dispatch point
+  `scalar_kind` was built for, so closed alongside rather than left as
+  a fourth thing this document would otherwise have to reopen later.
+
+**Both of `Type::Float`'s named targets build and match Cranelift
+exactly**: `spectral.ls` (accumulation loops, `float_of`, `sqrt`) and
+`fasta.ls` (many-digit decimal literals not exactly representable in
+binary, and a real runtime float comparison —
+`cumulative[idx] < r` — picking a base, not just arithmetic), the
+second checked against the Benchmarks Game's own published output the
+same way `revcomp.ls` was in §7.11.
+`tests/accept/floating_point.ls` — the design doc's own dedicated
+fixture, literals through `bits_of`/`is_nan` and the sign of `-0.0` —
+matches too, byte for byte. It could not become this crate's own
+crate-level test the way every other closed gap's fixture has,
+because it `import`s `std.io` for its printing and the crate-level
+harness's bare `lex_sys_ir::lower` has no `--std` source injection to
+resolve that; a self-contained program threading an unfoldable runtime
+value through `float_of`/`truncate`/`sqrt`/`bits_of`/`is_nan` stands in
+for it there instead, and the CLI differential suite covers the real
+fixture directly.
+
+**Measured**: `spectral(1500)` is **45%–56% faster** on `--backend
+llvm`, `objdump` finding 62 SIMD instructions; `fasta(1000000)` is
+**10%–20% faster**, 46 SIMD instructions — both real vectorisation,
+neither the checked-arithmetic ceiling this document has measured
+against until now, because `float` arithmetic was never checked to
+begin with.
+
+**One more consequence, unrelated to what floats compute**: this
+slice's own diff pushed `emit.rs` past `CONTRIBUTING.md`'s 2,000-line
+file budget. Split by concern, the same shape `lex-sys-codegen`'s own
+`body/` directory already is: `body/mod.rs` (the shared `FuncEmitter`
+scaffolding — `new`, `emit`, `stmts`), `body/arith.rs` (`scalar_kind`,
+`binop` and everything checked/unchecked arithmetic), `body/control.rs`
+(`if`/`while`/`match`/`borrow`), `body/memory.rs` (allocation and
+addressing), `body/expr.rs` (every other `Expr` and every call). A
+pure reorganisation — no line of logic changed, confirmed by rebuilding
+every fixture and `benches/` program this document already tracks
+before and after.
+
+### 7.18 What still blocks the rest of `benches/`
+
+`Type::Float` moves out of §7.16's table, closed. One gap remains, and
+it has had no `benches/` program behind it since §5 first named it:
+
+| Gap | Blocks | Where it already shows up in this document |
+|---|---|---|
+| Matching through a reference (`Stmt::Match`'s `by_reference`) | No `benches/` program reaches it yet | §5's fourth slice; named separately from field/deref access in §7.11 |
+
+Every `benches/` program this document tracks now builds on
+`--backend llvm`. What is left is a feature nothing in `benches/`
+happens to need: a match arm binding a *pointer into the scrutinee*
+rather than a copy of it (`docs/reading-references.md`'s address-only
+binding mode), still its own address arithmetic over an enum's variant
+layout, not yet built. `tests/accept/match_a_reference.ls` is this
+backend's own boundary fixture for it now, the same role
+`arena_roundtrip.ls` and `floating_point.ls` each held in turn.
