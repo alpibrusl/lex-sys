@@ -662,23 +662,80 @@ inspecting `emit.rs` and guessing:
 | Gap | Blocks | Where it already shows up in this document |
 |---|---|---|
 | `region`/`alloc_slice` (arena allocation, `Stmt::Region`) | `sieve_*.ls`, `scan_*.ls`, `benches/three/sieve.ls`, `benches/game/fasta.ls`, `benches/game/revcomp.ls` | §5's "later slices" list, already named |
-| `wrapping_add`/`wrapping_sub`/`wrapping_mul` | every `_wrapping.ls` half of a `benches/` pair, `benches/three/purity.ls` — so **no checked-vs-wrapping overflow-cost pair builds on this backend today**, only the checked half | Implicit in §5's "every `Builtin` beyond `PutChar`/`Split`/`Release`/`Narrow`/`IntOf`"; not previously named on its own |
+| ~~`wrapping_add`/`wrapping_sub`/`wrapping_mul`~~ | **Closed, §7.4**: every `_wrapping.ls` half of a `benches/` pair and `benches/three/purity.ls` now build on `--backend llvm` | Implicit in §5's "every `Builtin` beyond `PutChar`/`Split`/`Release`/`Narrow`/`IntOf`"; not previously named on its own |
 | Heap boxing (`box`, `box_slice`, `Contents`, `unbox`, `unbox_slice` — `Type::Box`/`BoxedSlice`) | `reduce_*.ls`, every `benches/layout/*.ls` file | Same bucket as above; not previously named on its own |
 | `arg_count` (and argument reading generally) | `benches/game/binarytrees.ls`, `benches/game/fannkuch.ls` | Same bucket |
 | `Type::Float` and float arithmetic | `benches/game/spectral.ls` | `emit.rs`'s own `LKind` doc comment already says floats are refused; not previously named as a *benchmark*-blocking gap |
 
-Ordered by what it would unblock: **`wrapping_*` first** — it is the
-smallest of the five (three `BinOp`-adjacent builtins, no new type, no
-new `Place`), and it alone would let `sum`, `fib`'s wrapping halves and
-`benches/three/purity.ls` build, making the overflow-check's own cost
-(`docs/overflow-cost.md`'s question) measurable on this backend for the
-first time. **Arenas second** — `sieve`/`scan`/`fasta`/`revcomp` are four
-of the remaining programs behind one gap, and it is already `docs/
-llvm-backend.md`'s own next-named slice. Heap boxing, `arg_count` and
-float are each smaller pockets behind their own single gap, not bundled
-with anything else in `benches/`.
+Ordered by what it would unblock: **`wrapping_*` first** — it was the
+smallest of the four remaining (three `BinOp`-adjacent builtins, no new
+type, no new `Place`), and closing it (§7.4) let `sum`, `fib`'s wrapping
+halves and `benches/three/purity.ls` build, making the overflow-check's
+own cost (`docs/overflow-cost.md`'s question) measurable on this backend
+for the first time. **Arenas next** — `sieve`/`scan`/`fasta`/`revcomp`
+are four of the remaining programs behind one gap, and it is already
+`docs/llvm-backend.md`'s own next-named slice. Heap boxing, `arg_count`
+and float are each smaller pockets behind their own single gap, not
+bundled with anything else in `benches/`.
 
 | Bench | |
 |---|---|
-| `scripts/backend_compare.py` | Interleaved cranelift-vs-llvm timing on the kernels that build on both, today three; `--with-c` adds a three-way leg for `mandelbrot.ls` against `mandelbrot.c` |
-| `crates/lex-sys/tests/conformance/backends.rs` | `the_two_backends_agree_on_{sum_checked,fib_checked,mandelbrot}` — not a timing gate, for the reason `every_benchmark_pair_agrees` gives |
+| `scripts/backend_compare.py` | Interleaved cranelift-vs-llvm timing on the kernels that build on both, today five; `--with-c` adds a three-way leg for `mandelbrot.ls` against `mandelbrot.c` |
+| `crates/lex-sys/tests/conformance/backends.rs` | `the_two_backends_agree_on_{sum_checked,fib_checked,mandelbrot,sum_wrapping,fib_wrapping,purity}` — not a timing gate, for the reason `every_benchmark_pair_agrees` gives |
+
+### 7.4 `wrapping_add`/`sub`/`mul`, closed — and what removing a trap buys an optimiser
+
+§7.3's smallest-first ordering: `wrapping_add`, `wrapping_sub`,
+`wrapping_mul` lower to LLVM's own `add`/`sub`/`mul`, no `nsw`/`nuw`
+requested — already two's-complement wraparound, the direct counterpart
+of `lex-sys-codegen`'s plain `iadd`/`isub`/`imul` (`crates/lex-sys-
+codegen/src/body/expr.rs`). No overflow check, no new type, no new
+`Place`: three match arms and a four-line helper (`emit.rs`'s `wrapping`,
+built on the `plain` helper `BitAnd`/`BitOr`/`BitXor` already used).
+
+Every checked-vs-wrapping pair in `benches/` that does not also need
+`region`/`box_slice` now builds on `--backend llvm`: `sum_wrapping.ls`,
+`fib_wrapping.ls`, and `benches/three/purity.ls` besides (which needed
+this and nothing else). Three new differential tests
+(`the_two_backends_agree_on_{sum_wrapping,fib_wrapping,purity}`) join
+§7.2's three.
+
+**The interesting number is not the ratio — it's why one measurement
+looked broken until it was checked.** `scripts/backend_compare.py`
+first reported `sum_wrapping.ls` at **−99.1%** against Cranelift
+(0.0012s against 0.1286s), which is not "faster," it is a different
+program running. `objdump` on the object confirms it: `lexs_run`
+compiles to `xor %eax,%eax; ret` — two instructions, no loop at all.
+`sum_wrapping.ls`'s inner loop is `total = total + i; total = total -
+i; i = i + 1`, which is mathematically a no-op on `total` regardless of
+`i`'s value, and — unlike `sum_checked.ls`'s identical shape — **nothing
+in the wrapping version can trap**, so there is no observable effect
+left for the optimiser to have to preserve by actually running the two
+hundred million iterations. LLVM proves this and deletes the loop.
+Cranelift does not perform this optimisation at all (`overflow-cost.md`/
+`check-cost.md` already established why the *checked* twin can't be
+deleted this way — an observable trap is not reassociable, and deleting
+a loop that might trap would delete the trap too); §7.2's disassembly
+check already found LLVM does not *vectorise* a checked loop for the
+same reason. This is the same fact from the other side: remove the
+thing that makes a loop's effects observable, and an optimiser that has
+one can prove the loop is worth nothing and skip it entirely, which no
+amount of instruction selection would have bought on its own.
+
+`fib_wrapping.ls` is the number worth trusting instead — recursion with
+data-dependent branching has no such algebraic identity to collapse, and
+`objdump` confirms real, unrolled code (21 instructions in `lexs_fib`,
+not two). Measured, **−23.3%** against Cranelift, in the same range
+§7.2's other three kernels landed in.
+
+This also answers a question `docs/overflow-cost.md` could only ask
+of Cranelift before: what the checked-vs-wrapping guarantee costs under
+LLVM. `sum_checked.ls` cannot collapse the way `sum_wrapping.ls` did —
+its `+`/`-` can trap, so the loop's iteration count is observable even
+though the arithmetic result is not — and it still runs in **0.10s**
+against Cranelift's **0.22s** (§7.2). The overflow check's cost on this
+backend is not yet its own document's worth of measurement; it is a
+byproduct worth naming here: on this one kernel, the gap between checked
+and wrapping is far larger under LLVM (a real loop vs. no loop at all)
+than under Cranelift (`overflow-cost.md`'s own **+40.5%** on the same
+kernel shape) — because LLVM had a bigger optimisation to lose.

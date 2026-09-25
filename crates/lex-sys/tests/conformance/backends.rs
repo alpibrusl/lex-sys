@@ -128,6 +128,27 @@ fn the_two_backends_agree_on_mandelbrot() {
     assert_backends_agree("backends-mandelbrot", "benches/three/mandelbrot.ls", "39690297\n");
 }
 
+/// `docs/llvm-backend.md` §7.3's first-named gap, closed: `wrapping_add`/
+/// `sub`/`mul` are LLVM's own `add`/`sub`/`mul`, already two's-complement
+/// wraparound with no `nsw`/`nuw` requested, so unlike `binop`'s checked
+/// forms this needs no overflow check at all. Closing it makes every
+/// checked-vs-wrapping pair in `benches/` buildable on `--backend llvm`
+/// for the first time, and unblocks `benches/three/purity.ls` besides.
+#[test]
+fn the_two_backends_agree_on_sum_wrapping() {
+    assert_backends_agree("backends-sum-wrapping", "benches/sum_wrapping.ls", "");
+}
+
+#[test]
+fn the_two_backends_agree_on_fib_wrapping() {
+    assert_backends_agree("backends-fib-wrapping", "benches/fib_wrapping.ls", "");
+}
+
+#[test]
+fn the_two_backends_agree_on_purity() {
+    assert_backends_agree("backends-purity", "benches/three/purity.ls", "-7463529374017724416\n");
+}
+
 /// The boundary this slice draws is a located refusal, not a crash or a
 /// silent wrong answer: `region`/`alloc_slice` need the arena allocation
 /// this backend does not lower yet (`docs/llvm-backend.md` §5).

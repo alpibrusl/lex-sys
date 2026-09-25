@@ -395,6 +395,22 @@ impl<'a> FuncEmitter<'a> {
         LValue::Reg(result)
     }
 
+    /// `wrapping_add`/`sub`/`mul`: two `int` leaves in, `plain` handles the
+    /// rest -- `instr` is `"add"`/`"sub"`/`"mul"`, which doubles as the
+    /// builtin's own name suffix for the error message.
+    fn wrapping(
+        &mut self,
+        instr: &str,
+        evaluated: Vec<Vec<LValue>>,
+    ) -> Result<Vec<LValue>, String> {
+        let mut flat = evaluated.into_iter().flatten();
+        let a =
+            flat.next().ok_or_else(|| format!("`wrapping_{instr}` needs two `int` arguments"))?;
+        let b =
+            flat.next().ok_or_else(|| format!("`wrapping_{instr}` needs two `int` arguments"))?;
+        Ok(vec![self.plain(instr, a, b)])
+    }
+
     /// The six comparisons. `icmp` yields `i1`; `zext`ed to `i8` because
     /// that is this backend's `bool` leaf, the same widening Cranelift's
     /// `icmp` needs none of (its `i8` result already is one).
@@ -1132,6 +1148,14 @@ impl<'a> FuncEmitter<'a> {
         match callee {
             Callee::Builtin(Builtin::Split | Builtin::Narrow) => Ok(Vec::new()),
             Callee::Builtin(Builtin::Release) => Ok(vec![LValue::Const(0)]),
+            // The escape from checked arithmetic (`docs/llvm-backend.md`
+            // §7.3's first named gap): LLVM's own `add`/`sub`/`mul`, with
+            // no `nsw`/`nuw` requested, are already two's-complement
+            // wraparound -- `lex-sys-codegen`'s plain `iadd`/`isub`/`imul`
+            // needs no overflow check either, so neither does this.
+            Callee::Builtin(Builtin::WrappingAdd) => self.wrapping("add", evaluated),
+            Callee::Builtin(Builtin::WrappingSub) => self.wrapping("sub", evaluated),
+            Callee::Builtin(Builtin::WrappingMul) => self.wrapping("mul", evaluated),
             Callee::Builtin(Builtin::PutChar) => {
                 let skip = Builtin::PutChar.erased_args();
                 let c = evaluated
