@@ -18,8 +18,11 @@ content-addressable, designed in from day one rather than retrofitted.
 > inbound `bind`/`listen`/`accept` (edition 2, [`docs/net.md`](docs/net.md)),
 > and `lex-sys authority`, which computes what a program can reach from
 > the same reachability that decides what goes in the binary. Real
-> programs: GNU `base64` and `sort` ported and checked byte-for-byte
-> against the originals, and a REST endpoint answered over a real socket.
+> programs: GNU `base64`, `cut` and `sort` ported and checked byte-for-byte
+> against the originals, a REST endpoint answered over a real socket, and
+> `examples/seek/` — not a port, a search tool shaped for an agent calling
+> it rather than a person typing at a shell
+> ([`docs/agent-tools.md`](docs/agent-tools.md)).
 >
 > **What does not:** it is **not a usable language yet** — no threads, no
 > TLS, and a **1.17×–2.58×** gap to C that is a property of the backend
