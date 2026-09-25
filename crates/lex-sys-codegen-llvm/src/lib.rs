@@ -147,12 +147,34 @@
 //! `std::net::TcpListener` peer.
 //!
 //! `Net` is now fully built on `--backend llvm`: `listen`, `accept`,
-//! `bind` and `connect` all lower. Still refused: `Ffi`/`extern fn`,
-//! named since §7.19 and now the *only* remaining gap -- what a program
-//! needs to read or write what it accepted or connected to, not merely
-//! open the socket. And every other `Builtin` beyond `PutChar`/
-//! `GetChar`/`ArgCount`/`Arg`/`Split`/`Release`/`Narrow`/`IntOf`/
-//! `ByteOf`/`WrappingAdd`/`WrappingSub`/`WrappingMul`/`Write`/
+//! `bind` and `connect` all lower.
+//!
+//! §7.23 closed `Ffi`/`extern fn`, named since §7.19 -- and found this
+//! summary's own "only remaining gap" claim, repeated across §7.20-
+//! §7.22, false: `Fs` had been unbuilt the whole time, unnamed here
+//! because no slice had tried a real `Fs`-using program against this
+//! backend until this one did (`examples/seek/`). Corrected, not
+//! deleted -- `docs/llvm-backend.md` §7.23 has the finding in full.
+//! `scalar_kind` (§7.17) needed a new arm for `Callee::Extern`, the same
+//! shape `Callee::Fn`'s own already has; the call site itself reuses
+//! `Callee::Fn`'s call-and-unpack logic, factored out as `emit_call`
+//! once both needed it. Checked against `tests/accept/bytes_to_c.ls`
+//! (a `&r [byte]`-crossing `write`, unmodified for this slice) and a
+//! fresh `labs(-5) == 5` check on both backends.
+//!
+//! Still refused: `Fs` (`fs_read`/`fs_write`/`open_read`/`file_read`),
+//! the boundary fixture having moved to `tests/accept/file_handle.ls`;
+//! a user-declared `extern fn` that names a symbol this backend already
+//! declares unconditionally for `Net` (`socket`/`bind`/`connect`/
+//! `listen`/`accept`/`setsockopt`/`close`) at a different width, which
+//! `clang` correctly refuses to link rather than silently miscompiling
+//! -- not a new bug, the same exposure `docs/ROADMAP.md`'s #92 entry
+//! already recorded on Cranelift for `close`, now visible here too, and
+//! left unfixed for the same reason: none of `examples/serve/`/
+//! `fetch/`/`report/`/`collect/` needs a socket call this backend does
+//! not already have one for. And every other `Builtin` beyond
+//! `PutChar`/`GetChar`/`ArgCount`/`Arg`/`Split`/`Release`/`Narrow`/
+//! `IntOf`/`ByteOf`/`WrappingAdd`/`WrappingSub`/`WrappingMul`/`Write`/
 //! `WriteErr`/`FloatOf`/`Truncate`/`BitsOf`/`IsNan`/`Sqrt`/`Listen`/
 //! `Accept`/`Connect`/`Bind` -- none with a `benches/` program or
 //! `tests/accept/` fixture asking for it yet.

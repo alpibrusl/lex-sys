@@ -110,12 +110,41 @@ fn the_first_slice_builds_and_runs_the_smoke_fixture() {
 /// `alloc_slice` moved out of this list once §7.5 landed; bare
 /// `alloc[a]`/`box`/`unbox` moved out once §7.15 landed; `Type::Float`
 /// moved out once §7.17 landed; matching through a reference moved out
-/// once §7.19 landed -- every gap `docs/llvm-backend.md` names a
-/// `benches/`/`tests/accept/` target for is closed. A foreign call
-/// (`extern fn`, `docs/llvm-backend.md`'s own "not part of this slice"
-/// message) is still such a gap, with no fixture of its own to name.
+/// once §7.19 landed; a foreign call moved out once §7.23 landed. `Fs`
+/// (`fs_read`/`fs_write`/`open_read`/`file_read`) -- found while
+/// checking this slice's own claim against `examples/seek/`'s `Fs("")`
+/// use, and never named in this file's own module header before now --
+/// is the boundary this moves to.
 #[test]
 fn a_program_outside_this_backend_is_refused_not_panicked() {
+    let source = "\
+fn main(world: World) -> [] int {
+    let Split { io, ffi, fs, heap, args } = split(world);
+    release(args);
+    release(ffi);
+    release(io);
+    release(heap);
+    var result = 0;
+    borrow fs as &f in {
+        fs_write(f, \"/tmp/lex-sys-llvm-boundary.txt\", \"hi\");
+    }
+    release(fs);
+    return result;
+}
+";
+    let ast = parse(source).expect("parses");
+    let program = lex_sys_ir::lower(&ast).expect("type-checks");
+    let error = compile_object(&program, "main").expect_err("`Fs` is not part of this backend yet");
+    assert!(error.message.contains("FileOp"), "{}", error.message);
+}
+
+/// §7.23: a foreign call, closed -- the gap the test above used to name.
+/// `labs(-5)` through `extern fn`/`Ffi("libc")`, checked against the real
+/// answer rather than only against "it built": this is the smallest
+/// `int`-in, `int`-out crossing, and `tests/accept/bytes_to_c.ls`
+/// (checked in `backends.rs`) is the `&r [byte]`-crossing counterpart.
+#[test]
+fn extern_fn_labs_computes_the_real_answer() {
     let source = "\
 extern fn labs[&f](ffi: &f Ffi(\"libc\"), n: int) -> [ffi(\"libc\")] int;
 
@@ -134,11 +163,9 @@ fn main(world: World) -> [] int {
     return result;
 }
 ";
-    let ast = parse(source).expect("parses");
-    let program = lex_sys_ir::lower(&ast).expect("type-checks");
-    let error =
-        compile_object(&program, "main").expect_err("a foreign call is not part of this backend");
-    assert!(error.message.contains("foreign"), "{}", error.message);
+    let object = compiled(source, "main");
+    let output = run(&object, "extern-fn-labs");
+    assert_eq!(output.status.code(), Some(5), "`labs(-5)` should be `5`");
 }
 
 /// §7.17: `Type::Float` closed. `tests/accept/floating_point.ls` itself

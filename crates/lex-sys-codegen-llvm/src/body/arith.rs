@@ -89,6 +89,15 @@ impl<'a> FuncEmitter<'a> {
                         .next()
                         .ok_or_else(|| "a zero-leaf return has no scalar kind".to_owned())
                 }
+                // `extern fn` (§7.23): the declared return type, the same
+                // way `Callee::Fn` reads its target's.
+                Callee::Extern(index) => {
+                    let ext = &self.program.externs[*index as usize];
+                    leaves_of(&ext.ret, self.program)?
+                        .into_iter()
+                        .next()
+                        .ok_or_else(|| "a zero-leaf return has no scalar kind".to_owned())
+                }
                 other => Err(format!("cannot determine the scalar kind of a `{other:?}` call")),
             },
             other => Err(format!("cannot determine the scalar kind of `{other:?}` here")),

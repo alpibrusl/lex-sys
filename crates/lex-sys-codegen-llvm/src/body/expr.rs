@@ -585,55 +585,91 @@ impl<'a> FuncEmitter<'a> {
                     .map(|(kind, value)| format!("{} {}", kind.llvm(), operand(value)))
                     .collect();
                 let ret_kinds = leaves_of(&target.ret, self.program)?;
-                match ret_kinds.as_slice() {
-                    [] => {
-                        self.out.push_str(&format!(
-                            "  call void @lexs_{}({})\n",
-                            target.name,
-                            printed.join(", ")
-                        ));
-                        Ok(Vec::new())
-                    }
-                    [kind] => {
-                        let result = self.fresh();
-                        self.out.push_str(&format!(
-                            "  {result} = call {} @lexs_{}({})\n",
-                            kind.llvm(),
-                            target.name,
-                            printed.join(", ")
-                        ));
-                        Ok(vec![LValue::Reg(result)])
-                    }
-                    // A multi-leaf return comes back as one aggregate
-                    // (`emit`'s own `struct_ty`), unpacked here the same
-                    // way `checked_arith` already reads `{i64, i1}` back
-                    // out of LLVM's overflow intrinsics.
-                    kinds => {
-                        let ty = struct_ty(kinds);
-                        let agg = self.fresh();
-                        self.out.push_str(&format!(
-                            "  {agg} = call {ty} @lexs_{}({})\n",
-                            target.name,
-                            printed.join(", ")
-                        ));
-                        let mut unpacked = Vec::with_capacity(kinds.len());
-                        for i in 0..kinds.len() {
-                            let reg = self.fresh();
-                            self.out.push_str(&format!("  {reg} = extractvalue {ty} {agg}, {i}\n"));
-                            unpacked.push(LValue::Reg(reg));
-                        }
-                        Ok(unpacked)
-                    }
-                }
+                let symbol = format!("lexs_{}", target.name);
+                Ok(self.emit_call(&symbol, &printed, &ret_kinds))
             }
             Callee::Builtin(other) => Err(format!(
                 "`{}` is not part of the LLVM backend's first slice (docs/llvm-backend.md §5)",
                 other.name()
             )),
-            Callee::Extern(_) => {
-                Err("a foreign call is not part of the LLVM backend's first slice \
-                 (docs/llvm-backend.md §5)"
-                    .to_owned())
+            // `extern fn` (§7.23, §8.4): an import under the symbol the
+            // declaration named, `emit.rs`'s own declare loop having
+            // already given it a signature there. A capability
+            // parameter carries no data and never reaches C
+            // (`crosses_to_c`); everything else crosses at lex-sys's
+            // own widths, mirroring `lex-sys-codegen`'s own
+            // `Callee::Extern` arm.
+            Callee::Extern(index) => {
+                let ext = &self.program.externs[*index as usize];
+                let mut param_kinds: Vec<LKind> = Vec::new();
+                for param in ext.params.iter().filter(|t| crosses_to_c(t)) {
+                    param_kinds.extend(leaves_of(param, self.program)?);
+                }
+                let flat: Vec<LValue> = evaluated
+                    .into_iter()
+                    .zip(&ext.params)
+                    .filter(|(_, param)| crosses_to_c(param))
+                    .flat_map(|(values, _)| values)
+                    .collect();
+                if flat.len() != param_kinds.len() {
+                    return Err(format!(
+                        "`{}` takes {} leaves but {} were given",
+                        ext.symbol,
+                        param_kinds.len(),
+                        flat.len()
+                    ));
+                }
+                let printed: Vec<String> = param_kinds
+                    .iter()
+                    .zip(&flat)
+                    .map(|(kind, value)| format!("{} {}", kind.llvm(), operand(value)))
+                    .collect();
+                // `Type::Unit` (no `-> Type` in the declaration) is
+                // `void`; it is otherwise unwritable, the same special
+                // case `emit.rs`'s own declare loop makes.
+                let ret_kinds = if matches!(ext.ret, Type::Unit) {
+                    Vec::new()
+                } else {
+                    leaves_of(&ext.ret, self.program)?
+                };
+                Ok(self.emit_call(&ext.symbol, &printed, &ret_kinds))
+            }
+        }
+    }
+
+    /// One `call` instruction and its result unpacked -- `void` to
+    /// nothing, one leaf to a register, more than one to the same
+    /// `extractvalue` chain `checked_arith` already reads `{i64, i1}`
+    /// out of LLVM's overflow intrinsics with. Shared between
+    /// `Callee::Fn` and `Callee::Extern` above, which differ only in
+    /// where the symbol and signature come from.
+    fn emit_call(&mut self, symbol: &str, printed: &[String], ret_kinds: &[LKind]) -> Vec<LValue> {
+        match ret_kinds {
+            [] => {
+                self.out.push_str(&format!("  call void @{symbol}({})\n", printed.join(", ")));
+                Vec::new()
+            }
+            [kind] => {
+                let result = self.fresh();
+                self.out.push_str(&format!(
+                    "  {result} = call {} @{symbol}({})\n",
+                    kind.llvm(),
+                    printed.join(", ")
+                ));
+                vec![LValue::Reg(result)]
+            }
+            kinds => {
+                let ty = struct_ty(kinds);
+                let agg = self.fresh();
+                self.out
+                    .push_str(&format!("  {agg} = call {ty} @{symbol}({})\n", printed.join(", ")));
+                let mut unpacked = Vec::with_capacity(kinds.len());
+                for (i, _) in kinds.iter().enumerate() {
+                    let reg = self.fresh();
+                    self.out.push_str(&format!("  {reg} = extractvalue {ty} {agg}, {i}\n"));
+                    unpacked.push(LValue::Reg(reg));
+                }
+                unpacked
             }
         }
     }

@@ -488,9 +488,20 @@ against the capability's bound, this backend's first loop built for
 and `socket`/`connect`. An all-LLVM listener and client, built in the
 same session, talked to each other over real loopback — the first
 time two programs this backend built have ever talked to each other.
-**`Net` is now fully built on `--backend llvm`.** `Ffi`/`extern fn` is
-the only gap left — what a program needs to read or write what it
-accepted or connected to, not merely open the socket.
+**`Net` is now fully built on `--backend llvm`.** `Ffi`/`extern fn`
+closed next — and checking it against real programs found this
+paragraph's own earlier claim, that it was "the only gap left," false:
+`Fs` had been unbuilt the entire time, unnamed anywhere because no
+slice had tried a real `Fs`-using program against this backend before
+`examples/seek/` did. Corrected in place. `extern fn` itself now
+lowers — an `int` crosses at `i64` whatever the C function's own width
+is, a capability parameter never crosses at all — checked against
+`tests/accept/bytes_to_c.ls` unmodified and a fresh `labs(-5) == 5` on
+both backends. `Fs` is what's refused now, and a second, pre-existing
+finding surfaced with it: a program whose own `extern fn` names a
+symbol this backend already declares for `Net` makes `clang` correctly
+refuse to link rather than silently miscompile — the same exposure
+already on record against Cranelift for `close`, not a new one.
 [`ROADMAP.md`](docs/ROADMAP.md) says what's next.
 
 ---

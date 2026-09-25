@@ -587,18 +587,18 @@ fn the_two_backends_agree_on_tree() {
 /// silent wrong answer: `region`/`alloc_slice` moved out of this list
 /// once §7.5 landed; bare `alloc[a]`/`box`/`unbox` moved out once §7.15
 /// landed; `Type::Float` moved out once §7.17 landed; matching through
-/// a reference moved out once §7.19 landed -- every gap this document
-/// names a `benches/`/`tests/accept/` target for is closed.
-/// `tests/accept/bytes_to_c.ls` now refuses on a foreign call instead,
-/// still not part of this backend.
+/// a reference moved out once §7.19 landed; a foreign call moved out
+/// once §7.23 landed. `tests/accept/file_handle.ls` now refuses on
+/// `Fs`'s own `fs_write` instead -- found while checking §7.23's own
+/// claim, and never named as a gap in this document until now.
 #[test]
 fn a_program_outside_this_backend_is_refused_through_the_cli() {
-    let dir = scratch("backends-llvm-foreign-call");
+    let dir = scratch("backends-llvm-fs");
     let exe = dir.join("out");
     let build = Command::new(BIN)
         .args([
             "build".as_ref(),
-            repo_root().join("tests/accept/bytes_to_c.ls").as_os_str(),
+            repo_root().join("tests/accept/file_handle.ls").as_os_str(),
             "--std".as_ref(),
             "--backend".as_ref(),
             "llvm".as_ref(),
@@ -609,10 +609,24 @@ fn a_program_outside_this_backend_is_refused_through_the_cli() {
         .expect("the compiler runs");
     let _ = std::fs::remove_dir_all(&dir);
 
-    assert!(!build.status.success(), "`bytes_to_c.ls` is outside this backend and should refuse");
+    assert!(!build.status.success(), "`file_handle.ls` is outside this backend and should refuse");
     assert_eq!(build.status.code(), Some(1), "an unsupported program is rule `internal`, exit 1");
     let message = String::from_utf8_lossy(&build.stderr).to_lowercase();
-    assert!(message.contains("foreign"), "the refusal should name the boundary it hit: {message}");
+    assert!(message.contains("fileop"), "the refusal should name the boundary it hit: {message}");
+}
+
+/// §7.23: a foreign call, closed -- the gap the test above used to name.
+/// `tests/accept/bytes_to_c.ls` is the `&r [byte]`-crossing case
+/// (`write(fd, ptr, len)`, a literal and an arena slice both crossing as
+/// pointer-and-length); `extern_fn_labs_computes_the_real_answer`
+/// (`crates/lex-sys-codegen-llvm/src/tests.rs`) is the plain-`int` case.
+#[test]
+fn the_two_backends_agree_on_bytes_to_c() {
+    assert_backends_agree(
+        "backends-bytes-to-c",
+        "tests/accept/bytes_to_c.ls",
+        "written straight to fd 1\nand so was this\n",
+    );
 }
 
 /// `docs/llvm-backend.md` §7.20: `listen`/`accept`, closed -- the first
