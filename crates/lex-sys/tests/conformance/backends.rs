@@ -895,6 +895,23 @@ fn the_two_backends_agree_on_sha256() {
     );
 }
 
+/// `docs/sha512.md`: `std.crypto`'s second slice, SHA-512, checked
+/// against the system `sha512sum` on both backends -- the same
+/// reference this module's own design doc computed its vectors
+/// against. The 112-byte vector is the one that matters most: it is
+/// the smallest input that forces the two-block path.
+#[test]
+fn the_two_backends_agree_on_sha512() {
+    assert_backends_agree(
+        "backends-sha512",
+        "tests/accept/sha512.ls",
+        "cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e\n\
+         ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f\n\
+         c01d080efd492776a1c43bd23dd99d0a2e626d481e16782e75d54c2503b5dc32bd05f0f1ba33e568b88fd2d970929b719ecbb152f58f130a407c8830604b70ca\n\
+         07e547d9586f6a73f73fbac0435ed76951218fb7d0c8d788a309d785436bbb642e93a252a954f23912547d1e8a3b5ed6e1bfd7097821233fa0538f3db854fee6\n",
+    );
+}
+
 /// `docs/reach.md` §3.4: `c_int`, checked on both backends. Before this
 /// slice, `access`'s real `-1` on a missing path read back as
 /// `4294967295` on either backend -- the upper 32 bits of the return
