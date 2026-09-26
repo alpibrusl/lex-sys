@@ -703,6 +703,26 @@ impl<'a> FuncEmitter<'a> {
                     .zip(&flat)
                     .map(|(kind, value)| format!("{} {}", kind.llvm(), operand(value)))
                     .collect();
+                // `docs/reach.md` §3.4: `c_int` was declared `i32` in
+                // `emit.rs`'s own declare loop, so the call here has to
+                // say the same width -- `emit_call`'s shared "one leaf to
+                // a register" path assumes the call's type matches the
+                // *declared* signature, which for a narrow return it
+                // would not. Sign-extend back to this backend's own
+                // 64-bit `int` right after, the one place that reads the
+                // real ABI width rather than trusting the rest of the
+                // register.
+                if ext.narrow_return && matches!(ext.ret, Type::Int) {
+                    let raw = self.fresh();
+                    self.out.push_str(&format!(
+                        "  {raw} = call i32 @{}({})\n",
+                        ext.symbol,
+                        printed.join(", ")
+                    ));
+                    let extended = self.fresh();
+                    self.out.push_str(&format!("  {extended} = sext i32 {raw} to i64\n"));
+                    return Ok(vec![LValue::Reg(extended)]);
+                }
                 // `Type::Unit` (no `-> Type` in the declaration) is
                 // `void`; it is otherwise unwritable, the same special
                 // case `emit.rs`'s own declare loop makes.

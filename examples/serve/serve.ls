@@ -45,32 +45,40 @@ import std.bytes;
 // and a wrong length is how a C server is attacked, and here they cannot
 // disagree.
 
+// `c_int`, not `int` (`docs/reach.md` §3.4): the real `socket`/
+// `setsockopt`/`bind`/`listen`/`accept`/`close` all return a 32-bit C
+// `int`, and this program's own `< 0` checks below need the sign bit
+// this backend actually put there, not the upper 32 bits of a register
+// C's `int` never promised were clean.
 extern fn socket[&f](ffi: &f Ffi("libc"), domain: int, kind: int, proto: int)
-    -> [ffi("libc")] int;
+    -> [ffi("libc")] c_int;
 
 extern fn setsockopt[&f, &v](ffi: &f Ffi("libc"), fd: int, level: int,
-    name: int, value: &v [byte]) -> [ffi("libc")] int;
+    name: int, value: &v [byte]) -> [ffi("libc")] c_int;
 
 extern fn bind[&f, &a](ffi: &f Ffi("libc"), fd: int, addr: &a [byte])
-    -> [ffi("libc")] int;
+    -> [ffi("libc")] c_int;
 
 extern fn listen[&f](ffi: &f Ffi("libc"), fd: int, backlog: int)
-    -> [ffi("libc")] int;
+    -> [ffi("libc")] c_int;
 
 // The two trailing pointers are `NULL`: a foreign result is `int`, `bool`
 // or `()` (`docs/reach.md` §3), so a `struct sockaddr *` the kernel fills
 // in is not something this program could hold. It does not need the peer's
 // address, so it passes nothing and asks for nothing.
 extern fn accept[&f](ffi: &f Ffi("libc"), fd: int, addr: int, len: int)
-    -> [ffi("libc")] int;
+    -> [ffi("libc")] c_int;
 
+// `read`/`write` stay plain `int`: their real return is `ssize_t`, which
+// is genuinely 64 bits here, not a narrower C `int` this backend would
+// need to sign-extend.
 extern fn read[&f, &b](ffi: &f Ffi("libc"), fd: int, buf: &!b [byte])
     -> [ffi("libc")] int;
 
 extern fn write[&f, &b](ffi: &f Ffi("libc"), fd: int, buf: &b [byte])
     -> [ffi("libc")] int;
 
-extern fn close[&f](ffi: &f Ffi("libc"), fd: int) -> [ffi("libc")] int;
+extern fn close[&f](ffi: &f Ffi("libc"), fd: int) -> [ffi("libc")] c_int;
 
 // ---------------------------------------------------------------------
 // Bytes

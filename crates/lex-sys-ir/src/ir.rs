@@ -256,6 +256,14 @@ pub struct ExternFn {
     pub params: Vec<Type>,
     pub effects: Effects,
     pub ret: Type,
+    /// `ret` was written `c_int` rather than `int` (`docs/reach.md` §3.4):
+    /// the real C ABI return is a 32-bit `int`, not lex-sys's own 64-bit
+    /// one, so a backend must cross it at that width and sign-extend --
+    /// never read the full 64-bit return register, which the ABI never
+    /// promised was clean above bit 31. Meaningless when `ret` is not
+    /// `Type::Int` (`Bool` already crosses narrow at one byte; `Unit`
+    /// crosses at none).
+    pub narrow_return: bool,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]

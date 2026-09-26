@@ -250,6 +250,16 @@ half with an asker is the one the grant does not ask about.
 > things `serve/` never had to do. **Both halves have now cleared the
 > bar.**
 
+> **Recounted (#122): outbound 3.** `examples/vsock/` connects over
+> `AF_VSOCK` -- the channel `lex-os-guest` uses to reach its host
+> supervisor, scoping the first slice of moving `lex-os` off Rust. It
+> is `extern fn socket`/`connect`/`close` again, the same as `fetch/`
+> and `report/`, because `AF_VSOCK` is Linux-specific and has no `Net`
+> builtin behind it -- and `docs/reach.md`'s own point stands: it does
+> not need one, `Ffi("libc")` already names the authority. Not a
+> change to the bar itself, just a third program clearing it the same
+> way.
+
 That is the honest state up to here. Both halves of the two-asker bar
 §5 set are cleared, and §3's own reason to build now rather than before
 still applies in full: `Ffi("libc")` lets a program declare

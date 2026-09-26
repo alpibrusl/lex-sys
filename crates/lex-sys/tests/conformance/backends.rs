@@ -894,3 +894,17 @@ fn the_two_backends_agree_on_sha256() {
          d7a8fbb307d7809469ca9abcb0082e4f8d5651e46d3cdb762d02d0bf37c9e592\n",
     );
 }
+
+/// `docs/reach.md` §3.4: `c_int`, checked on both backends. Before this
+/// slice, `access`'s real `-1` on a missing path read back as
+/// `4294967295` on either backend -- the upper 32 bits of the return
+/// register were never sign-extended, only ever read as though they
+/// were.
+#[test]
+fn the_two_backends_agree_on_a_narrow_foreign_return() {
+    assert_backends_agree(
+        "backends-narrow-return",
+        "tests/accept/foreign_narrow_return.ls",
+        "ok\n-1\n",
+    );
+}

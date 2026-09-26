@@ -335,8 +335,14 @@ pub(crate) fn emit_module(
                 params.push(leaf.llvm().to_owned());
             }
         }
+        // `docs/reach.md` §3.4: `c_int` crosses at the real C ABI width
+        // (32 bits), not `leaves_of`'s own `i64` -- the call site
+        // (`body/expr.rs`'s `Callee::Extern` arm) sign-extends the
+        // result back to this backend's own `int` after the call.
         let ret_ty = if matches!(ext.ret, Type::Unit) {
             "void".to_owned()
+        } else if ext.narrow_return && matches!(ext.ret, Type::Int) {
+            "i32".to_owned()
         } else {
             match leaves_of(&ext.ret, program).map_err(|m| (None, m))?.as_slice() {
                 [] => "void".to_owned(),

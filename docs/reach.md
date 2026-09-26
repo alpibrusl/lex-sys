@@ -209,6 +209,78 @@ is expressible today with the same eight declarations plus `fork` and
 
 ---
 
+### 3.4 A return crosses at a width this document never checked
+
+§2 states the rule as "everything else crosses at lex-sys's own widths,"
+and that is true and safe for a **parameter**: this backend writes a
+full 64-bit register, C reads the low bits its own narrower parameter
+type declares, and the bits above that are never read, so a caller
+writing more than the callee asked for costs nothing. A **return** is
+not the same shape, because the callee is the one who fills the
+register, and this document had never asked what a real `int`-returning
+C function leaves in the bits above 31.
+
+The answer, found building `examples/vsock/` and confirmed against real
+`close`/`connect` calls, checked byte for byte against equivalent C:
+**sometimes zero, not sign-extended.** `close(999)` (an invalid fd) on
+this platform's libc compiles to a 32-bit store into the low half of the
+return register; x86-64's own rule for writing a 32-bit register clears
+the upper 32 bits of its 64-bit parent as a side effect, so the register
+holds `0x00000000FFFFFFFF` where a signed 64-bit reading expects
+`0xFFFFFFFFFFFFFFFF`. Declaring the call's return type as this backend's
+own 64-bit `int` (`abi.rs`'s `leaves`, matching every other `int` in the
+program) and reading the full register back is exactly the bug this
+produces: `4294967295` where the real, POSIX-documented answer is `-1`.
+
+**Some extern declarations never hit this.** `labs` returns C's `long`,
+which really is 64 bits on both of this project's targets, so reading
+the full register is correct there -- confirmed by
+`extern_fn_labs_computes_the_real_answer`, which is exactly why that
+test never caught the bug a socket call's own `< 0` check did.
+`read`/`write` return `ssize_t`, also genuinely 64 bits (a transfer can
+exceed 2^31 bytes, however rarely in practice), so they must stay wide
+too. There is no way to tell these apart from the declaration's `int`
+alone — `close`, `connect`, `labs` and `read` are four different real C
+widths (`int`, `int`, `long`, `ssize_t`, the first two the same by
+coincidence) spelled identically at the lex-sys boundary, and reading
+uniformly at 64 bits is silently right for two of them and silently
+wrong for the other two whenever the value is negative.
+
+**`c_int` names the common case explicitly, in return position only:**
+
+```
+extern fn close[&f](ffi: &f Ffi("libc"), fd: int) -> [ffi("libc")] c_int;
+```
+
+Inside the program `close(...)` is still exactly an `int` — every
+assignment, comparison and arithmetic operation sees the same 64-bit
+value it always would. The only difference is at the call itself: the
+backend declares the foreign function's return as a real 32-bit `int`
+(matching the platform C ABI on every target this project builds for)
+and sign-extends the result back to 64 bits itself, reading only the
+bits the ABI actually promised were meaningful rather than trusting
+whatever the callee happened to leave above them. `c_int` is not a
+general type — writing it anywhere but an `extern fn`'s return position
+is an unresolved name, the same refusal any other undeclared type gets.
+
+**Every existing socket declaration was migrated, and it was not
+cosmetic.** `examples/serve/`'s and `examples/collect/`'s own `bind`/
+`accept`/`socket`/`close` checks, and `examples/fetch/`'s and
+`examples/report/`'s own `socket`/`close` checks, all compare a foreign
+result against `0` with `<` somewhere in their error handling. Every one
+of those checks had this exact bug, silently, the whole time — untested
+only because the shipped test suite exercises their success paths, not
+a real `bind`/`accept` failure. `read`/`write` are unchanged: their real
+return is `ssize_t`, not `int`, and belongs on the wide side of this
+split.
+
+`tests/accept/foreign_narrow_return.ls` checks `access`'s real `-1`
+directly, on both backends; `crates/lex-sys/tests/conformance/backends.
+rs`'s `the_two_backends_agree_on_a_narrow_foreign_return` is the same
+claim through the CLI.
+
+---
+
 ## 4. What was merely missing
 
 Two things this program ran into that were not design at all, only

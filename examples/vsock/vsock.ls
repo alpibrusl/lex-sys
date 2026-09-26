@@ -20,17 +20,23 @@
 // `svm_port`/`svm_cid` are **host** byte order, not network byte order,
 // so there is no endian flip to get right on these little-endian targets
 // -- one thing this layout does not share with `examples/serve/`'s.
+//
+// `socket`/`connect`/`close` are `c_int`, not `int` (`docs/reach.md`
+// §3.4): this file's own first draft used plain `int` and reported
+// "connected" for a `connect` to a nonsense CID -- a real bug in how
+// `extern fn` crossed a foreign return, found here and fixed at its
+// root rather than worked around with a different check in this file.
 
 import std.bytes;
 import std.io;
 
 extern fn socket[&f](ffi: &f Ffi("libc"), domain: int, kind: int, proto: int)
-    -> [ffi("libc")] int;
+    -> [ffi("libc")] c_int;
 
 extern fn connect[&f, &a](ffi: &f Ffi("libc"), fd: int, addr: &a [byte])
-    -> [ffi("libc")] int;
+    -> [ffi("libc")] c_int;
 
-extern fn close[&f](ffi: &f Ffi("libc"), fd: int) -> [ffi("libc")] int;
+extern fn close[&f](ffi: &f Ffi("libc"), fd: int) -> [ffi("libc")] c_int;
 
 // Little-endian, four bytes, host order -- what `svm_port`/`svm_cid` both
 // want.

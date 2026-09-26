@@ -30,28 +30,33 @@ import std.io;
 // libc
 // ---------------------------------------------------------------------
 
+// `c_int`, not `int` (`docs/reach.md` §3.4): `socket`/`setsockopt`/
+// `bind`/`listen`/`accept`/`close` all really return a 32-bit C `int`,
+// and this program's `< 0` checks need the real sign bit.
 extern fn socket[&f](ffi: &f Ffi("libc"), domain: int, kind: int, proto: int)
-    -> [ffi("libc")] int;
+    -> [ffi("libc")] c_int;
 
 extern fn setsockopt[&f, &v](ffi: &f Ffi("libc"), fd: int, level: int,
-    name: int, value: &v [byte]) -> [ffi("libc")] int;
+    name: int, value: &v [byte]) -> [ffi("libc")] c_int;
 
 extern fn bind[&f, &a](ffi: &f Ffi("libc"), fd: int, addr: &a [byte])
-    -> [ffi("libc")] int;
+    -> [ffi("libc")] c_int;
 
 extern fn listen[&f](ffi: &f Ffi("libc"), fd: int, backlog: int)
-    -> [ffi("libc")] int;
+    -> [ffi("libc")] c_int;
 
 extern fn accept[&f](ffi: &f Ffi("libc"), fd: int, addr: int, len: int)
-    -> [ffi("libc")] int;
+    -> [ffi("libc")] c_int;
 
+// `read`/`write` stay plain `int`: their real return is `ssize_t`,
+// genuinely 64 bits here.
 extern fn read[&f, &b](ffi: &f Ffi("libc"), fd: int, buf: &!b [byte])
     -> [ffi("libc")] int;
 
 extern fn write[&f, &b](ffi: &f Ffi("libc"), fd: int, buf: &b [byte])
     -> [ffi("libc")] int;
 
-extern fn close[&f](ffi: &f Ffi("libc"), fd: int) -> [ffi("libc")] int;
+extern fn close[&f](ffi: &f Ffi("libc"), fd: int) -> [ffi("libc")] c_int;
 
 // ---------------------------------------------------------------------
 // Bytes
