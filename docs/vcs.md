@@ -1,15 +1,18 @@
 # Content-addressed VCS: what lex-sys would need, and what it would not
 
-> **Status: §7's plateau question is answered, and §8's foundation
-> slice is built.** `crates/lex-sys-vcs` exists: the `Operation`
-> vocabulary (§4's scoped-down `AddFunction`/`RemoveFunction`/
-> `ModifyBody`, no `budget_cost`), the edition tag (§6), and canonical
-> BLAKE3 identity — checked against real `lex-sys-id` hashes, not
-> invented strings (`crates/lex-sys-vcs/tests/golden.rs`). What §3
-> named as porting from `lex-vcs` largely unmodified — the gate,
-> attestation, signing, merge, merge sessions, issues, the op log
-> itself — is **not** built yet; nothing downstream needed building
-> before this file existed to build it on, and now it does.
+> **Status: §7's plateau question is answered, and the gate, op log,
+> attestation and signing are built.** `crates/lex-sys-vcs` exists: the
+> `Operation` vocabulary (§4's scoped-down `AddFunction`/
+> `RemoveFunction`/`ModifyBody`, no `budget_cost`), the edition tag
+> (§6), canonical BLAKE3 identity (checked against real `lex-sys-id`
+> hashes, not invented strings), a `gate.rs` that type-checks a
+> candidate program with no code changed at the boundary from `lex-vcs`
+> (§3's own claim, now checkable), a loose-file op log, and a
+> hash-chained attestation log sealed with Ed25519 (`ed25519-dalek`,
+> the same crate `lex-os-audit` uses — **not** `std.ed25519`,
+> `docs/ed25519.md`'s own module for a different consumer). What
+> remains from §3's "largely unmodified" list — merge, merge sessions,
+> issues — is not built yet; §8 names what is next.
 >
 > `ROADMAP.md`'s own "lex-vcs" row measured a plateau in the effect
 > vocabulary and the builtin surface (`hash-stability.md`) and ended on
@@ -271,23 +274,30 @@ documents keep catching in each other.
 
 ## 8. What is next
 
-**Built**: `crates/lex-sys-vcs`'s foundation — `Operation`/
-`OperationKind`/`OpId`/`SigId`/`StageId`/`EffectSet`, canonical BLAKE3
-identity, and the edition tag from §6, checked against a golden case
-built from real `lex-sys-id` output rather than invented strings
-(`tests/golden.rs`: an `AddFunction`'s `sig_id`/`stage_id` checked
-directly against `lex-sys ids`' own CLI output on the same source; two
-`ModifyBody`s over sources differing only in one operator, confirming
-the signature hash holds and the body hash does not; parent order and
-edition each checked to move, or not move, the `OpId` exactly as §4
-and §6 say they should).
+**Built**: the foundation (`Operation`/`OperationKind`/`OpId`/`SigId`/
+`StageId`/`EffectSet`, canonical BLAKE3 identity, the edition tag from
+§6, checked against real `lex-sys-id` output); the apply→gate pipeline
+(`gate.rs`, checking §3's claim directly against real code — a
+candidate program either typechecks or is refused with the same rule
+tag `lex-sys check` would report, no `main`-shape check, since an
+operation can be about a library declaration); a loose-file op log
+(`op_log.rs`, one JSON file per `OpId`, idempotent, refusing a record
+whose claimed identity disagrees with its own payload); and a
+hash-chained attestation log (`attestation.rs`) that records the
+gate's own verdict, sealable with Ed25519 via `ed25519-dalek` — the
+same crate `lex-os-audit` uses, deliberately not `std.ed25519`
+(`docs/ed25519.md`'s own module, built for a different consumer, §1
+there). This is the meeting point §8's previous revision named: this
+initiative and `docs/sha512.md` §5's deferred Ed25519 slice, closed by
+the same crate on the Rust side and a purpose-built module on the `.ls`
+side, each serving the consumer that actually needs it rather than one
+serving both.
 
-What §3 named as porting from `lex-vcs` largely unmodified is next, in
-the order a consumer would actually need it: the apply→gate pipeline
-first (§3's claim that it needs no change beyond calling into
-`lex-sys-ir`'s own checker, which is now checkable directly against
-real code rather than only against `gate.rs`'s source), then a
-minimal op log to persist what the gate accepts, then attestation and
-signing — at which point this initiative and `docs/sha512.md` §5's
-deferred Ed25519 slice meet, since `lex-vcs::signing` and
-`lex-os-capsule`'s own signing need are the same primitive.
+What is left from §3's "largely unmodified" list — whole-function
+merge (`lex-vcs::merge`), multi-file merge sessions, typed issues,
+predicate branches, the op log's own history index — has no asker in
+this repository yet (`AGENTS.md` §7), and is not started. The
+linearity-aware body merge named in §4 (recognizing a linear binding
+consumed on both sides of a merge *before* declaring it clean, rather
+than after) is the one item on that list with a design already written
+down, should a consumer arrive before the others do.

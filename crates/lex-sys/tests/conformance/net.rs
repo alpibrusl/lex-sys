@@ -158,7 +158,11 @@ fn the_authority_report_names_the_syscalls_the_row_cannot() {
 ///
 /// `examples/report/` recounted outbound to 2 (`docs/connect.md` §6).
 /// `examples/collect/` does the same for inbound (`docs/listen.md`
-/// §4): both halves have now cleared the bar.
+/// §4): both halves have now cleared the bar. `examples/vsock/`
+/// recounted outbound to 3 (`docs/net.md` §5's own note on it), and
+/// `examples/agent_guest/`/`examples/agent_supervisor/` -- the
+/// guest/supervisor exchange over plain HTTP, `docs/net.md`'s own
+/// entry on them -- recount outbound to 4 and inbound to 3.
 #[test]
 fn the_network_programs_are_counted() {
     let root = repo_root();
@@ -202,10 +206,19 @@ fn the_network_programs_are_counted() {
             outbound.iter().map(String::as_str).collect::<Vec<_>>()
         ),
         (
-            vec!["examples/collect/collect.ls", "examples/serve/serve.ls"],
-            vec!["examples/fetch/fetch.ls", "examples/report/report.ls", "examples/vsock/vsock.ls"]
+            vec![
+                "examples/agent_supervisor/agent_supervisor.ls",
+                "examples/collect/collect.ls",
+                "examples/serve/serve.ls"
+            ],
+            vec![
+                "examples/agent_guest/agent_guest.ls",
+                "examples/fetch/fetch.ls",
+                "examples/report/report.ls",
+                "examples/vsock/vsock.ls"
+            ]
         ),
-        "the network programs changed: `net.md` §5 counts inbound 2, outbound 3, and \
+        "the network programs changed: `net.md` §5 counts inbound 3, outbound 4, and \
          two is the bar for building `Net`. Rewrite §5, then this."
     );
 }
@@ -881,4 +894,108 @@ fn binding_the_wrong_port_traps() {
     assert_eq!(run.status.code(), None, "the process should be killed by a signal, not exit");
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------
+// `examples/agent_guest/` and `examples/agent_supervisor/` -- the
+// guest/supervisor exchange over plain HTTP (`docs/net.md` §5's #125
+// recount)
+// ---------------------------------------------------------------------
+
+/// A lex-sys guest, POSTing to a lex-sys supervisor, and decoding the
+/// `AgentViewMsg` it gets back.
+///
+/// The same shape as `a_lex_sys_client_fetches_from_a_lex_sys_server`:
+/// `agent_supervisor` binds and accepts, `agent_guest` connects, and
+/// neither is a Rust stand-in for the other half. `agent_guest` exits 3
+/// when nothing is listening yet, so it is retried the same way `fetch`
+/// is.
+#[test]
+fn a_lex_sys_guest_exchanges_a_view_with_a_lex_sys_supervisor() {
+    use std::time::{Duration, Instant};
+    let (supervisor_dir, supervisor) = build_example(
+        "agent-supervisor",
+        "examples/agent_supervisor/agent_supervisor.ls",
+        "agent_supervisor",
+    );
+    let (guest_dir, guest) =
+        build_example("agent-guest", "examples/agent_guest/agent_guest.ls", "agent_guest");
+
+    let port = free_port().to_string();
+    let mut child = Command::new(&supervisor)
+        .args([port.as_str(), "write the report", "3"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("the supervisor runs");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let run = loop {
+        let run = Command::new(&guest)
+            .args(["127.0.0.1", port.as_str()])
+            .output()
+            .expect("the guest runs");
+        if run.status.code() != Some(3) || Instant::now() > deadline {
+            break run;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let _ = child.wait();
+    assert_eq!(
+        String::from_utf8_lossy(&run.stdout),
+        "goal: write the report\nstep: 3\n",
+        "`agent_guest` should print exactly the goal and step it decoded; stderr:\n{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(run.status.code(), Some(0), "`agent_guest` should exit 0 on a decoded view");
+
+    let _ = std::fs::remove_dir_all(&supervisor_dir);
+    let _ = std::fs::remove_dir_all(&guest_dir);
+}
+
+/// A goal with characters that matter to JSON (`"` and `\`) survives the
+/// round trip escaped rather than corrupting the message -- the same
+/// property `examples/vsock/vsock.ls`'s own escaper has, checked here
+/// end to end rather than by inspection.
+#[test]
+fn a_goal_needing_json_escaping_survives_the_round_trip() {
+    use std::time::{Duration, Instant};
+    let (supervisor_dir, supervisor) = build_example(
+        "agent-supervisor-escape",
+        "examples/agent_supervisor/agent_supervisor.ls",
+        "agent_supervisor",
+    );
+    let (guest_dir, guest) =
+        build_example("agent-guest-escape", "examples/agent_guest/agent_guest.ls", "agent_guest");
+
+    let port = free_port().to_string();
+    let mut child = Command::new(&supervisor)
+        .args([port.as_str(), "say \"hi\" and go", "42"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("the supervisor runs");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let run = loop {
+        let run = Command::new(&guest)
+            .args(["127.0.0.1", port.as_str()])
+            .output()
+            .expect("the guest runs");
+        if run.status.code() != Some(3) || Instant::now() > deadline {
+            break run;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let _ = child.wait();
+    // The decoder does not unescape (`examples/vsock/vsock.ls`'s own
+    // documented limit): what the guest prints is the escaped form.
+    assert_eq!(
+        String::from_utf8_lossy(&run.stdout),
+        "goal: say \\\"hi\\\" and go\nstep: 42\n",
+        "the escaped goal should survive the round trip; stderr:\n{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(run.status.code(), Some(0), "`agent_guest` should exit 0 on a decoded view");
+
+    let _ = std::fs::remove_dir_all(&supervisor_dir);
+    let _ = std::fs::remove_dir_all(&guest_dir);
 }

@@ -11,10 +11,19 @@
 //! the same relationship `lex-os` and `lex-sys` already committed to
 //! (`README.md`'s "Where this sits").
 
+mod attestation;
 mod canonical;
+mod gate;
+mod op_log;
 mod operation;
 
+pub use attestation::{
+    AttestationEvent, BrokenAt, Chain, ChainPayload, Entry as AttestationEntry, GENESIS, Seal,
+};
 pub use canonical::canonical_bytes;
+pub use ed25519_dalek::{SigningKey, VerifyingKey};
+pub use gate::{GateDiagnostic, check_candidate};
+pub use op_log::{OpLog, OpLogError};
 pub use operation::{
     EffectSet, ModuleRef, OpId, Operation, OperationKind, OperationRecord, SigId, StageId,
 };
