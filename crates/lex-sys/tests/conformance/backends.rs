@@ -895,6 +895,27 @@ fn the_two_backends_agree_on_sha256() {
     );
 }
 
+/// `docs/ed25519.md`: three real keypairs generated and signed by the
+/// system `openssl`, checked on both backends -- signature bytes,
+/// genuine verify, and a tampered signature's rejection, all three
+/// times.
+#[test]
+fn the_two_backends_agree_on_ed25519() {
+    assert_backends_agree(
+        "backends-ed25519",
+        "tests/accept/ed25519.ls",
+        "228ada2141ab7425651a4ce8d9c5ed0f720319957a1035218354a81f950b480ee5ad13cad8eec58674f044f1e87e3795c91c303e2664272ab2c9b2595a67ee02\n\
+         1\n\
+         0\n\
+         58cfcc803d68d21df7d5ecbc10a5dce09e549da84ef7dc664240799091ad2a5fca20f458498d91832e4012f339a4a0cb28934209b36b401a46d722ac9449db04\n\
+         1\n\
+         0\n\
+         8760c2941c58fb6b2cdd57b3b7ede001de1e9bcd1955bf243a8a0a72a7363ec77fe0e0b1ae1b5b045506bb61f943c2791756ff14fefc8925db194069df30bb07\n\
+         1\n\
+         0\n",
+    );
+}
+
 /// `docs/sha512.md`: `std.crypto`'s second slice, SHA-512, checked
 /// against the system `sha512sum` on both backends -- the same
 /// reference this module's own design doc computed its vectors

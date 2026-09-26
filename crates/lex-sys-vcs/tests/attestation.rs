@@ -2,10 +2,14 @@
 //! exactly what `lex-os-audit`'s own doc comment says a bare chain
 //! catches and does not.
 
-use lex_sys_vcs::{AttestationEvent, Chain, GENESIS};
+use lex_sys_vcs::{AttestationEvent, Chain, GENESIS, SigningKey, VerifyingKey};
 
 fn accepted(op_id: &str) -> AttestationEvent {
     AttestationEvent::GateAccepted { op_id: op_id.to_string() }
+}
+
+fn key(seed: u8) -> SigningKey {
+    SigningKey::from_bytes(&[seed; 32])
 }
 
 #[test]
@@ -80,6 +84,72 @@ fn truncating_the_tail_still_verifies_and_that_is_the_documented_limit() {
 
     assert_eq!(truncated.len(), 2);
     assert_eq!(truncated.verify(), Ok(()));
+}
+
+#[test]
+fn an_unsealed_chain_appends_no_seal_at_all() {
+    let mut chain: Chain<AttestationEvent> = Chain::new();
+    assert!(!chain.is_sealing());
+    chain.append(accepted(&"a".repeat(64)));
+    assert!(chain.entries()[0].seal.is_none());
+}
+
+#[test]
+fn a_sealed_chain_seals_every_entry_it_appends() {
+    let signing_key = key(7);
+    let mut chain: Chain<AttestationEvent> = Chain::new().sealed_with(signing_key.clone());
+    assert!(chain.is_sealing());
+    chain.append(accepted(&"a".repeat(64)));
+    chain.append(accepted(&"b".repeat(64)));
+
+    assert_eq!(chain.verify(), Ok(()));
+    assert_eq!(chain.verify_seals(&signing_key.verifying_key()), Ok(()));
+    for entry in chain.entries() {
+        let seal = entry.seal.as_ref().expect("every entry was appended under a sealing key");
+        assert_eq!(seal.signer, hex::encode(signing_key.verifying_key().to_bytes()));
+    }
+}
+
+#[test]
+fn verify_seals_rejects_the_wrong_key() {
+    let mut chain: Chain<AttestationEvent> = Chain::new().sealed_with(key(7));
+    chain.append(accepted(&"a".repeat(64)));
+
+    let wrong: VerifyingKey = key(9).verifying_key();
+    assert!(chain.verify_seals(&wrong).is_err());
+}
+
+#[test]
+fn verify_seals_rejects_an_entry_with_no_seal_at_all() {
+    // A chain that started unsealed and was later re-opened with
+    // `sealed_with` -- exactly the case `sealed_with`'s own doc comment
+    // names: entries already written are left alone, on purpose, so an
+    // entry from before sealing was turned on has no seal to check.
+    let mut chain: Chain<AttestationEvent> = Chain::new();
+    chain.append(accepted(&"a".repeat(64)));
+    let sealed_key = key(7);
+    chain = chain.sealed_with(sealed_key.clone());
+    chain.append(accepted(&"b".repeat(64)));
+
+    let err = chain
+        .verify_seals(&sealed_key.verifying_key())
+        .expect_err("the first entry predates the key and has no seal");
+    assert_eq!(err.seq, 0);
+}
+
+#[test]
+fn a_seal_does_not_change_the_entrys_own_hash() {
+    // Sealing is deliberately not part of `compute_hash` -- the same
+    // payload sealed and unsealed must chain identically, so turning
+    // sealing on partway through a log does not retroactively change
+    // anything already written.
+    let mut unsealed: Chain<AttestationEvent> = Chain::new();
+    unsealed.append(accepted(&"a".repeat(64)));
+
+    let mut sealed: Chain<AttestationEvent> = Chain::new().sealed_with(key(7));
+    sealed.append(accepted(&"a".repeat(64)));
+
+    assert_eq!(unsealed.entries()[0].hash, sealed.entries()[0].hash);
 }
 
 #[test]
