@@ -1,13 +1,22 @@
 # Content-addressed VCS: what lex-sys would need, and what it would not
 
-> **Status: design only. Nothing in this document is built.**
+> **Status: §7's plateau question is answered, and §8's foundation
+> slice is built.** `crates/lex-sys-vcs` exists: the `Operation`
+> vocabulary (§4's scoped-down `AddFunction`/`RemoveFunction`/
+> `ModifyBody`, no `budget_cost`), the edition tag (§6), and canonical
+> BLAKE3 identity — checked against real `lex-sys-id` hashes, not
+> invented strings (`crates/lex-sys-vcs/tests/golden.rs`). What §3
+> named as porting from `lex-vcs` largely unmodified — the gate,
+> attestation, signing, merge, merge sessions, issues, the op log
+> itself — is **not** built yet; nothing downstream needed building
+> before this file existed to build it on, and now it does.
 >
 > `ROADMAP.md`'s own "lex-vcs" row measured a plateau in the effect
 > vocabulary and the builtin surface (`hash-stability.md`) and ended on
 > an open question: *"whether 27 commits is enough of a plateau... is
 > the open question this row now asks, not whether one has happened at
 > all."* §7 below answers it. Everything before that is the design the
-> answer unblocks, not a plan already agreed to.
+> answer unblocked.
 
 ---
 
@@ -183,9 +192,16 @@ why out loud: *"It shares the idea and no code: `lex-os` takes its
 grant from `lex-lang` and checks `.lex`, and does not depend on this
 repository at all."* The same reasoning applies here in the other
 direction — a new `lex-sys-vcs` crate, built against this repository's
-own types, sharing the *scheme* (canonical JSON, SHA-256 `OpId`s,
-`String`-keyed `SigId`/`StageId`/`EffectSet`) with no shared code and
-no cross-repo `Cargo.toml` edge.
+own types, sharing the *scheme* (canonical JSON, a content-addressed
+`OpId`, `String`-keyed `SigId`/`StageId`/`EffectSet`) with no shared
+code and no cross-repo `Cargo.toml` edge. **Built, and one detail
+changed on contact**: `OpId` is BLAKE3, not `lex-vcs`'s SHA-256 —
+`docs/canonical-ast.md` already chose BLAKE3 for `lex-sys-id`'s own
+hashes and said why, and nothing in that reasoning is specific to an
+AST node rather than an operation, so matching `lex-vcs`'s algorithm
+would have meant a second hash dependency for no reason but
+appearance. "Shares the idea and no code" turns out to mean sharing it
+down to which hash function, not just which crate.
 
 The honest tradeoff, stated rather than assumed away: two independently
 maintained copies of `operation.rs`/`attestation.rs`/`signing.rs`/etc.
@@ -255,12 +271,23 @@ documents keep catching in each other.
 
 ## 8. What is next
 
-This document is design, not code, per its own status line. The next
-slice is `lex-sys-vcs`'s foundation — `operation.rs`'s types, ported
-natively (no `lex-vcs` dependency, §5), with `lex-sys-id`'s existing
-hashes wired in as `SigId`/`StageId` and `lex-sys authority`'s
-existing row format wired in as `EffectSet` — checked, the way every
-slice in this repository is, against a golden case: a `lex-sys`
-program's `AddFunction`/`ModifyBody` ops, hand-verified against
-`lex-sys ids`' own output before anything downstream (the gate,
-attestation, merge) is built on top of it.
+**Built**: `crates/lex-sys-vcs`'s foundation — `Operation`/
+`OperationKind`/`OpId`/`SigId`/`StageId`/`EffectSet`, canonical BLAKE3
+identity, and the edition tag from §6, checked against a golden case
+built from real `lex-sys-id` output rather than invented strings
+(`tests/golden.rs`: an `AddFunction`'s `sig_id`/`stage_id` checked
+directly against `lex-sys ids`' own CLI output on the same source; two
+`ModifyBody`s over sources differing only in one operator, confirming
+the signature hash holds and the body hash does not; parent order and
+edition each checked to move, or not move, the `OpId` exactly as §4
+and §6 say they should).
+
+What §3 named as porting from `lex-vcs` largely unmodified is next, in
+the order a consumer would actually need it: the apply→gate pipeline
+first (§3's claim that it needs no change beyond calling into
+`lex-sys-ir`'s own checker, which is now checkable directly against
+real code rather than only against `gate.rs`'s source), then a
+minimal op log to persist what the gate accepts, then attestation and
+signing — at which point this initiative and `docs/sha512.md` §5's
+deferred Ed25519 slice meet, since `lex-vcs::signing` and
+`lex-os-capsule`'s own signing need are the same primitive.
