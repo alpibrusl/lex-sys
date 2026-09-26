@@ -260,6 +260,17 @@ half with an asker is the one the grant does not ask about.
 > change to the bar itself, just a third program clearing it the same
 > way.
 
+> **Recounted (#125): outbound 4, inbound 3.** `examples/agent_guest/`
+> and `examples/agent_supervisor/` play the same guest/supervisor
+> exchange `examples/vsock/` plays over `AF_VSOCK`, but over plain
+> HTTP/1.0 -- not a second transport for `lex-os` (`lex-os-proto` names
+> none, and none is proposed here), a channel this sandbox can actually
+> round-trip end to end where `vsock/`'s own note says it cannot (no
+> `vhost_vsock`). `socket`/`connect` on the guest side and
+> `socket`/`bind`/`listen`/`accept` on the supervisor side are the same
+> declarations `fetch/`/`report/`/`serve/`/`collect/` already made; a
+> fourth and third program clearing the same bar, not a new one.
+
 That is the honest state up to here. Both halves of the two-asker bar
 §5 set are cleared, and §3's own reason to build now rather than before
 still applies in full: `Ffi("libc")` lets a program declare

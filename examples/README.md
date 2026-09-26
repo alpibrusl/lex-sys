@@ -388,6 +388,52 @@ and a test that only reads the child's stdout after the exchange
 finishes blocks forever the moment that pipe fills. Draining it
 concurrently, on its own thread, is the fix.
 
+### `vsock/` — the third outbound program, and the first slice of `lex-os`
+
+```sh
+cargo run -p lex-sys -- build --std examples/vsock/vsock.ls -o vsock
+./vsock <cid> <port>
+```
+
+Connects over `AF_VSOCK`, the channel `lex-os-guest` uses to reach its
+host supervisor, and — once connected — speaks one round of the real
+`lex-os-proto` wire protocol: reads one newline-delimited `AgentViewMsg`
+line, prints the goal and step it carries, and answers with a `Done`
+action, encoded and decoded by hand rather than pulled in as a JSON
+library. `docs/reach.md` §3.4 is the bug this program found scoping it:
+a foreign *return*, not just a parameter, can cross at the wrong width.
+The exchange itself was verified against real `serde_json` output and,
+end to end, over a real `AF_UNIX` `socketpair` standing in for
+`AF_VSOCK`'s byte-stream half — this sandbox has no `vhost_vsock`, so an
+actual `AF_VSOCK` round trip against `lex-os-guest` stays untested here,
+honestly, in the program's own comments.
+
+### `agent_supervisor/` and `agent_guest/` — the same exchange, over HTTP
+
+```sh
+cargo run -p lex-sys -- build --std examples/agent_supervisor/agent_supervisor.ls -o agent_supervisor
+cargo run -p lex-sys -- build --std examples/agent_guest/agent_guest.ls -o agent_guest
+./agent_supervisor 8080 "write the report" 3 &
+./agent_guest 127.0.0.1 8080
+# goal: write the report
+# step: 3
+```
+
+The same guest/supervisor exchange `vsock/` plays over `AF_VSOCK`,
+played over plain HTTP/1.0 instead — not a second transport for
+`lex-os` (`lex-os-proto` names no HTTP channel, and none is proposed
+here), but a channel this sandbox *can* round-trip end to end, over a
+real socket, in real CI, where `vsock/`'s own round trip cannot be.
+`agent_supervisor` is `serve/`'s and `collect/`'s shape (bind, accept
+one connection, read a request's body by `Content-Length`); `agent_guest`
+is `fetch/`'s and `report/`'s (connect, send a request with a body, read
+the response). The exchange is inverted from `vsock/`'s own shape only
+because HTTP's request is guest-initiated where a vsock stream lets the
+supervisor push first: `agent_guest` `POST`s the action it would
+otherwise have sent last, and `agent_supervisor` answers with the view
+it would otherwise have sent next — a real `AgentViewMsg`, checked byte
+for byte against real `serde_json` output for exactly that shape.
+
 ### `buffer/` — growing, written out
 
 ```sh
