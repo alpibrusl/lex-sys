@@ -203,9 +203,9 @@ fn the_network_programs_are_counted() {
         ),
         (
             vec!["examples/collect/collect.ls", "examples/serve/serve.ls"],
-            vec!["examples/fetch/fetch.ls", "examples/report/report.ls"]
+            vec!["examples/fetch/fetch.ls", "examples/report/report.ls", "examples/vsock/vsock.ls"]
         ),
-        "the network programs changed: `net.md` §5 counts inbound 2, outbound 2, and \
+        "the network programs changed: `net.md` §5 counts inbound 2, outbound 3, and \
          two is the bar for building `Net`. Rewrite §5, then this."
     );
 }
@@ -353,9 +353,9 @@ fn fetch_refuses_a_name_it_cannot_resolve() {
 fn the_linux_address_layout_connects_on_both_targets() {
     let source = "\
 extern fn socket[&f](ffi: &f Ffi(\"libc\"), domain: int, kind: int, proto: int)
-    -> [ffi(\"libc\")] int;
+    -> [ffi(\"libc\")] c_int;
 extern fn connect[&f, &a](ffi: &f Ffi(\"libc\"), fd: int, addr: &a [byte])
-    -> [ffi(\"libc\")] int;
+    -> [ffi(\"libc\")] c_int;
 fn main(world: World) -> [] int {
     let Split { io, ffi, fs, heap, args } = split(world);
     release(io); release(fs); release(heap);

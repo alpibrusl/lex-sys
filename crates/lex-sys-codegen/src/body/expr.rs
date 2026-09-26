@@ -320,7 +320,19 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
                             .declare_func_in_func(self.foreign[*index as usize], self.builder.func);
                         let call = self.builder.ins().call(f, &args);
                         let results = self.builder.inst_results(call).to_vec();
-                        if matches!(ext.ret, Type::Unit) { Vec::new() } else { results }
+                        if matches!(ext.ret, Type::Unit) {
+                            Vec::new()
+                        } else if ext.narrow_return && matches!(ext.ret, Type::Int) {
+                            // The call above declared a 32-bit return
+                            // (`emit.rs`): sign-extend it back to this
+                            // backend's own 64-bit `int` here, at the one
+                            // place that read the real ABI width, rather
+                            // than trust whatever the upper 32 bits of
+                            // the return register happen to hold.
+                            vec![self.builder.ins().sextend(types::I64, results[0])]
+                        } else {
+                            results
+                        }
                     }
                     // `narrow` is a compile-time fact: the capability it
                     // returns names a smaller library than the one it

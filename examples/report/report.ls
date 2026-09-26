@@ -33,19 +33,23 @@ import std.io;
 // libc
 // ---------------------------------------------------------------------
 
+// `c_int`, not `int` (`docs/reach.md` §3.4): `socket`/`connect`/`close`
+// all really return a 32-bit C `int`.
 extern fn socket[&f](ffi: &f Ffi("libc"), domain: int, kind: int, proto: int)
-    -> [ffi("libc")] int;
+    -> [ffi("libc")] c_int;
 
 extern fn connect[&f, &a](ffi: &f Ffi("libc"), fd: int, addr: &a [byte])
-    -> [ffi("libc")] int;
+    -> [ffi("libc")] c_int;
 
+// `read`/`write` stay plain `int`: their real return is `ssize_t`,
+// genuinely 64 bits here.
 extern fn read[&f, &b](ffi: &f Ffi("libc"), fd: int, buf: &!b [byte])
     -> [ffi("libc")] int;
 
 extern fn write[&f, &b](ffi: &f Ffi("libc"), fd: int, buf: &b [byte])
     -> [ffi("libc")] int;
 
-extern fn close[&f](ffi: &f Ffi("libc"), fd: int) -> [ffi("libc")] int;
+extern fn close[&f](ffi: &f Ffi("libc"), fd: int) -> [ffi("libc")] c_int;
 
 // ---------------------------------------------------------------------
 // The command line

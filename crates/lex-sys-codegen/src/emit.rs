@@ -164,8 +164,16 @@ impl<'a> Emitter<'a> {
                     sig.params.push(AbiParam::new(leaf));
                 }
             }
-            for leaf in leaves(&ext.ret, self.program, pointer) {
-                sig.returns.push(AbiParam::new(leaf));
+            // `docs/reach.md` §3.4: `c_int` crosses at the real C ABI
+            // width (32 bits), not `leaves`'s own I64 -- the call site
+            // (`body/expr.rs`'s `Callee::Extern` arm) sign-extends the
+            // result back to this backend's own `int` after the call.
+            if ext.narrow_return && matches!(ext.ret, Type::Int) {
+                sig.returns.push(AbiParam::new(types::I32));
+            } else {
+                for leaf in leaves(&ext.ret, self.program, pointer) {
+                    sig.returns.push(AbiParam::new(leaf));
+                }
             }
             let id = self
                 .module

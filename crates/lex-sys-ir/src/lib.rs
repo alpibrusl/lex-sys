@@ -148,12 +148,32 @@ fn lower_inner(ast: &Ast, rest: &mut Vec<Diagnostic>) -> Result<Program, Diagnos
                 )
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let ret = resolve_type(
-            Resolving { ast, defs: &defs, unifier: &unifier, module, edition },
-            Params::unbounded(&[]),
-            &region_scope,
-            decl.ret,
-        )?;
+        // `c_int` (`docs/reach.md` §3.4): a foreign *return* is not the
+        // same crossing problem a parameter is. A parameter this program
+        // writes into a register wider than C reads costs nothing — C
+        // reads the low bits it declared and the rest go unread. A
+        // *return* is the callee's to fill, and a real C `int` is 32
+        // bits: reading the full 64-bit register trusts bits the ABI
+        // never promised were sign-extended, which is undefined rather
+        // than merely wrong. `c_int` names that real width explicitly, in
+        // return position only, and is not a general type -- it resolves
+        // to plain `int` for everything downstream except how this one
+        // declaration's call crosses.
+        let narrow_return = matches!(
+            ast.ty(decl.ret),
+            TypeExpr::Name { name, qualifier: None, args }
+                if args.is_empty() && ast.name_of(*name) == "c_int"
+        );
+        let ret = if narrow_return {
+            Type::Int
+        } else {
+            resolve_type(
+                Resolving { ast, defs: &defs, unifier: &unifier, module, edition },
+                Params::unbounded(&[]),
+                &region_scope,
+                decl.ret,
+            )?
+        };
         let declared =
             Effects::new(decl.effects.iter().map(|e| Label {
                 name: ast.name_of(e.name).to_owned(),
@@ -269,6 +289,7 @@ fn lower_inner(ast: &Ast, rest: &mut Vec<Diagnostic>) -> Result<Program, Diagnos
             params,
             effects: declared,
             ret,
+            narrow_return,
         });
     }
 
