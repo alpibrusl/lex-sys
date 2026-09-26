@@ -14,11 +14,15 @@ one, which is the part of the pipeline M0 exists to prove. Rust also gives the
 bootstrap compiler the same build and test story as `lex-os`, so nobody has to
 learn a second one.
 
-This is a bootstrap decision, not a permanent one. Self-hosting remains *a
-spike before it is a plan* (#1): the cheap experiment is porting the `lex-ast` /
-`lex-vcs` canonical forms and checking byte-identical `OpId`/`SigId`/`StageId`
-over the existing op-log corpus. Nothing in this compiler's design assumes it
-stays in Rust.
+This is a bootstrap decision, not a permanent one. Self-hosting was *a spike
+before it is a plan* (#1), and the spike has run: [`self-hosting.md`](self-hosting.md).
+The cheap experiment — porting `lex-ast`'s canonical forms and checking
+byte-identical `SigId`/`StageId` — came back clean (168/168, on the real corpus
+this sandbox has), and nothing structural blocks it, this Cranelift dependency
+included (`self-hosting.md` §4 names the way around it). The decision for now
+is **not yet**, for scale and lack of an asker, not for any reason this
+compiler's design would need to change. Nothing in this compiler's design
+assumes it stays in Rust.
 
 ## File extension: `.ls`
 

@@ -251,6 +251,14 @@ outright.
 The first real target is **`lex-os`** — production systems work, no
 rewrite risk.
 
-Self-hosting the lex-lang toolchain stays a *spike before a plan*: port
-`lex-ast`/`lex-vcs` canonical forms and verify byte-identical
-`OpId`/`SigId`/`StageId` over the existing ~136k-op corpus, then decide.
+Self-hosting the lex-lang toolchain was a *spike before a plan*, and
+the spike has run: [`self-hosting.md`](self-hosting.md). Not against
+the "~136k-op corpus" this line used to name — no such corpus is
+checked into any repository this project can reach — against the real
+`.lex` corpus that does exist. The canonicalization algorithm ports
+byte-for-byte (168/168 real `Stage`s), and nothing structural blocks
+it (recursion, heap-allocated recursive data, and a named way around
+the Cranelift dependency all check out). The decision is **not yet**:
+29,368 real lines of compiler and no asker for a lex-sys-hosted
+compiler today. Revisit `self-hosting.md` when one exists, rather than
+re-running this spike.
