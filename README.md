@@ -616,7 +616,9 @@ crates/lex-sys-syntax    lexer, canonical-shaped AST, parser
 crates/lex-sys-types     the type vocabulary: representation and unification
 crates/lex-sys-ir        resolution, type checking, monomorphisation; the IR
 crates/lex-sys-codegen   Cranelift lowering, native object emission
+crates/lex-sys-codegen-llvm  the LLVM backend, `--backend llvm`
 crates/lex-sys-id        canonical encoding and content hashes
+crates/lex-sys-vcs       content-addressed operation log (docs/vcs.md)
 crates/lex-sys           the CLI
 std/                     the standard library, as Lex source
 examples/                programs meant to be read

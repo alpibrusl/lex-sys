@@ -7,6 +7,7 @@ members = [
     "crates/lex-sys-ir",
     "crates/lex-sys-codegen",
     "crates/lex-sys-codegen-llvm",
+    "crates/lex-sys-vcs",
     "crates/lex-sys",
 ]
 
@@ -24,3 +25,4 @@ lex-sys-id = { path = "crates/lex-sys-id" }
 lex-sys-ir = { path = "crates/lex-sys-ir" }
 lex-sys-codegen = { path = "crates/lex-sys-codegen" }
 lex-sys-codegen-llvm = { path = "crates/lex-sys-codegen-llvm" }
+lex-sys-vcs = { path = "crates/lex-sys-vcs" }
