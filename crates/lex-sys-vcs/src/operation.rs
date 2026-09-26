@@ -19,7 +19,7 @@
 
 use std::collections::BTreeSet;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Signature identity of a function — what a caller depends on. One of
 /// `lex-sys-id`'s two hashes per function (`FunctionId::sig`), read as its
@@ -59,7 +59,7 @@ pub type ModuleRef = String;
 /// case yet either (`lex-vcs`'s `to_sig_id`, #992): nothing in this
 /// repository has asked for one, and `AGENTS.md` §7's own rule is to build
 /// what a program asks for.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum OperationKind {
     /// A new function, published for the first time.
@@ -72,7 +72,7 @@ pub enum OperationKind {
         /// program, so those ops serialize identically with or without this
         /// field ever existing — the same additive trick `lex-vcs` uses for
         /// its own optional fields.
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         in_file: Option<ModuleRef>,
     },
     /// A function removed. `last_stage_id` is the head before the removal,
@@ -92,14 +92,14 @@ pub enum OperationKind {
 /// field is not `Option`-and-added-later the way `lex-vcs`'s `intent_id`
 /// was: there is exactly one plateau this initiative is starting from
 /// (`hash-stability.md`), and it is edition 1 today.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Operation {
     #[serde(flatten)]
     pub kind: OperationKind,
     /// Operations this one assumes. Sorted and deduplicated before hashing
     /// (`canonical::op_id`), regardless of the order passed to
     /// [`Operation::new`].
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub parents: Vec<OpId>,
     pub edition: u32,
 }
@@ -119,7 +119,7 @@ impl Operation {
 }
 
 /// An operation paired with its computed [`OpId`] — what a store persists.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OperationRecord {
     pub op_id: OpId,
     pub operation: Operation,

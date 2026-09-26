@@ -395,6 +395,7 @@ version = "0.0.0"
 dependencies = [
  "blake3",
  "lex-sys-id",
+ "lex-sys-ir",
  "lex-sys-syntax",
  "serde",
  "serde_json",
