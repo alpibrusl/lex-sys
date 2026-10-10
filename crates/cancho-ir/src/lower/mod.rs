@@ -14,6 +14,7 @@ mod net;
 mod process;
 mod signals;
 mod stmt;
+mod tty;
 
 use narrow::{check_narrowing, narrow_into_several, narrow_many_refusal};
 

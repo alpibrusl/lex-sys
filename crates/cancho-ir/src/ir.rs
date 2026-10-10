@@ -118,10 +118,18 @@ pub const PRELUDE_UDP: usize = 46;
 pub const PRELUDE_UDP_OPENED: usize = 47;
 pub const PRELUDE_DATAGRAM: usize = 48;
 
+/// `docs/tty.md` §3, edition 8: a serial port (`res`, one descriptor leaf,
+/// like `Udp`), what opening one answers, and the ninth `Split` field that
+/// carries the capability. Appended last so no earlier index moves.
+pub const PRELUDE_TTY: usize = 49;
+pub const PRELUDE_SPLIT_TTY: usize = 50;
+pub const PRELUDE_PORT: usize = 51;
+pub const PRELUDE_TTY_OPENED: usize = 52;
+
 /// How many types the prelude declares. Written once, because a builtin's
 /// signature indexes this table and a stale slice is a panic rather than a
 /// diagnostic.
-pub const PRELUDE_COUNT: usize = 49;
+pub const PRELUDE_COUNT: usize = 53;
 
 /// Which path operation an [`Expr::PathOp`] is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -514,6 +522,16 @@ pub enum Expr {
     ExecSpawn {
         prefix: String,
         in_dir: bool,
+        args: Vec<Expr>,
+    },
+    /// `tty_open(tty, path)` (`docs/tty.md` §3, edition 8). Its own node
+    /// for the reason [`Expr::OpenFile`] is one: the prefix the capability
+    /// was narrowed to travels with it, because the backend checks the
+    /// path against it and the type it came from is gone by then. `args`
+    /// is the capability (zero-sized) and the path. What comes back is a
+    /// `TtyOpened`, tagged.
+    TtyOpen {
+        prefix: String,
         args: Vec<Expr>,
     },
     /// `fs_rename(fs, from, to)` and `fs_remove(fs, path)`

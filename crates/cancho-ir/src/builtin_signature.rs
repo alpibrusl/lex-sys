@@ -729,6 +729,92 @@ impl Builtin {
             // `docs/udp.md` §3. `udp_connect` is checked at the call site, like
             // `tcp_connect`: the bound is in the capability's type.
             Builtin::UdpConnect | Builtin::UdpBind => (Vec::new(), Type::Unit),
+            // `docs/tty.md` §3, edition 8: the capability, borrowed and
+            // shared, and the path; what opens answers is `TtyOpened`.
+            Builtin::TtyOpen => (
+                vec![
+                    Type::Ref {
+                        unique: false,
+                        region: Region::Param(0),
+                        inner: Box::new(named(PRELUDE_TTY)),
+                    },
+                    Type::Ref {
+                        unique: false,
+                        region: Region::Param(1),
+                        inner: Box::new(Type::Slice(Box::new(Type::Byte))),
+                    },
+                ],
+                named(PRELUDE_TTY_OPENED),
+            ),
+            // The port handle, borrowed unique for configure (it is
+            // mutated), plain for the rest, as `Conn`'s verbs split.
+            Builtin::TtyConfigure => (
+                vec![
+                    Type::Ref {
+                        unique: true,
+                        region: Region::Param(0),
+                        inner: Box::new(named(PRELUDE_PORT)),
+                    },
+                    Type::Int,
+                ],
+                Type::Int,
+            ),
+            Builtin::TtyRead => (
+                vec![
+                    Type::Ref {
+                        unique: true,
+                        region: Region::Param(0),
+                        inner: Box::new(named(PRELUDE_PORT)),
+                    },
+                    Type::Ref {
+                        unique: true,
+                        region: Region::Param(1),
+                        inner: Box::new(Type::Slice(Box::new(Type::Byte))),
+                    },
+                ],
+                Type::Int,
+            ),
+            Builtin::TtyWrite => (
+                vec![
+                    Type::Ref {
+                        unique: false,
+                        region: Region::Param(0),
+                        inner: Box::new(named(PRELUDE_PORT)),
+                    },
+                    Type::Ref {
+                        unique: false,
+                        region: Region::Param(1),
+                        inner: Box::new(Type::Slice(Box::new(Type::Byte))),
+                    },
+                ],
+                Type::Int,
+            ),
+            Builtin::TtyFlushInput => (
+                vec![Type::Ref {
+                    unique: true,
+                    region: Region::Param(0),
+                    inner: Box::new(named(PRELUDE_PORT)),
+                }],
+                Type::Int,
+            ),
+            Builtin::TtyClose => (vec![named(PRELUDE_PORT)], Type::Int),
+            Builtin::PollerAddTty => (
+                vec![
+                    Type::Ref {
+                        unique: true,
+                        region: Region::Param(0),
+                        inner: Box::new(named(PRELUDE_POLLER)),
+                    },
+                    Type::Ref {
+                        unique: false,
+                        region: Region::Param(1),
+                        inner: Box::new(named(PRELUDE_PORT)),
+                    },
+                    Type::Int,
+                    Type::Int,
+                ],
+                Type::Int,
+            ),
             // A receive that also writes the sender's ticket into the first cell of an `int`
             // slice (`docs/udp.md` §4).
             Builtin::UdpRecvFrom => (

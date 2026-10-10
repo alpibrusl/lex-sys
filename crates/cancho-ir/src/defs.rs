@@ -290,6 +290,8 @@ pub(crate) fn is_capability(def: DefId) -> bool {
             | PRELUDE_SIGNALS
             | PRELUDE_SIGNAL_WATCH
             | PRELUDE_NET
+            | PRELUDE_TTY
+            | PRELUDE_SPLIT_TTY
             // §8.2 again, and more sharply: a program that could write
             // `File { }` would be conjuring a descriptor, which is worse
             // than conjuring authority because the number would be someone
@@ -341,6 +343,7 @@ pub(crate) fn closed_only(def: DefId) -> bool {
             | PRELUDE_LISTENER
             | PRELUDE_CONN
             | PRELUDE_UDP
+            | PRELUDE_TTY
             | PRELUDE_POLLER
             | PRELUDE_SIGNAL_WATCH
             // `docs/processes.md` §4.7: a child is ended by `child_wait`, a
@@ -464,6 +467,16 @@ pub(crate) fn discharged_by(defs: &[TypeDef], ty: &Type) -> Effects {
         // `docs/udp.md` §3: the peer was spent at `udp_connect`, so the
         // handle's labels carry no argument, as a `Conn`'s do not.
         PRELUDE_UDP => Effects::plain(["udp_recv", "udp_send"]),
+        // `docs/tty.md` §4: the row says the truth, argument-carrying and
+        // narrowable exactly as `fs_read` is — a program reports
+        // `tty_read("/dev")` for the prefix its capability grants.
+        PRELUDE_TTY => match args.first() {
+            Some(Type::Lit(prefix)) => Effects::new([
+                Label { name: "tty_read".to_owned(), argument: Some(prefix.clone()) },
+                Label { name: "tty_write".to_owned(), argument: Some(prefix.clone()) },
+            ]),
+            _ => Effects::plain(["tty_read", "tty_write"]),
+        },
         // `docs/native-sockets.md` §4: observing handles already held, so
         // one plain label with nothing to narrow.
         PRELUDE_POLLER => Effects::plain(["poll"]),
@@ -682,6 +695,15 @@ pub(crate) fn prelude_types(ast: &Ast, unifier: &mut Unifier) -> Vec<TypeDef> {
     let udp = symbol("Udp");
     let udp_opened = symbol("UdpOpened");
     let datagram = symbol("Datagram");
+    // `docs/tty.md` §3, edition 8: the serial-port capability, what opening
+    // one answers, and the `Split` that carries it as its ninth field.
+    // The handle is `Port` — one name cannot be two types, and the
+    // capability's name is `Tty` (`Udp`'s precedent, not `Net`'s).
+    let tty = symbol("Tty");
+    let tty_field = symbol("tty");
+    let split_tty = symbol("Split");
+    let port = symbol("Port");
+    let tty_opened = symbol("TtyOpened");
     let truncated_arm = symbol("Truncated");
     let null_arm = symbol("Null");
     let pipe_arm = symbol("Pipe");
@@ -775,6 +797,10 @@ pub(crate) fn prelude_types(ast: &Ast, unifier: &mut Unifier) -> Vec<TypeDef> {
     let udp_def = unifier.declare("Udp");
     let udp_opened_def = unifier.declare("UdpOpened");
     let datagram_def = unifier.declare("Datagram");
+    let tty_def = unifier.declare("Tty");
+    let split_tty_def = unifier.declare("Split");
+    let port_def = unifier.declare("Port");
+    let tty_opened_def = unifier.declare("TtyOpened");
 
     vec![
         TypeDef {
@@ -1515,6 +1541,60 @@ pub(crate) fn prelude_types(ast: &Ast, unifier: &mut Unifier) -> Vec<TypeDef> {
                 (again_arm, Vec::new()),
                 (failed_arm, vec![Type::Int]),
             ],
+            span,
+        ),
+        // `docs/tty.md` §3, edition 8: the serial-port capability, indexed
+        // by a device-path prefix as `Fs` is — `Tty("/dev")` narrows to
+        // `Tty("/dev/serial")` by the same §7.4 prefix extension and never
+        // back, and an empty bound is refused as narrowing to the root.
+        TypeDef {
+            name: tty,
+            def: tty_def,
+            module: PRELUDE_MODULE,
+            public: true,
+            generics: vec![prefix],
+            bounds: Vec::new(),
+            declared_mode: Some(Mode::Res),
+            kind: DefKind::Struct(Vec::new()),
+            span,
+            since: 8,
+        },
+        // Edition 8's `Split`: edition 7's nine fields and `tty`, the
+        // ninth field (`docs/tty.md` §6).
+        TypeDef {
+            name: split_tty,
+            def: split_tty_def,
+            module: PRELUDE_MODULE,
+            public: true,
+            generics: Vec::new(),
+            bounds: Vec::new(),
+            declared_mode: None,
+            kind: DefKind::Struct(vec![
+                (io_field, Type::Named(io_def, Vec::new())),
+                (ffi_field, Type::Named(ffi_def, vec![Type::Lit(FFI_ROOT.to_owned())])),
+                (fs_field, Type::Named(fs_def, vec![Type::Lit(FFI_ROOT.to_owned())])),
+                (heap_field, Type::Named(heap_def, Vec::new())),
+                (args_field, Type::Named(args_def, Vec::new())),
+                (net_field, Type::Named(net_def, vec![Type::Lit(FFI_ROOT.to_owned())])),
+                (clock_field, Type::Named(clock_def, Vec::new())),
+                (signals_field, Type::Named(signals_def, vec![Type::Lit(FFI_ROOT.to_owned())])),
+                (exec_field, Type::Named(exec_def, vec![Type::Lit(FFI_ROOT.to_owned())])),
+                (tty_field, Type::Named(tty_def, vec![Type::Lit(FFI_ROOT.to_owned())])),
+            ]),
+            span,
+            since: 8,
+        },
+        // The port itself (`docs/tty.md` §3's handle, named `Port` the way
+        // `Udp` names a datagram socket rather than reusing the capability's
+        // name — one name cannot be two types): `res`, one descriptor leaf,
+        // no fields a program can name, closed only by `tty_close`.
+        resource(port, port_def, Vec::new(), span, 8),
+        // What `tty_open` answers: `UdpOpened`'s shape. `Failed(errno)` is
+        // the program's question, not the compiler's.
+        prelude_enum(
+            tty_opened,
+            tty_opened_def,
+            vec![(ok_arm, vec![Type::Named(port_def, Vec::new())]), (failed_arm, vec![Type::Int])],
             span,
         ),
     ]

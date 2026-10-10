@@ -123,6 +123,7 @@ pub(crate) fn settle_expr(expr: &mut Expr, unifier: &Unifier) {
         Expr::Bytes(_) => {}
         Expr::FileOp { args, .. }
         | Expr::OpenFile { args, .. }
+        | Expr::TtyOpen { args, .. }
         | Expr::ExecSpawn { args, .. }
         | Expr::PathOp { args, .. }
         | Expr::Connect { args, .. }
