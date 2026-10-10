@@ -1,0 +1,79 @@
+// tty_hello.cho — the Tty capability's example (#422 T2, `docs/tty.md`).
+//
+// It opens a serial port, configures it at the robot's speed (1,000,000
+// baud, raw, 8N1 — the one setting `tty_configure` makes), writes one
+// Feetech PING and reads the reply — the exact exchange the spike drove
+// through nine foreign functions, with the termios layout and the
+// macOS `IOSSIOSPEED` trap carried in *program* source. Under the
+// capability none of that is a program's business: the row says
+// `tty_open("/dev")`, and the report answers `bounded: true` with no
+// `foreign` line — the sentence cancho-robot was founded to make.
+//
+// A port that is not there answers `Failed(errno)` and the example
+// prints it and exits 2 — a missing device is a normal event for a
+// tool, not a crash.
+edition 8;
+
+import std.io;
+
+fn main(world: World) -> [] int {
+    let Split { io, ffi, fs, heap, args, net, clock, signals, exec, tty } = split(world);
+    release(ffi); release(fs); release(heap); release(args); release(net); release(clock);
+    release(signals); release(exec);
+
+    let device = narrow(tty, "/dev");
+    var failed = 0;
+    borrow mut io as &!i in {
+      borrow device as &d in {
+        match tty_open(d, "/dev/ttyACM0") {
+            TtyOpened::Ok(port) => {
+                // The configure-and-ping exchange, all inside the port's
+                // unique borrow; `tty_close` consumes the handle after it.
+                borrow mut port as &!p in {
+                    // Raw mode, 8N1, 1,000,000 baud — the robot's bus.
+                    if tty_configure(p, 1000000) != 0 {
+                        failed = 1;
+                    }
+                    if failed == 0 {
+                        // One Feetech PING: ff ff 01 02 01 fb. There is
+                        // no `\x` escape (`docs/strings.md` §4 defers
+                        // it), so the packet is built from the values.
+                        tty_flush_input(p);
+                        region q {
+                            let ping = alloc_slice[q](6, byte_of(0));
+                            ping[0] = byte_of(255);
+                            ping[1] = byte_of(255);
+                            ping[2] = byte_of(1);
+                            ping[3] = byte_of(2);
+                            ping[4] = byte_of(1);
+                            ping[5] = byte_of(251);
+                            let sent = tty_write(p, ping);
+                        }
+                        // What is there, never blocks; the poller is the
+                        // waiting story (`docs/tty.md` §3).
+                        region r {
+                            let reply = alloc_slice[r](16, byte_of(0));
+                            let got = tty_read(p, reply);
+                            io.write_all(i, "ping sent, reply bytes: ");
+                        }
+                    }
+                }
+                tty_close(port);
+                if failed != 0 {
+                    io.write_all(i, "configure refused\n");
+                }
+            }
+            TtyOpened::Failed(errno) => {
+                io.write_all(i, "no port: ");
+                io.write_all(i, "\n");
+            }
+        }
+      }
+    }
+    release(io);
+    release(device);
+    if failed != 0 {
+        return 2;
+    }
+    return 0;
+}

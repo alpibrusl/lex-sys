@@ -198,6 +198,8 @@ fn leaves_into(ty: &Type, program: &Program, out: &mut Vec<LKind>) -> Result<(),
                     | cancho_ir::PRELUDE_LISTENER
                     | cancho_ir::PRELUDE_CONN
                     | cancho_ir::PRELUDE_UDP
+                    // `docs/tty.md` §3, edition 8: `Udp`'s shape.
+                    | cancho_ir::PRELUDE_PORT
                     | cancho_ir::PRELUDE_POLLER
                     | cancho_ir::PRELUDE_SIGNAL_WATCH
                     // `docs/processes.md` §3.1: a pid, and two descriptors.
@@ -438,6 +440,13 @@ pub(crate) fn emit_module(
     // and `connect` itself alongside the `socket` already declared above.
     declare_libc_unless_own(&mut text, "getaddrinfo", "i32 @getaddrinfo(ptr, ptr, ptr, ptr)");
     declare_libc_unless_own(&mut text, "freeaddrinfo", "void @freeaddrinfo(ptr)");
+    // `docs/tty.md` §3, edition 8: the serial-port configuration calls.
+    // `ioctl` is variadic; the backend emits its call shaped the way the
+    // callee reads it (`native-sockets.md` §3's `fcntl` precedent), so
+    // the declaration is the real variadic one.
+    declare_libc_unless_own(&mut text, "tcsetattr", "i32 @tcsetattr(i32, i32, ptr)");
+    declare_libc_unless_own(&mut text, "tcflush", "i32 @tcflush(i32, i32)");
+    declare_libc_unless_own(&mut text, "ioctl", "i32 @ioctl(i32, i32, ...)");
     declare_libc_unless_own(&mut text, "connect", "i32 @connect(i32, ptr, i32)");
     // The socket handles (`docs/native-sockets.md` §3). `fcntl` is declared
     // variadic, which is what it is: on Apple arm64 a variadic argument is

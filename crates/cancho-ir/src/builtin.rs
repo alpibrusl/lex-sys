@@ -1439,7 +1439,14 @@ impl Builtin {
             // capability's own, spent at `tty_open` like `udp_connect`
             // spends the `Net`'s, so the port's own verbs carry no
             // argument -- a `Conn`'s shape.
-            Builtin::TtyOpen => Effects::plain(["tty_open"]),
+            // `docs/tty.md` §4: `tty_open` is lowered as `Expr::TtyOpen`,
+            // whose own walk records the label with the capability's
+            // prefix (`tcp_listen`'s shape) — the path is a run-time
+            // value, the bound is in the capability's type.
+            Builtin::TtyOpen => Effects::pure(),
+            // The port's own verbs are path-free, the prefix spent at
+            // `tty_open` (`udp_recv`'s shape): the *handle* carries no
+            // argument, and it is reached only through the capability.
             Builtin::TtyRead => Effects::plain(["tty_read"]),
             Builtin::TtyWrite => Effects::plain(["tty_write"]),
             // Configuring, flushing and closing touch no new domain:

@@ -325,6 +325,9 @@ pub(crate) fn released_only(def: DefId) -> bool {
             | PRELUDE_CLOCK
             | PRELUDE_SIGNALS
             | PRELUDE_EXEC
+            // `docs/tty.md` §4: the serial-port capability, released the
+            // way every root capability is.
+            | PRELUDE_TTY
     )
 }
 
@@ -412,13 +415,18 @@ pub const WORLD_PLAIN_LABELS: &[&str] = &[
     "child_signal",
     "pipe_read",
     "pipe_write",
+    // `docs/tty.md` §4: path-free, the prefix spent at `tty_open`
+    // (`udp_recv`'s shape) — a `Port` is reached only through the
+    // capability that paid for it.
+    "tty_read",
+    "tty_write",
 ];
 
 /// The labels the root `World` discharges the *unnarrowed* way (`FFI_ROOT`): each
 /// is a label that names what it covers (a path prefix, a library, a host, a
 /// signal set, a program).
 pub const WORLD_ROOT_LABELS: &[&str] =
-    &["ffi", "fs_read", "fs_write", "net_out", "net_in", "signals", "exec"];
+    &["ffi", "fs_read", "fs_write", "net_out", "net_in", "signals", "exec", "tty_open"];
 
 /// What owning a value of this type authorises outright (§8.2).
 ///
@@ -472,10 +480,11 @@ pub(crate) fn discharged_by(defs: &[TypeDef], ty: &Type) -> Effects {
         // `tty_read("/dev")` for the prefix its capability grants.
         PRELUDE_TTY => match args.first() {
             Some(Type::Lit(prefix)) => Effects::new([
+                Label { name: "tty_open".to_owned(), argument: Some(prefix.clone()) },
                 Label { name: "tty_read".to_owned(), argument: Some(prefix.clone()) },
                 Label { name: "tty_write".to_owned(), argument: Some(prefix.clone()) },
             ]),
-            _ => Effects::plain(["tty_read", "tty_write"]),
+            _ => Effects::plain(["tty_open", "tty_read", "tty_write"]),
         },
         // `docs/native-sockets.md` §4: observing handles already held, so
         // one plain label with nothing to narrow.

@@ -442,11 +442,13 @@ impl<'a> FnLowering<'a> {
             && which != PRELUDE_NET
             && which != PRELUDE_SIGNALS
             && which != PRELUDE_EXEC
+            // `docs/tty.md` §4: a device-path prefix, `Fs`'s shape.
+            && which != PRELUDE_TTY
         {
             return Err(Diagnostic::new(
                 Rule::CapabilityNotNarrowable,
                 format!(
-                    "`{}` carries no value to narrow; `Ffi`, `Fs`, `Net`, `Signals` and `Exec` are the capabilities that name one",
+                    "`{}` carries no value to narrow; `Ffi`, `Fs`, `Net`, `Signals`, `Exec` and `Tty` are the capabilities that name one",
                     self.unifier.display(&resolved)
                 ),
                 span,

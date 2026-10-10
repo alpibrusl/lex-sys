@@ -322,69 +322,69 @@ static prelude_res_bits: [int] {
 }
 
 fn prelude_label_chars() -> [] &static [byte] {
-    return "args child_signal clock conn_accept conn_read conn_write dir_read dir_write err_write exec= ffi= file_read file_write fs_read= fs_write= heap io_read io_write net_in= net_out= pipe_read pipe_write poll signals= signals_read udp_recv udp_senderr_write io_read io_writeffi*dir_read dir_write file_read file_write fs_read* fs_write*heapargsfile_read file_writeconn_accept conn_read conn_write net_in* net_out* poll udp_recv udp_sendconn_acceptconn_read conn_writepollclocksignals* signals_readsignals_readdir_read dir_writedir_readchild_signal exec*child_signalpipe_read pipe_writeudp_recv udp_sendtty_read* tty_write*";
+    return "args child_signal clock conn_accept conn_read conn_write dir_read dir_write err_write exec= ffi= file_read file_write fs_read= fs_write= heap io_read io_write net_in= net_out= pipe_read pipe_write poll signals= signals_read tty_open= tty_read tty_write udp_recv udp_senderr_write io_read io_writeffi*dir_read dir_write file_read file_write fs_read* fs_write*heapargsfile_read file_writeconn_accept conn_read conn_write net_in* net_out* poll udp_recv udp_sendconn_acceptconn_read conn_writepollclocksignals* signals_readsignals_readdir_read dir_writedir_readchild_signal exec*child_signalpipe_read pipe_writeudp_recv udp_sendtty_open* tty_read* tty_write*";
 }
 
 static prelude_label_starts: [int] {
     let t = alloc_slice[static](53, 0);
-    t[1] = 241;
-    t[2] = 267;
-    t[3] = 271;
-    t[4] = 329;
-    t[5] = 333;
-    t[6] = 333;
-    t[7] = 337;
-    t[8] = 337;
-    t[9] = 357;
-    t[10] = 357;
-    t[11] = 357;
-    t[12] = 429;
-    t[13] = 429;
-    t[14] = 429;
-    t[15] = 440;
-    t[16] = 460;
-    t[17] = 460;
-    t[18] = 460;
-    t[19] = 460;
-    t[20] = 460;
-    t[21] = 460;
-    t[22] = 464;
-    t[23] = 464;
-    t[24] = 469;
-    t[25] = 469;
-    t[26] = 469;
-    t[27] = 469;
-    t[28] = 490;
-    t[29] = 490;
-    t[30] = 502;
-    t[31] = 502;
-    t[32] = 520;
-    t[33] = 520;
-    t[34] = 528;
-    t[35] = 528;
-    t[36] = 528;
-    t[37] = 528;
-    t[38] = 546;
-    t[39] = 546;
-    t[40] = 558;
-    t[41] = 578;
-    t[42] = 578;
-    t[43] = 578;
-    t[44] = 578;
-    t[45] = 578;
-    t[46] = 578;
-    t[47] = 595;
-    t[48] = 595;
-    t[49] = 595;
-    t[50] = 615;
-    t[51] = 615;
-    t[52] = 615;
+    t[1] = 270;
+    t[2] = 296;
+    t[3] = 300;
+    t[4] = 358;
+    t[5] = 362;
+    t[6] = 362;
+    t[7] = 366;
+    t[8] = 366;
+    t[9] = 386;
+    t[10] = 386;
+    t[11] = 386;
+    t[12] = 458;
+    t[13] = 458;
+    t[14] = 458;
+    t[15] = 469;
+    t[16] = 489;
+    t[17] = 489;
+    t[18] = 489;
+    t[19] = 489;
+    t[20] = 489;
+    t[21] = 489;
+    t[22] = 493;
+    t[23] = 493;
+    t[24] = 498;
+    t[25] = 498;
+    t[26] = 498;
+    t[27] = 498;
+    t[28] = 519;
+    t[29] = 519;
+    t[30] = 531;
+    t[31] = 531;
+    t[32] = 549;
+    t[33] = 549;
+    t[34] = 557;
+    t[35] = 557;
+    t[36] = 557;
+    t[37] = 557;
+    t[38] = 575;
+    t[39] = 575;
+    t[40] = 587;
+    t[41] = 607;
+    t[42] = 607;
+    t[43] = 607;
+    t[44] = 607;
+    t[45] = 607;
+    t[46] = 607;
+    t[47] = 624;
+    t[48] = 624;
+    t[49] = 624;
+    t[50] = 654;
+    t[51] = 654;
+    t[52] = 654;
     return t;
 }
 
 static prelude_label_lens: [int] {
     let t = alloc_slice[static](53, 0);
-    t[0] = 241;
+    t[0] = 270;
     t[1] = 26;
     t[2] = 4;
     t[3] = 58;
@@ -404,7 +404,7 @@ static prelude_label_lens: [int] {
     t[39] = 12;
     t[40] = 20;
     t[46] = 17;
-    t[49] = 20;
+    t[49] = 30;
     return t;
 }
 

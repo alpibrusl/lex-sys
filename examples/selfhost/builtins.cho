@@ -1046,7 +1046,7 @@ static builtin_region_counts: [int] {
 }
 
 static builtin_effect_stream: [int] {
-    let t = alloc_slice[static](59, 0);
+    let t = alloc_slice[static](58, 0);
     t[2] = 2;
     t[4] = 4;
     t[5] = 6;
@@ -1081,28 +1081,27 @@ static builtin_effect_stream: [int] {
     t[34] = 16;
     t[35] = 28;
     t[36] = 30;
-    t[37] = 32;
-    t[38] = 16;
-    t[39] = 34;
-    t[40] = 16;
-    t[41] = 36;
+    t[37] = 16;
+    t[38] = 32;
+    t[39] = 16;
+    t[40] = 34;
+    t[41] = 34;
     t[42] = 36;
-    t[43] = 38;
-    t[44] = 38;
-    t[45] = 38;
-    t[46] = 38;
-    t[47] = 38;
-    t[48] = 38;
-    t[49] = 36;
-    t[50] = 36;
-    t[51] = 36;
-    t[52] = 36;
-    t[53] = 36;
+    t[43] = 36;
+    t[44] = 36;
+    t[45] = 36;
+    t[46] = 36;
+    t[47] = 36;
+    t[48] = 34;
+    t[49] = 34;
+    t[50] = 34;
+    t[51] = 34;
+    t[52] = 34;
+    t[53] = 38;
     t[54] = 40;
     t[55] = 42;
-    t[56] = 44;
+    t[56] = 16;
     t[57] = 16;
-    t[58] = 16;
     return t;
 }
 
@@ -1210,48 +1209,48 @@ static builtin_effect_starts: [int] {
     t[100] = 34;
     t[101] = 34;
     t[102] = 35;
-    t[103] = 36;
-    t[104] = 36;
-    t[105] = 37;
-    t[106] = 38;
-    t[107] = 38;
-    t[108] = 38;
-    t[109] = 39;
-    t[110] = 39;
-    t[111] = 40;
-    t[112] = 41;
-    t[113] = 41;
-    t[114] = 41;
-    t[115] = 42;
-    t[116] = 43;
-    t[117] = 43;
-    t[118] = 44;
-    t[119] = 45;
-    t[120] = 46;
-    t[121] = 47;
-    t[122] = 48;
-    t[123] = 49;
-    t[124] = 50;
-    t[125] = 51;
-    t[126] = 51;
-    t[127] = 52;
-    t[128] = 53;
-    t[129] = 54;
-    t[130] = 54;
-    t[131] = 54;
-    t[132] = 54;
-    t[133] = 54;
-    t[134] = 55;
-    t[135] = 56;
-    t[136] = 57;
-    t[137] = 57;
-    t[138] = 57;
-    t[139] = 57;
-    t[140] = 58;
-    t[141] = 59;
-    t[142] = 59;
-    t[143] = 59;
-    t[144] = 59;
+    t[103] = 35;
+    t[104] = 35;
+    t[105] = 36;
+    t[106] = 37;
+    t[107] = 37;
+    t[108] = 37;
+    t[109] = 38;
+    t[110] = 38;
+    t[111] = 39;
+    t[112] = 40;
+    t[113] = 40;
+    t[114] = 40;
+    t[115] = 41;
+    t[116] = 42;
+    t[117] = 42;
+    t[118] = 43;
+    t[119] = 44;
+    t[120] = 45;
+    t[121] = 46;
+    t[122] = 47;
+    t[123] = 48;
+    t[124] = 49;
+    t[125] = 50;
+    t[126] = 50;
+    t[127] = 51;
+    t[128] = 52;
+    t[129] = 53;
+    t[130] = 53;
+    t[131] = 53;
+    t[132] = 53;
+    t[133] = 53;
+    t[134] = 54;
+    t[135] = 55;
+    t[136] = 56;
+    t[137] = 56;
+    t[138] = 56;
+    t[139] = 56;
+    t[140] = 57;
+    t[141] = 58;
+    t[142] = 58;
+    t[143] = 58;
+    t[144] = 58;
     return t;
 }
 
@@ -1292,7 +1291,6 @@ static builtin_effect_counts: [int] {
     t[93] = 1;
     t[94] = 1;
     t[101] = 1;
-    t[102] = 1;
     t[104] = 1;
     t[105] = 1;
     t[108] = 1;
@@ -1320,11 +1318,11 @@ static builtin_effect_counts: [int] {
 }
 
 fn effect_chars() -> [] &static [byte] {
-    return "io_writeerr_writeio_readheapfile_readfile_writeargsconn_acceptpollclockconn_readconn_writeudp_recvudp_sendtty_opentty_readtty_writesignals_readdir_readdir_writechild_signalpipe_readpipe_write";
+    return "io_writeerr_writeio_readheapfile_readfile_writeargsconn_acceptpollclockconn_readconn_writeudp_recvudp_sendtty_readtty_writesignals_readdir_readdir_writechild_signalpipe_readpipe_write";
 }
 
 static effect_name_starts: [int] {
-    let t = alloc_slice[static](23, 0);
+    let t = alloc_slice[static](22, 0);
     t[1] = 8;
     t[2] = 17;
     t[3] = 24;
@@ -1340,18 +1338,17 @@ static effect_name_starts: [int] {
     t[13] = 98;
     t[14] = 106;
     t[15] = 114;
-    t[16] = 122;
-    t[17] = 131;
+    t[16] = 123;
+    t[17] = 135;
     t[18] = 143;
-    t[19] = 151;
-    t[20] = 160;
-    t[21] = 172;
-    t[22] = 181;
+    t[19] = 152;
+    t[20] = 164;
+    t[21] = 173;
     return t;
 }
 
 static effect_name_lens: [int] {
-    let t = alloc_slice[static](23, 0);
+    let t = alloc_slice[static](22, 0);
     t[0] = 8;
     t[1] = 9;
     t[2] = 7;
@@ -1367,19 +1364,18 @@ static effect_name_lens: [int] {
     t[12] = 8;
     t[13] = 8;
     t[14] = 8;
-    t[15] = 8;
-    t[16] = 9;
-    t[17] = 12;
-    t[18] = 8;
-    t[19] = 9;
-    t[20] = 12;
-    t[21] = 9;
-    t[22] = 10;
+    t[15] = 9;
+    t[16] = 12;
+    t[17] = 8;
+    t[18] = 9;
+    t[19] = 12;
+    t[20] = 9;
+    t[21] = 10;
     return t;
 }
 
 pub fn effect_count() -> [] int {
-    return 23;
+    return 22;
 }
 
 fn field_chars() -> [] &static [byte] {

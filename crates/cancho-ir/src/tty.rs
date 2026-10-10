@@ -32,7 +32,7 @@ pub const VTIME: usize = if cfg!(target_os = "macos") { 17 } else { 5 };
 /// `O_RDWR | O_NOCTTY | O_NONBLOCK`, the flags `tty_open` uses. The
 /// nonblocking bit is why `tty_read` never blocks and the poller is the
 /// waiting story (`docs/tty.md` §3).
-pub const O_RDWR: i64 = 2;
+pub const TTY_O_RDWR: i64 = 2;
 pub const O_NOCTTY: i64 = if cfg!(target_os = "macos") { 131072 } else { 256 };
 pub const O_NONBLOCK: i64 = if cfg!(target_os = "macos") { 4 } else { 2048 };
 
@@ -69,6 +69,12 @@ pub const B1000000: i64 = 0o010010;
 /// the measured one (`docs/tty.md` §2's note).
 #[cfg(target_os = "macos")]
 pub const IOSSIOSPEED: i64 = 0x8008_5402;
+
+/// The `c_cflag` speed bits `tty_configure` writes on Linux: 1,000,000
+/// is a standard rate there, so `tcsetattr` alone configures it (the
+/// spike's Linux finding 1). On macOS the speed goes in by `IOSSIOSPEED`
+/// after a standard-rate first step, so there are no bits to merge.
+pub const TTY_CFLAG_SPEED: i64 = if cfg!(target_os = "macos") { 0 } else { B1000000 & CBAUD };
 
 /// The standard rates both targets accept in `tcsetattr`'s `c_ospeed`,
 /// which macOS's two-step needs first (`docs/tty.md` §2): raw mode at

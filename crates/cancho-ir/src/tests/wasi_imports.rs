@@ -32,7 +32,10 @@ fn every_label_the_checker_can_produce_is_classified_exactly_once() {
     {
         assert!(all.contains(&label), "`{label}` is in the table and is not a label");
     }
-    assert_eq!(all.len(), 28, "the checker's labels moved; account for the new one: {all:?}");
+    // 28 + the three tty labels (`docs/tty.md` §4: `tty_open`
+    // argument-carrying, `tty_read`/`tty_write` path-free), all refused
+    // on WASI (§9).
+    assert_eq!(all.len(), 31, "the checker's labels moved; account for the new one: {all:?}");
 }
 
 #[test]
