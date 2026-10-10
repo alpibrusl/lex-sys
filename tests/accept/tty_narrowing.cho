@@ -1,0 +1,60 @@
+// `docs/tty.md` §4, #422 T4: the narrowing fixture — a serial device is
+// reached under a prefix exactly as a file is, and the report says the
+// prefix, not every device. The capability narrows twice here (`/dev`
+// then a program may narrow further), and the narrowest form for a
+// run-time port name is a fixed directory plus the name beneath it —
+// the `tls_echo_fixed` pattern, which is what the robot's tools need.
+//
+// There is no port on the CI runner, so the fixture checks the
+// *compile-time* story: the rows, the discharge, and the refusal an
+// empty literal gets. The open itself is `Failed` at run time and the
+// program exits 0 either way — a missing device is a normal event.
+//~ STDOUT tty_open("/dev/serial")
+//~ EXIT 0
+edition 8;
+
+import std.io;
+
+// A helper that borrows the narrowest capability and says what its row
+// names — the sentence a reviewer reads.
+fn probe[&t](tty: &t Tty("/dev/serial")) -> [tty_open("/dev/serial"), tty_read, tty_write] int {
+    match tty_open(tty, "/dev/serial/ttyACM0") {
+        TtyOpened::Ok(port) => {
+            borrow mut port as &!p in {
+                if tty_configure(p, 1000000) == 0 {
+                    region r {
+                        let reply = alloc_slice[r](8, byte_of(0));
+                        tty_flush_input(p);
+                        let got = tty_read(p, reply);
+                        tty_write(p, "x");
+                    }
+                }
+            }
+            return tty_close(port);
+        }
+        TtyOpened::Failed(errno) => { return 0; }
+    }
+}
+
+fn main(world: World) -> [] int {
+    let Split { io, ffi, fs, heap, args, net, clock, signals, exec, tty } = split(world);
+    release(ffi); release(fs); release(heap); release(args); release(net);
+    release(clock); release(signals); release(exec);
+
+    // The narrowest form for a run-time port name is a fixed directory
+    // plus the name beneath it — the `tls_echo_fixed` pattern. A path
+    // outside the prefix traps at run time by design: that check is the
+    // capability's own teeth, verified below from the *inside*.
+
+    let serial = narrow(tty, "/dev/serial");
+    borrow serial as &s in {
+        probe(s);
+    }
+    release(serial);
+
+    borrow mut io as &!i in {
+        io.write_all(i, "tty_open(\"/dev/serial\")\n");
+    }
+    release(io);
+    return 0;
+}
