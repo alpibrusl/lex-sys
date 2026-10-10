@@ -171,6 +171,10 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
                 let (prefix, mode, args) = (prefix.clone(), *mode, args.clone());
                 self.open_file(&prefix, mode, &args)
             }
+            Expr::TtyOpen { prefix, args } => {
+                let (prefix, args) = (prefix.clone(), args.clone());
+                self.tty_open(&prefix, &args)
+            }
             Expr::PathOp { op, prefix, args } => {
                 let (op, prefix, args) = (*op, prefix.clone(), args.clone());
                 self.path_op(op, &prefix, &args)
@@ -777,9 +781,18 @@ impl<'a, 'f> BodyEmitter<'a, 'f> {
                     Callee::Builtin(Builtin::ConnNodelay) => self.nodelay(&args),
                     Callee::Builtin(Builtin::ConnPeer) => self.conn_peer(&args),
                     Callee::Builtin(Builtin::ConnConnectStatus) => self.connect_status(&args),
+                    Callee::Builtin(Builtin::TtyOpen) => {
+                        unreachable!("`tty_open` is lowered as `Expr::TtyOpen`")
+                    }
+                    Callee::Builtin(Builtin::TtyConfigure) => self.tty_configure(&args),
+                    Callee::Builtin(Builtin::TtyRead) => self.tty_read(&args),
+                    Callee::Builtin(Builtin::TtyWrite) => self.tty_write(&args),
+                    Callee::Builtin(Builtin::TtyFlushInput) => self.tty_flush_input(&args),
+                    Callee::Builtin(Builtin::PollerAddTty) => self.poller_ctl(&args, false, false),
                     Callee::Builtin(
                         Builtin::ConnClose
                         | Builtin::UdpClose
+                        | Builtin::TtyClose
                         | Builtin::ListenerClose
                         | Builtin::PollerClose
                         | Builtin::PipeClose

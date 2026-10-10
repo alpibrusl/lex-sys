@@ -39,6 +39,8 @@ pub enum Gap {
     Locks,
     Permissions,
     NoReplaceRename,
+    /// `docs/tty.md` §9: no termios, and no third target is claimed.
+    Termios,
 }
 
 impl Gap {
@@ -52,6 +54,7 @@ impl Gap {
             Gap::Locks => "file locks",
             Gap::Permissions => "permission bits",
             Gap::NoReplaceRename => "no-replace renames",
+            Gap::Termios => "serial ports",
         }
     }
 
@@ -72,6 +75,9 @@ impl Gap {
             Gap::NoReplaceRename => {
                 "WASI's `path_rename` replaces an existing destination and has no no-replace flag, \
                  so `dir_rename_new` could only look and then rename, the window it exists to close"
+            }
+            Gap::Termios => {
+                "WASI has no termios: a serial port is a host device (`docs/tty.md` §9)"
             }
         }
     }
@@ -128,6 +134,15 @@ pub fn wasi_gap(builtin: Builtin) -> Option<Gap> {
         | B::PollerRemove
         | B::PollerWait => Some(Gap::Polling),
         B::SignalsWatch | B::SignalsPending | B::SignalsClose => Some(Gap::Signals),
+        // `docs/tty.md` §9: no termios under WASI, and no third target is
+        // claimed — a new spike, not a port of the design.
+        B::TtyOpen
+        | B::TtyConfigure
+        | B::TtyRead
+        | B::TtyWrite
+        | B::TtyFlushInput
+        | B::TtyClose
+        | B::PollerAddTty => Some(Gap::Termios),
         B::FileLock => Some(Gap::Locks),
         B::DirMode | B::DirOwnMode => Some(Gap::Permissions),
         B::DirRenameNew => Some(Gap::NoReplaceRename),
@@ -362,7 +377,10 @@ fn expr_gaps(e: &Expr, out: &mut Vec<(Gap, &'static str)>) {
             out.push((Gap::Sockets, "tcp_connect"));
             args.iter().for_each(|a| expr_gaps(a, out));
         }
-        Expr::FileOp { args, .. } | Expr::OpenFile { args, .. } | Expr::PathOp { args, .. } => {
+        Expr::FileOp { args, .. }
+        | Expr::OpenFile { args, .. }
+        | Expr::TtyOpen { args, .. }
+        | Expr::PathOp { args, .. } => {
             args.iter().for_each(|a| expr_gaps(a, out));
         }
         Expr::FnValue(_) => {}

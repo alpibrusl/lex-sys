@@ -286,6 +286,63 @@ one grants nothing the outer does not), as is a literal that does not extend the
 fixed *directory* and a run-time name beneath it (`examples/tls_echo_fixed`). `Ffi` and `Signals` narrow to a *set* in one capability (`narrow(ffi, "libc,libm")`), and more than one
 literal on them, or on `Net`, is refused. [`docs/narrowing-into-several.md`](docs/narrowing-into-several.md) has the rule and its limits.
 
+### 3.5 A serial port is a capability, not a termios escape hatch
+
+Edition 8. A serial device is reached through `Tty`, which narrows by a
+device-path prefix exactly as `Fs` does — the same prefix rule, the same
+`narrow` forms, and the same refusal for an empty literal. The port
+handle is `Port`, a `res` value with one descriptor leaf (`Udp`'s shape),
+and the verbs are `tty_open`, `tty_configure` (raw mode, 8N1, a speed —
+one call, no mode algebra), `tty_read` (never blocks; the poller is the
+waiting story), `tty_write`, `tty_flush_input` and `tty_close`, plus
+`poller_add_tty`:
+
+```cancho
+edition 8;
+
+fn ping[&t, &b](tty: &t Tty("/dev"), bus: &b [byte]) -> [tty_open("/dev"), tty_read, tty_write] int {
+    match tty_open(tty, "/dev/ttyACM0") {
+        TtyOpened::Ok(port) => {
+            var got = 0 - 1;
+            borrow mut port as &!p in {
+                if tty_configure(p, 1000000) == 0 {
+                    region r {
+                        let reply = alloc_slice[r](16, byte_of(0));
+                        tty_write(p, bus);
+                        got = tty_read(p, reply);
+                    }
+                }
+            }
+            tty_close(port);
+            return got;
+        }
+        TtyOpened::Failed(errno) => { return 0 - 1; }
+    }
+}
+
+fn main(world: World) -> [] int {
+    let Split { io, ffi, fs, heap, args, net, clock, signals, exec, tty } = split(world);
+    release(io); release(ffi); release(fs); release(heap); release(args);
+    release(net); release(clock); release(signals); release(exec);
+    region r {
+        let bus = alloc_slice[r](1, byte_of(0));
+        let device = narrow(tty, "/dev");
+        borrow device as &t in { ping(t, bus); }
+        release(device);
+    }
+    return 0;
+}
+```
+
+The termios layout, the octal B-constants and the macOS `IOSSIOSPEED`
+two-step are the backend's, written once in Rust — not nine `extern fn`
+declarations carrying a per-platform ABI in program source, which is
+what the robot's spike measured and the whole reason the capability
+exists ([`docs/tty.md`](docs/tty.md)). The report answers `tty_open("/dev")`
+with the prefix and **no `foreign` line**: a program that moves a robot
+can be `bounded: true`.
+
+
 ---
 
 ## 4. A reference may not outlive its region

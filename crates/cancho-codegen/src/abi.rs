@@ -83,6 +83,9 @@ pub(crate) fn leaves_into(
                     | cancho_ir::PRELUDE_CONN
                     | cancho_ir::PRELUDE_UDP
                     | cancho_ir::PRELUDE_POLLER
+                    // `docs/tty.md` §3, edition 8: the port handle, a
+                    // descriptor and nothing else — `Udp`'s shape.
+                    | cancho_ir::PRELUDE_PORT
                     | cancho_ir::PRELUDE_SIGNAL_WATCH
                     // `docs/processes.md` §3.1: a pid, and two descriptors.
                     | cancho_ir::PRELUDE_CHILD

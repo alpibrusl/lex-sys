@@ -30,7 +30,9 @@ pub(super) fn check_narrowing(
     // plain textual prefix on `"host:port"`, the same way an `egress`
     // entry does, with no boundary character of its own.
     // `docs/processes.md` §4.1: `Exec`'s prefix is a path, with `Fs`'s rule.
-    if (which == PRELUDE_FS || which == PRELUDE_EXEC) && !extends_path(current, target) {
+    if (which == PRELUDE_FS || which == PRELUDE_EXEC || which == PRELUDE_TTY)
+        && !extends_path(current, target)
+    {
         return Err(Diagnostic::new(
             Rule::CapabilityNotNarrowable,
             format!(

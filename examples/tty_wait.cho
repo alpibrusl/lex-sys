@@ -1,0 +1,94 @@
+// tty_wait.cho — #422 T3, `docs/tty.md` §3's waiting story made honest: the
+// port sits on the poller, and the poller — not a `usleep` — is what waits.
+//
+// The robot's loops today sleep a poller with nothing registered in it: ten
+// waits of 50 ms measured 501 ms by `clock_ms`, because the sleep *is* the
+// wait. Registering the port itself is the honest end-state: the wait ends
+// when the servo answers, not when the clock does.
+//
+// The measurement this example carries: ten `poller_wait`s of 50 ms, timed
+// by `clock_ms`. With a port registered this ends when it answers; with none
+// it sleeps the full 500 ms — the two numbers, printed as one line, are the
+// whole difference between waiting and sleeping.
+edition 8;
+
+import std.io;
+import std.buffer;
+
+fn main(world: World) -> [] int {
+    let Split { io, ffi, fs, heap, args, net, clock, signals, exec, tty } = split(world);
+    release(ffi); release(fs); release(args); release(net);
+    release(signals); release(exec);
+
+    // Open the port if it is there, and register it on the poller. A
+    // missing device is a normal event for a tool, not a crash: the loop
+    // below still runs, and times out every wait — which is the baseline
+    // the robot's research log measured.
+    let device = narrow(tty, "/dev");
+    match poller_new() {
+        Polling::Failed(e) => {
+            release(device);
+            release(clock);
+            release(io);
+            release(heap);
+            return 1;
+        }
+        Polling::Ok(open) => {
+            var p = open;
+            var registered = 0;
+            borrow device as &t in {
+                match tty_open(t, "/dev/ttyACM0") {
+                    TtyOpened::Ok(port) => {
+                        borrow mut port as &!q in {
+                            if tty_configure(q, 1000000) == 0 {
+                                borrow mut p as &!pw in {
+                                    // Readable, token 1.
+                                    poller_add_tty(pw, q, 1, 1);
+                                    registered = 1;
+                                }
+                            }
+                        }
+                        tty_close(port);
+                    }
+                    TtyOpened::Failed(errno) => {
+                    }
+                }
+            }
+            release(device);
+
+            // The measurement: ten waits of 50 ms, timed. With the port
+            // registered a servo's answer ends one early; with nothing
+            // registered the sleep is the wait — the 501 ms baseline.
+            var started = 0;
+            borrow clock as &c in { started = clock_ms(c); }
+            borrow mut p as &!pw in {
+                var n = 0;
+                while n < 10 {
+                    region r {
+                        let events = alloc_slice[r](2, 0);
+                        poller_wait(pw, events, 50);
+                    }
+                    n = n + 1;
+                }
+            }
+            var took = 0;
+            borrow clock as &c2 in { took = clock_ms(c2) - started; }
+
+            borrow mut io as &!i in {
+                borrow mut heap as &!h in {
+                    var line = buffer.empty(h, 32);
+                    line = buffer.append(h, line, "ten 50ms waits took ms: ");
+                    line = buffer.push_nat(h, line, took);
+                    line = buffer.push(h, line, byte_of(10));
+                    borrow line as &lb in { io.write_all(i, buffer.bytes(lb)); }
+                    buffer.drop(h, line);
+                }
+            }
+            release(io);
+            release(clock);
+            release(heap);
+            poller_close(p);
+            return 0;
+        }
+    }
+}

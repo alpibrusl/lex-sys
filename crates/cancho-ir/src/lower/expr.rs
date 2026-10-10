@@ -838,6 +838,9 @@ impl<'a> FnLowering<'a> {
                 if resolved == Resolved::Builtin(Builtin::UdpBind) {
                     return self.tcp_listen(args, span, true);
                 }
+                if resolved == Resolved::Builtin(Builtin::TtyOpen) {
+                    return self.tty_open(args, span);
+                }
                 if resolved == Resolved::Builtin(Builtin::SignalsWatch) {
                     return self.signals_watch(args, span);
                 }

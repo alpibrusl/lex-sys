@@ -153,7 +153,7 @@ fn only_wasi_refuses_anything_and_what_it_refuses_is_a_gap() {
     }
     assert_eq!(
         Builtin::ALL.iter().filter(|b| wasi_gap(**b).is_some()).count(),
-        62,
+        69,
         "the refused set moved: update docs/wasm.md with it"
     );
 }

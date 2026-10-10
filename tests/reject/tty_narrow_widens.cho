@@ -1,0 +1,24 @@
+//~ ERROR `/dev/serial` cannot be narrowed to `/dev/ttyACM0`: a capability is attenuated, never widened, and a program must not be able to grant itself what it was not given
+//~ RULE capability-not-narrowable
+// `docs/tty.md` §4: the serial-port capability narrows by a device-path
+// prefix exactly as `Fs` does, and every refusal `Fs`'s narrowing earns,
+// `Tty`'s earns for the same reason. This one is the root: an unnarrowed
+// `Tty("")` from `split` may narrow to any prefix — the refusal this
+// fixture pins is the *widening* one, where the literal does not extend
+// the capability's own path. (Widening here is written against a
+// pre-narrowed capability, the same shape `fs_narrowing_widens.cho`
+// has for `Fs`.)
+edition 8;
+
+fn main(world: World) -> [] int {
+    let Split { io, ffi, fs, heap, args, net, clock, signals, exec, tty } = split(world);
+    release(io); release(ffi); release(fs); release(heap); release(args);
+    release(net); release(clock); release(signals); release(exec);
+    let serial = narrow(tty, "/dev/serial");
+    // `/dev/ttyACM0` does not extend `/dev/serial` at a separator: it
+    // is a sibling, not a child.
+    let device = narrow(serial, "/dev/ttyACM0");
+    release(serial);
+    release(device);
+    return 0;
+}

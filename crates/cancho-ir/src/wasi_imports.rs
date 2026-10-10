@@ -183,6 +183,11 @@ pub const REFUSED_LABELS: &[&str] = &[
     "pipe_write",
     "net_out",
     "net_in",
+    // `docs/tty.md` §9: WASI has no termios, so every tty label is
+    // refused — a serial port is a host device.
+    "tty_open",
+    "tty_read",
+    "tty_write",
 ];
 
 /// A label whose imports cannot be bounded: a foreign function names a C symbol,

@@ -797,6 +797,15 @@ pub const PRELUDE: &[&str] = &[
     "UdpOpened",
     "Datagram",
     "Truncated",
+    // `docs/tty.md` §3, edition 8: the serial-port capability, the
+    // handle it opens, and what `tty_open` answers. Appended in the same
+    // order `cancho-ir`'s prelude declares them.
+    "Tty",
+    "Port",
+    "TtyOpened",
+    // The `Split` field that carries it, lowercase as `signals`'s and
+    // `exec`'s are.
+    "tty",
 ];
 
 impl Ast {
